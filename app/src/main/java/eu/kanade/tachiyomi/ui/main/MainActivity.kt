@@ -100,6 +100,7 @@ import eu.kanade.tachiyomi.ui.setting.controllers.SettingsMainController
 import eu.kanade.tachiyomi.ui.source.BrowseController
 import eu.kanade.tachiyomi.ui.source.browse.BrowseSourceController
 import eu.kanade.tachiyomi.ui.source.globalsearch.GlobalSearchController
+import eu.kanade.tachiyomi.ui.search.UnifiedSearchController
 import eu.kanade.tachiyomi.util.manga.MangaCoverMetadata
 import eu.kanade.tachiyomi.util.manga.MangaShortcutManager
 import eu.kanade.tachiyomi.util.showNotificationPermissionPrompt
@@ -435,7 +436,7 @@ open class MainActivity : BaseActivity<MainActivityBinding>() {
                     }
                 }
                 BasePreferences.LongTapBrowse.SEARCH ->
-                    router.pushController(GlobalSearchController().withFadeTransaction())
+                    router.pushController(UnifiedSearchController().withFadeTransaction())
             }
             true
         }
@@ -518,6 +519,7 @@ open class MainActivity : BaseActivity<MainActivityBinding>() {
                 when (router.backstack.firstOrNull()?.controller) {
                     is RecentsController -> R.id.nav_recents
                     is BrowseController -> R.id.nav_browse
+                    is eu.kanade.tachiyomi.ui.suggestions.SuggestionsController -> R.id.nav_suggestions
                     else -> R.id.nav_library
                 }
         }
@@ -536,6 +538,10 @@ open class MainActivity : BaseActivity<MainActivityBinding>() {
             }
             continueSwitchingTabs = false
             val currentRoot = router.backstack.firstOrNull()
+            if (id == R.id.nav_suggestions) {
+                setRoot(eu.kanade.tachiyomi.ui.suggestions.SuggestionsController(), id)
+                return@setOnItemSelectedListener true
+            }
             if (currentRoot?.tag()?.toIntOrNull() != id) {
                 setRoot(
                     when (id) {

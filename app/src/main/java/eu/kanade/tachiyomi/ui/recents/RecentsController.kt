@@ -23,6 +23,7 @@ import androidx.core.view.updatePadding
 import androidx.core.view.updatePaddingRelative
 import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import androidx.transition.TransitionSet
 import com.bluelinelabs.conductor.ControllerChangeHandler
@@ -92,7 +93,7 @@ import eu.kanade.tachiyomi.util.view.smoothScrollToTop
 import eu.kanade.tachiyomi.util.view.snack
 import eu.kanade.tachiyomi.util.view.updateGradiantBGRadius
 import eu.kanade.tachiyomi.util.view.withFadeTransaction
-import eu.kanade.tachiyomi.widget.LinearLayoutManagerAccurateOffset
+import eu.kanade.tachiyomi.widget.GridLayoutManager
 import java.util.Locale
 import kotlin.math.max
 import kotlinx.coroutines.launch
@@ -176,7 +177,18 @@ class RecentsController(bundle: Bundle? = null) :
         adapter = RecentMangaAdapter(this)
         adapter.setPreferenceFlows()
         binding.recycler.adapter = adapter
-        binding.recycler.layoutManager = LinearLayoutManagerAccurateOffset(view.context)
+        binding.recycler.layoutManager = GridLayoutManager(view.context, 1).apply {
+            spanSizeLookup = object : GridLayoutManager.SpanSizeLookup() {
+                override fun getSpanSize(position: Int): Int {
+                    val item = adapter.getItem(position)
+                    return if (item is RecentMangaHeaderItem || (item as? RecentMangaItem)?.mch?.manga?.id == null) {
+                        spanCount
+                    } else {
+                        1
+                    }
+                }
+            }
+        }
         binding.recycler.setHasFixedSize(true)
         binding.recycler.recycledViewPool.setMaxRecycledViews(0, 0)
         binding.recycler.addItemDecoration(RecentMangaDivider(view.context))
@@ -621,7 +633,7 @@ class RecentsController(bundle: Bundle? = null) :
             if (isSearchExpanded) {
                 moveRecyclerViewUp(scrollUpAnyway = true)
             } else {
-                (binding.recycler.layoutManager as? LinearLayoutManager)
+                ((binding.recycler.layoutManager as? LinearLayoutManager) ?: (binding.recycler.layoutManager as? GridLayoutManager))
                     ?.scrollToPositionWithOffset(0, 0)
             }
         }

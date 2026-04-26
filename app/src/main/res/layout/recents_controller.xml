@@ -24,13 +24,14 @@
             android:layout_height="match_parent"
             android:background="?attr/background">
 
-            <androidx.recyclerview.widget.RecyclerView
+            <eu.kanade.tachiyomi.widget.AutofitRecyclerView
+                android:columnWidth="140dp"
                 android:id="@+id/recycler"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
                 android:clipToPadding="false"
                 android:background="?attr/background"
-                tools:listitem="@layout/recent_manga_item" />
+                tools:listitem="@layout/manga_grid_item" />
 
         </FrameLayout>
     </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
