@@ -21,6 +21,7 @@ import eu.kanade.tachiyomi.ui.setting.SettingsLegacyController
 import eu.kanade.tachiyomi.ui.setting.controllers.SettingsReaderController
 import eu.kanade.tachiyomi.ui.source.browse.BrowseSourceController
 import eu.kanade.tachiyomi.ui.source.globalsearch.GlobalSearchController
+import eu.kanade.tachiyomi.ui.search.UnifiedSearchController
 import eu.kanade.tachiyomi.util.chapter.ChapterSort
 import eu.kanade.tachiyomi.util.system.extensionIntentForText
 import eu.kanade.tachiyomi.util.view.withFadeTransaction
@@ -135,7 +136,7 @@ class SearchActivity : MainActivity() {
                         finish()
                         return true
                     }
-                    router.replaceTopController(GlobalSearchController(query).withFadeTransaction())
+                    router.replaceTopController(UnifiedSearchController(query).withFadeTransaction())
                 } else {
                     finish()
                 }
@@ -147,7 +148,7 @@ class SearchActivity : MainActivity() {
                     if (router.backstackSize > 1) {
                         router.popToRoot()
                     }
-                    router.replaceTopController(GlobalSearchController(query, filter).withFadeTransaction())
+                    router.replaceTopController(UnifiedSearchController(query).withFadeTransaction())
                 }
             }
             Constants.SHORTCUT_MANGA, Constants.SHORTCUT_MANGA_BACK -> {

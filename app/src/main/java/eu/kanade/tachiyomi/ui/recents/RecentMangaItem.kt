@@ -30,7 +30,7 @@ class RecentMangaItem(
         return if (mch.manga.id == null) {
             R.layout.recents_footer_item
         } else {
-            R.layout.recent_manga_item
+            R.layout.manga_grid_item
         }
     }
 
