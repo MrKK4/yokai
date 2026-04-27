@@ -93,7 +93,6 @@ import eu.kanade.tachiyomi.util.view.smoothScrollToTop
 import eu.kanade.tachiyomi.util.view.snack
 import eu.kanade.tachiyomi.util.view.updateGradiantBGRadius
 import eu.kanade.tachiyomi.util.view.withFadeTransaction
-import eu.kanade.tachiyomi.widget.GridLayoutManager
 import java.util.Locale
 import kotlin.math.max
 import kotlinx.coroutines.launch
@@ -177,15 +176,14 @@ class RecentsController(bundle: Bundle? = null) :
         adapter = RecentMangaAdapter(this)
         adapter.setPreferenceFlows()
         binding.recycler.adapter = adapter
-        binding.recycler.layoutManager = GridLayoutManager(view.context, 1).apply {
-            spanSizeLookup = object : GridLayoutManager.SpanSizeLookup() {
-                override fun getSpanSize(position: Int): Int {
-                    val item = adapter.getItem(position)
-                    return if (item is RecentMangaHeaderItem || (item as? RecentMangaItem)?.mch?.manga?.id == null) {
-                        spanCount
-                    } else {
-                        1
-                    }
+        binding.recycler.setGridSize(adapter.preferences)
+        (binding.recycler.layoutManager as GridLayoutManager).spanSizeLookup = object : GridLayoutManager.SpanSizeLookup() {
+            override fun getSpanSize(position: Int): Int {
+                val item = adapter.getItem(position)
+                return if (item is RecentMangaHeaderItem || (item as? RecentMangaItem)?.mch?.manga?.id == null) {
+                    (binding.recycler.layoutManager as GridLayoutManager).spanCount
+                } else {
+                    1
                 }
             }
         }
@@ -633,8 +631,7 @@ class RecentsController(bundle: Bundle? = null) :
             if (isSearchExpanded) {
                 moveRecyclerViewUp(scrollUpAnyway = true)
             } else {
-                ((binding.recycler.layoutManager as? LinearLayoutManager) ?: (binding.recycler.layoutManager as? GridLayoutManager))
-                    ?.scrollToPositionWithOffset(0, 0)
+                binding.recycler.scrollToPositionWithOffset(0, 0)
             }
         }
         if (lastChapterId != null) {
@@ -647,18 +644,7 @@ class RecentsController(bundle: Bundle? = null) :
         if (view == null || !this::adapter.isInitialized) return
         val id = download.chapter.id ?: return
         val item = adapter.getItemByChapterId(id) ?: return
-        val holder = binding.recycler.findViewHolderForItemId(item.id!!) as? RecentMangaHolder ?: return
-        if (item.id == id) {
-            holder.notifyStatus(download.status, download.progress, download.chapter.read, true)
-        } else {
-            holder.notifySubStatus(
-                download.chapter,
-                download.status,
-                download.progress,
-                download.chapter.read,
-                true,
-            )
-        }
+        adapter.notifyItemChanged(adapter.getGlobalPositionOf(item))
     }
 
     fun updateDownloadStatus(isRunning: Boolean) {
@@ -849,16 +835,13 @@ class RecentsController(bundle: Bundle? = null) :
     override fun markAsRead(position: Int) {
         val preferences = presenter.preferences
         val item = adapter.getItem(position) as? RecentMangaItem ?: return
-        val holder = binding.recycler.findViewHolderForAdapterPosition(position)
-        val holderId = (holder as? RecentMangaHolder)?.chapterId
         adapter.notifyItemChanged(position)
         val transition = TransitionSet().addTransition(androidx.transition.Fade())
         transition.duration = view!!.resources.getInteger(AR.integer.config_shortAnimTime)
             .toLong()
         androidx.transition.TransitionManager.beginDelayedTransition(binding.recycler, transition)
-        if (holderId == -1L) return
-        val chapter = holderId?.let { item.mch.extraChapters.find { holderId == it.id } }
-            ?: item.chapter
+        
+        val chapter = item.chapter
         val manga = item.mch.manga
         val lastRead = chapter.last_page_read
         val pagesLeft = chapter.pages_left

@@ -7,6 +7,8 @@ import eu.kanade.tachiyomi.source.CatalogueSource
 import eu.kanade.tachiyomi.source.SourceManager
 import eu.kanade.tachiyomi.ui.base.presenter.BaseCoroutinePresenter
 import eu.kanade.tachiyomi.util.system.launchIO
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -44,43 +46,62 @@ class UnifiedSearchPresenter(
         _state.value = UnifiedSearchState(isLoading = true)
         
         presenterScope.launchIO {
-            // 1. Library Results
-            val allLibraryManga = mangaRepository.getLibraryManga()
-            val libraryMatches = allLibraryManga.map { it.manga }.filter { 
-                it.title.contains(searchQuery, ignoreCase = true) 
-            }.take(10) // Limit to top 10
-
-            _state.value = _state.value.copy(libraryResults = libraryMatches)
-            
-            // 2. History Results
-            val historyMatches = historyRepository.getRecentsUngrouped(false, searchQuery).map {
-                it.manga
-            }.take(10)
-            
-            _state.value = _state.value.copy(historyResults = historyMatches)
-
-            // 3. Remote Sources (Pinned only for performance/spam reduction)
-            val pinnedCatalogues = preferences.pinnedCatalogues().get()
-            val sourcesToSearch = sourceManager.getCatalogueSources().filter { it.id.toString() in pinnedCatalogues }
-            
-            val remoteResults = mutableMapOf<CatalogueSource, List<Manga>>()
-            
-            for (source in sourcesToSearch) {
-                try {
-                    // Try to fetch 1 page of results
-                    val page = source.fetchSearchManga(1, searchQuery, source.getFilterList()).toBlocking().first()
-                    remoteResults[source] = page.mangas.map { sManga ->
-                        val m = Manga.create(sManga.url, sManga.title, source.id)
-                        m.thumbnail_url = sManga.thumbnail_url
-                        m
-                    }
-                    _state.value = _state.value.copy(sourceResults = remoteResults)
-                } catch (e: Exception) {
-                    // Ignore errors for individual sources
+            coroutineScope {
+                // 1. Library Results
+                val libraryJob = async {
+                    val allLibraryManga = mangaRepository.getLibraryManga()
+                    allLibraryManga.map { it.manga }.filter { 
+                        it.title.contains(searchQuery, ignoreCase = true) 
+                    }.take(10) // Limit to top 10
                 }
+
+                // 2. History Results
+                val historyJob = async {
+                    historyRepository.getRecentsUngrouped(false, searchQuery).map {
+                        it.manga
+                    }.take(10)
+                }
+
+                // 3. Remote Sources (Pinned only for performance/spam reduction)
+                val sourceJob = async {
+                    val pinnedCatalogues = preferences.pinnedCatalogues().get()
+                    val sourcesToSearch = sourceManager.getCatalogueSources().filter { it.id.toString() in pinnedCatalogues }       
+
+                    val remoteResults = mutableMapOf<CatalogueSource, List<Manga>>()
+
+                    val deferreds = sourcesToSearch.map { source ->
+                        async {
+                            try {
+                                val page = source.fetchSearchManga(1, searchQuery, source.getFilterList()).toBlocking().first()
+                                val mapped = page.mangas.map { sManga ->
+                                    val m = Manga.create(sManga.url, sManga.title, source.id)
+                                    m.thumbnail_url = sManga.thumbnail_url
+                                    m
+                                }
+                                source to mapped
+                            } catch (e: Exception) {
+                                null
+                            }
+                        }
+                    }
+                    deferreds.forEach { deferred ->
+                        deferred.await()?.let { (source, mapped) ->
+                            remoteResults[source] = mapped
+                            _state.value = _state.value.copy(sourceResults = remoteResults)
+                        }
+                    }
+                    remoteResults
+                }
+
+                val libraryMatches = libraryJob.await()
+                _state.value = _state.value.copy(libraryResults = libraryMatches)
+
+                val historyMatches = historyJob.await()
+                _state.value = _state.value.copy(historyResults = historyMatches)
+
+                val remoteResults = sourceJob.await()
+                _state.value = _state.value.copy(sourceResults = remoteResults, isLoading = false)
             }
-            
-            _state.value = _state.value.copy(isLoading = false)
         }
     }
 }

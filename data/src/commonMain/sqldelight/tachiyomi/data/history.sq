@@ -3,6 +3,8 @@ CREATE TABLE history(
     history_chapter_id INTEGER NOT NULL UNIQUE,
     history_last_read INTEGER,
     history_time_read INTEGER,
+    interaction_type TEXT NOT NULL DEFAULT 'SAMPLED',
+    read_ratio REAL NOT NULL DEFAULT 0.0,
     FOREIGN KEY(history_chapter_id) REFERENCES chapters (_id)
     ON DELETE CASCADE
 );
@@ -27,6 +29,12 @@ DELETE FROM history;
 
 deleteAllUnread:
 DELETE FROM history WHERE history_last_read = 0;
+
+getAllWithMangaId:
+SELECT history.*, chapters.manga_id
+FROM history
+JOIN chapters
+ON history.history_chapter_id = chapters._id;
 
 getByMangaId:
 SELECT history.*
@@ -116,7 +124,9 @@ SELECT  -- Recently read manga
     history.history_id AS history_id,
     history.history_chapter_id AS history_chapter_id,
     history.history_last_read AS history_last_read,
-    history.history_time_read AS history_time_read
+    history.history_time_read AS history_time_read,
+    history.interaction_type AS interaction_type,
+    history.read_ratio AS read_ratio
 FROM (  -- Check if there's any unread chapters and whether to include read chapters
     SELECT M2.*
     FROM mangas AS M2
@@ -165,7 +175,9 @@ SELECT
     NULL AS history_id,
     NULL AS history_chapter_id,
     C.date_fetch AS history_last_read,
-    NULL AS history_time_read
+    NULL AS history_time_read,
+    NULL AS interaction_type,
+    NULL AS read_ratio
 FROM mangas AS M
 JOIN chapters AS C
 ON M._id = C.manga_id
@@ -199,7 +211,9 @@ SELECT
     NULL AS history_id,
     NULL AS history_chapter_id,
     M.date_added AS history_last_read,
-    NULL AS history_time_read
+    NULL AS history_time_read,
+    NULL AS interaction_type,
+    NULL AS read_ratio
 FROM mangas AS M
 JOIN (
     SELECT

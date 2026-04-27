@@ -48,6 +48,9 @@ import yokai.domain.source.browse.filter.SavedSearchRepository
 import yokai.domain.source.browse.filter.interactor.DeleteSavedSearch
 import yokai.domain.source.browse.filter.interactor.GetSavedSearch
 import yokai.domain.source.browse.filter.interactor.InsertSavedSearch
+import yokai.domain.suggestions.FeedAggregator
+import yokai.domain.suggestions.GetUserAffinityTagsUseCase
+import yokai.domain.suggestions.GetUserSuggestionQueriesUseCase
 import yokai.domain.track.TrackRepository
 import yokai.domain.track.interactor.DeleteTrack
 import yokai.domain.track.interactor.GetTrack
@@ -55,6 +58,9 @@ import yokai.domain.track.interactor.InsertTrack
 
 fun domainModule() = module {
     factory { TrustExtension(get(), get()) }
+    factory { GetUserAffinityTagsUseCase(get(), get(), get()) }
+    factory { GetUserSuggestionQueriesUseCase(get(), get()) }
+    factory { FeedAggregator(get(), get(), get()) }
 
     single<CategoryRepository> { CategoryRepositoryImpl(get()) }
     factory { DeleteCategories(get()) }

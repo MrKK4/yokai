@@ -59,6 +59,8 @@ data class MangaChapterHistory(val manga: Manga, val chapter: Chapter, val histo
             historyChapterId: Long?,
             historyLastRead: Long?,
             historyTimeRead: Long?,
+            interactionType: String?,
+            readRatio: Double?,
         ): MangaChapterHistory {
             val manga = Manga.mapper(
                 id = mangaId,
@@ -109,12 +111,16 @@ data class MangaChapterHistory(val manga: Manga, val chapter: Chapter, val histo
                     chapterId = historyChapterId!!,
                     lastRead = historyLastRead,
                     timeRead = historyTimeRead,
+                    interactionType = interactionType ?: "SAMPLED",
+                    readRatio = readRatio ?: 0.0,
                 )
             } catch (_: NullPointerException) {
                 HistoryImpl().apply {
                     historyChapterId?.let { chapter_id = it }
                     historyLastRead?.let { last_read = it }
                     historyTimeRead?.let { time_read = it }
+                    interactionType?.let { interaction_type = it }
+                    readRatio?.let { read_ratio = it }
                 }
             }
 

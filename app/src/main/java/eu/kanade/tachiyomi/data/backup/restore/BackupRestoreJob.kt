@@ -15,19 +15,24 @@ import co.touchlab.kermit.Logger
 import eu.kanade.tachiyomi.data.backup.BackupConst
 import eu.kanade.tachiyomi.data.backup.BackupNotifier
 import eu.kanade.tachiyomi.data.notification.Notifications
+import eu.kanade.tachiyomi.data.suggestions.SuggestionsWorker
 import eu.kanade.tachiyomi.util.system.jobIsRunning
 import eu.kanade.tachiyomi.util.system.localeContext
 import eu.kanade.tachiyomi.util.system.tryToSetForeground
 import eu.kanade.tachiyomi.util.system.withIOContext
 import eu.kanade.tachiyomi.util.system.workManager
 import kotlinx.coroutines.CancellationException
+import uy.kohesive.injekt.Injekt
+import uy.kohesive.injekt.api.get
 import yokai.i18n.MR
+import yokai.domain.suggestions.SuggestionsRepository
 import yokai.util.lang.getString
 
 class BackupRestoreJob(val context: Context, workerParams: WorkerParameters) : CoroutineWorker(context, workerParams) {
 
     private val notifier = BackupNotifier(context.localeContext)
     private val restorer = BackupRestorer(context, notifier)
+    private val suggestionsRepository: SuggestionsRepository = Injekt.get()
 
     override suspend fun getForegroundInfo(): ForegroundInfo {
         return ForegroundInfo(
@@ -50,6 +55,7 @@ class BackupRestoreJob(val context: Context, workerParams: WorkerParameters) : C
         return withIOContext {
             try {
                 restorer.restore(uri)
+                refreshSuggestionsAfterRestore()
                 Result.success()
             } catch (e: Exception) {
                 if (e is CancellationException) {
@@ -62,6 +68,15 @@ class BackupRestoreJob(val context: Context, workerParams: WorkerParameters) : C
                     Result.failure()
                 }
             }
+        }
+    }
+
+    private suspend fun refreshSuggestionsAfterRestore() {
+        runCatching {
+            suggestionsRepository.deleteAll()
+            SuggestionsWorker.runNow(context)
+        }.onFailure { error ->
+            Logger.e(error) { "Failed to refresh suggestions after restore" }
         }
     }
 

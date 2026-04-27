@@ -27,6 +27,10 @@ interface History : Serializable {
      */
     var time_read: Long
 
+    var interaction_type: String
+
+    var read_ratio: Double
+
     companion object {
 
         /**
@@ -46,11 +50,15 @@ interface History : Serializable {
             chapterId: Long,
             lastRead: Long?,
             timeRead: Long?,
+            interactionType: String,
+            readRatio: Double,
         ): History = HistoryImpl().apply {
             this.id = id
             this.chapter_id = chapterId
             lastRead?.let { this.last_read = it }
             timeRead?.let { this.time_read = it }
+            this.interaction_type = interactionType
+            this.read_ratio = readRatio
         }
     }
 }

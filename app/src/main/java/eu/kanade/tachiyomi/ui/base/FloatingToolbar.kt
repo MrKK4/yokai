@@ -51,7 +51,7 @@ class FloatingToolbar @JvmOverloads constructor(context: Context, attrs: Attribu
         }
     }
 
-    val searchView: SearchView?
+    override val searchView: SearchView?
         get() {
             return searchItem?.actionView as? SearchView
         }

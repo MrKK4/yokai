@@ -10,6 +10,8 @@ import com.google.android.material.appbar.MaterialToolbar
 import eu.kanade.tachiyomi.R
 import eu.kanade.tachiyomi.ui.main.FloatingSearchInterface
 import eu.kanade.tachiyomi.ui.main.SearchActivity
+import eu.kanade.tachiyomi.ui.search.UnifiedSearchController
+import eu.kanade.tachiyomi.util.view.withFadeTransaction
 
 open class BaseToolbar @JvmOverloads constructor(context: Context, attrs: AttributeSet? = null) :
     MaterialToolbar(context, attrs) {
@@ -25,6 +27,24 @@ open class BaseToolbar @JvmOverloads constructor(context: Context, attrs: Attrib
     lateinit var toolbarTitle: TextView
         protected set
     private val defStyleRes = com.google.android.material.R.style.Widget_Material3_Toolbar
+
+    open val searchView: androidx.appcompat.widget.SearchView?
+        get() = menu.findItem(R.id.action_search)?.actionView as? androidx.appcompat.widget.SearchView
+
+    fun bindUnifiedSearch(router: Router, triggerCondition: () -> Boolean) {
+        val view = searchView ?: return
+        view.setOnQueryTextListener(object : androidx.appcompat.widget.SearchView.OnQueryTextListener {
+            override fun onQueryTextSubmit(query: String?): Boolean {
+                if (triggerCondition() && !query.isNullOrBlank()) {
+                    router.pushController(UnifiedSearchController(query).withFadeTransaction())
+                    view.clearFocus()
+                    return true
+                }
+                return false
+            }
+            override fun onQueryTextChange(newText: String?): Boolean = true
+        })
+    }
 
     protected val titleTextAppearance: Int
 

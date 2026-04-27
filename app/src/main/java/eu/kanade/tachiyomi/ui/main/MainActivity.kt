@@ -631,6 +631,10 @@ open class MainActivity : BaseActivity<MainActivityBinding>() {
             binding.searchToolbar.menu.findItem(R.id.action_search)?.expandActionView()
         }
 
+        binding.searchToolbar.bindUnifiedSearch(router) {
+            router.backstackSize == 1
+        }
+
         binding.searchToolbar.setOnMenuItemClickListener {
             if (router.backstack.lastOrNull()?.controller?.onOptionsItemSelected(it) == true) {
                 return@setOnMenuItemClickListener true

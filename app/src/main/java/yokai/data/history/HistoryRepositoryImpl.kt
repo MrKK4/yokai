@@ -5,6 +5,7 @@ import eu.kanade.tachiyomi.data.database.models.MangaChapterHistory
 import eu.kanade.tachiyomi.util.system.toInt
 import yokai.data.DatabaseHandler
 import yokai.domain.history.HistoryRepository
+import yokai.domain.history.HistoryWithMangaId
 
 class HistoryRepositoryImpl(private val handler: DatabaseHandler) : HistoryRepository {
     override suspend fun upsert(chapterId: Long, lastRead: Long, timeRead: Long) =
@@ -20,6 +21,23 @@ class HistoryRepositoryImpl(private val handler: DatabaseHandler) : HistoryRepos
                     history.chapter_id,
                     history.last_read,
                     history.time_read,
+                )
+            }
+        }
+
+    override suspend fun getAll(): List<HistoryWithMangaId> =
+        handler.awaitList {
+            historyQueries.getAllWithMangaId { id, chapterId, lastRead, timeRead, interactionType, readRatio, mangaId ->
+                HistoryWithMangaId(
+                    mangaId = mangaId,
+                    history = History.mapper(
+                        id = id,
+                        chapterId = chapterId,
+                        lastRead = lastRead,
+                        timeRead = timeRead,
+                        interactionType = interactionType,
+                        readRatio = readRatio,
+                    ),
                 )
             }
         }

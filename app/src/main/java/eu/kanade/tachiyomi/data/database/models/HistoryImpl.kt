@@ -24,4 +24,8 @@ class HistoryImpl : History {
      * Total time chapter was read
      */
     override var time_read: Long = 0
+
+    override var interaction_type: String = "SAMPLED"
+
+    override var read_ratio: Double = 0.0
 }

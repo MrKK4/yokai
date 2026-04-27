@@ -50,6 +50,8 @@ object MangaCoverMetadata {
     }
 
     fun setRatioAndColors(mangaId: Long?, mangaThumbnailUrl: String?, isInLibrary: Boolean, ogFile: UniFile? = null, force: Boolean = false) {
+        mangaId ?: return
+
         if (!isInLibrary) {
             remove(mangaId)
         }
@@ -120,11 +122,13 @@ object MangaCoverMetadata {
     fun getColors(manga: Manga): Pair<Int, Int>? = getColors(manga.id)
 
     fun getColors(mangaId: Long?): Pair<Int, Int>? {
+        mangaId ?: return null
         return coverColorMap[mangaId]
     }
 
     fun getRatio(manga: Manga): Float? {
-        return coverRatioMap[manga.id]
+        val mangaId = manga.id ?: return null
+        return coverRatioMap[mangaId]
     }
 
     fun setVibrantColor(mangaId: Long?, @ColorInt color: Int?) {
@@ -139,6 +143,7 @@ object MangaCoverMetadata {
     }
 
     fun getVibrantColor(mangaId: Long?): Int? {
+        mangaId ?: return null
         return vibrantCoverColorMap[mangaId]
     }
 

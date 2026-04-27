@@ -1,6 +1,7 @@
 package yokai.core.di
 
 import android.app.Application
+import android.content.Context
 import androidx.core.content.ContextCompat
 import androidx.sqlite.db.SupportSQLiteDatabase
 import app.cash.sqldelight.db.SqlDriver
@@ -35,11 +36,16 @@ import uy.kohesive.injekt.api.get
 import yokai.data.AndroidDatabaseHandler
 import yokai.data.Database
 import yokai.data.DatabaseHandler
+import yokai.data.suggestions.SuggestionsRepositoryImpl
 import yokai.domain.SplashState
 import yokai.domain.storage.StorageManager
+import yokai.domain.suggestions.SuggestionsRepository
 
 fun appModule(app: Application) = module {
     single { app }
+    single<Context> { app }
+
+    single<SuggestionsRepository> { SuggestionsRepositoryImpl(get()) }
 
     single<SqlDriver> {
         AndroidSqliteDriver(
