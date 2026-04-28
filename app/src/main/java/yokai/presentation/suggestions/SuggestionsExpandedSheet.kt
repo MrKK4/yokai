@@ -123,7 +123,8 @@ fun SuggestionsExpandedSheet(
                             .fillMaxWidth()
                             .heightIn(max = 600.dp),
                         contentPadding = PaddingValues(
-                            horizontal = 16.dp,
+                            start = 16.dp,
+                            end = 16.dp,
                             bottom = 24.dp,
                         ),
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
