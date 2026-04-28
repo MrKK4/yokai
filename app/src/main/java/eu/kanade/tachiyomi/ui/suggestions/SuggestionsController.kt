@@ -114,6 +114,8 @@ class SuggestionsController(
         if (type.isEnter) {
             syncAppBarMode()
             updateSwipeRefreshOffset()
+            // Restore the expanded sheet if we're returning from MangaDetailsController
+            presenter.restoreExpandSheet()
         }
     }
 
@@ -300,11 +302,16 @@ class SuggestionsController(
     }
 
     private fun openManga(manga: Manga) {
+        // Suppress (hide) the expanded sheet before navigating so its BackHandler
+        // doesn't intercept the system back-press while MangaDetailsController is on screen.
+        presenter.suppressExpandSheet()
         viewScope.launchIO {
             val localManga = presenter.getOrCreateLocalManga(manga)
             withUIContext {
                 if (localManga?.id == null) {
                     activity?.toast("Unable to open suggestion")
+                    // Navigation failed — restore the sheet
+                    presenter.restoreExpandSheet()
                     return@withUIContext
                 }
                 router.pushController(MangaDetailsController(localManga, true).withFadeTransaction())

@@ -32,7 +32,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -59,7 +58,7 @@ fun SuggestionsScreen(
     onExpandSection: (String) -> Unit,
 ) {
     val state by presenter.state.collectAsState()
-    val gridState = rememberSaveable(saver = LazyGridState.Saver) {
+    val gridState = remember {
         LazyGridState(
             firstVisibleItemIndex = presenter.gridFirstVisibleItemIndex,
             firstVisibleItemScrollOffset = presenter.gridFirstVisibleItemScrollOffset,
@@ -161,7 +160,7 @@ fun SuggestionsScreen(
             }
 
             val sheetReason = state.sheetReason
-            if (sheetReason != null) {
+            if (sheetReason != null && !state.sheetSuppressed) {
                 SuggestionsExpandedSheet(
                     reason = sheetReason,
                     results = state.sheetResults,

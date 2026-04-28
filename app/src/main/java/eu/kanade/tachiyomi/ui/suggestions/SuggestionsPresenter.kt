@@ -45,6 +45,7 @@ data class SuggestionsState(
     val sheetResults: List<Manga> = emptyList(),
     val sheetIsLoading: Boolean = false,
     val sheetError: String? = null,
+    val sheetSuppressed: Boolean = false,
 )
 
 class SuggestionsPresenter(
@@ -144,6 +145,7 @@ class SuggestionsPresenter(
             sheetResults = emptyList(),
             sheetIsLoading = false,
             sheetError = null,
+            sheetSuppressed = false,
         )}
         updateLoadingState()
 
@@ -317,7 +319,27 @@ class SuggestionsPresenter(
             sheetResults = emptyList(),
             sheetIsLoading = false,
             sheetError = null,
+            sheetSuppressed = false,
         )}
+    }
+
+    /**
+     * Hides the sheet from the Compose tree without clearing its data.
+     * Called when navigating forward to MangaDetailsController so the sheet's
+     * internal BackHandler doesn't intercept the return back-press.
+     */
+    fun suppressExpandSheet() {
+        if (_state.value.sheetReason == null) return
+        _state.update { it.copy(sheetSuppressed = true) }
+    }
+
+    /**
+     * Makes the sheet visible again. Called when SuggestionsController re-enters
+     * the foreground (onChangeStarted isEnter).
+     */
+    fun restoreExpandSheet() {
+        if (_state.value.sheetReason == null) return
+        _state.update { it.copy(sheetSuppressed = false) }
     }
 
     private fun rebuildFeed(sortOrder: SuggestionSortOrder) {
@@ -340,6 +362,7 @@ class SuggestionsPresenter(
             sheetResults = emptyList(),
             sheetIsLoading = false,
             sheetError = null,
+            sheetSuppressed = false,
         )}
         presenterScope.launchIO {
             suggestionsRepository.deleteAll()
