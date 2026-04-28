@@ -207,8 +207,8 @@ class FeedAggregator(
                 kind = SectionKind.Popular,
                 reason = POPULAR_REASON,
                 sortOrder = currentSortOrder,
-                sources = sourcesForTask(sources.mixedSources, taskIndex = 0),
-                fallbackSources = fallbackSourcesForTask(sources.mixedSources, taskIndex = 0),
+                sources = sources.mixedSources.take(MAX_SOURCES_FOR_POPULAR),
+                fallbackSources = sources.mixedSources.drop(MAX_SOURCES_FOR_POPULAR),
             )
         }
     }
@@ -296,6 +296,7 @@ class FeedAggregator(
                             seenMangaUrls = seenMangaUrls,
                             blacklistedTags = blacklistedTags,
                             requestGate = requestGate,
+                            random = random,
                         )
                     }
                 }
@@ -391,10 +392,12 @@ class FeedAggregator(
         seenMangaUrls: Set<String>,
         blacklistedTags: Set<String>,
         requestGate: Semaphore,
+        random: Random = Random.Default,
     ): List<ScoredManga> {
+        val page = random.nextInt(1, 4)
         return sourceResult {
             requestGate.withPermit {
-                source.getPopularManga(1)
+                source.getPopularManga(page)
             }
         }
             ?.mangas
@@ -412,6 +415,48 @@ class FeedAggregator(
             }
             ?.toList()
             .orEmpty()
+    }
+
+    suspend fun fetchExpandedSection(
+        query: String,
+        reason: String,
+        sortOrder: SuggestionSortOrder,
+    ): List<SuggestedManga> {
+        val random = Random(System.nanoTime())
+        val localManga = mangaRepository.getMangaList()
+        val localKeys = localManga.map { it.source to it.url }.toSet()
+        val localTitles = localManga.map { it.title.normalizedTitle() }.toSet()
+        val blacklistedTags = preferences.suggestionsTagsBlacklist().get().normalizedQueries()
+        val allSources = sourceManager.getCatalogueSources()
+        val requestGate = Semaphore(MAX_CONCURRENT_SOURCE_REQUESTS)
+        val suggestionQuery = SuggestionQuery(query = query, reason = reason, score = 0.0)
+
+        val hits = coroutineScope {
+            allSources.mapIndexed { index, source ->
+                async {
+                    fetchPersonalizedFromSource(
+                        source = source,
+                        sourceIndex = index,
+                        suggestionQuery = suggestionQuery,
+                        sortOrder = sortOrder,
+                        localKeys = localKeys,
+                        localTitles = localTitles,
+                        seenMangaUrls = emptySet(),
+                        blacklistedTags = blacklistedTags,
+                        requestGate = requestGate,
+                    )
+                }
+            }.awaitAll().flatten()
+        }
+
+        return withContext(Dispatchers.Default) {
+            hits
+                .groupBy { it.sourceId }
+                .flatMap { (_, sourceHits) ->
+                    sourceHits.sortedByDescending { it.relevance }.take(MAX_PER_SOURCE_EXPANDED)
+                }
+                .mapIndexed { index, hit -> hit.toSuggestion(displayRank = index.toLong()) }
+        }
     }
 
     private suspend fun fetchPersonalizedFromSource(
@@ -455,7 +500,7 @@ class FeedAggregator(
         val limit = if (pinnedSources.isNotEmpty()) MAX_ACTIVE_SOURCES else FALLBACK_SOURCE_COUNT
 
         return withContext(Dispatchers.Default) {
-            val selectedSources = sourceCandidates.take(limit)
+            val selectedSources = sourceCandidates.shuffled(random).take(limit)
             SourceSelection(
                 latestSources = selectedSources,
                 mixedSources = selectedSources.shuffled(random),
@@ -621,20 +666,22 @@ class FeedAggregator(
     }
 
     private companion object {
-        private const val MAX_ACTIVE_SOURCES = 8
+        private const val MAX_ACTIVE_SOURCES = 10
         private const val FALLBACK_SOURCE_COUNT = 3
-        private const val MAX_SOURCES_PER_SECTION = 2
+        private const val MAX_SOURCES_PER_SECTION = 5
+        private const val MAX_SOURCES_FOR_POPULAR = 6
         private const val MAX_LATEST_SOURCES = 4
         private const val PAGE_TAG_COUNT = 2
         private const val HIGH_BUCKET_SIZE = 5
         private const val MID_BUCKET_SIZE = 5
-        private const val MAX_SOURCE_SECTION_TOTAL = 18
-        private const val MAX_PER_AFFINITY_SECTION = 12
+        private const val MAX_SOURCE_SECTION_TOTAL = 30
+        private const val MAX_PER_AFFINITY_SECTION = 20
         private const val MAX_TOTAL = MAX_SOURCE_SECTION_TOTAL + (PAGE_TAG_COUNT * MAX_PER_AFFINITY_SECTION)
-        private const val MAX_CONCURRENT_SOURCE_REQUESTS = 2
+        private const val MAX_CONCURRENT_SOURCE_REQUESTS = 4
         // Source diversity caps
-        private const val MAX_PER_SOURCE_PER_SECTION = 3  // per section (latest/popular/personalized)
+        private const val MAX_PER_SOURCE_PER_SECTION = 5  // per section (latest/popular/personalized)
         private const val MAX_PER_SOURCE_GLOBAL = 8        // across the entire feed page
+        private const val MAX_PER_SOURCE_EXPANDED = 5      // for expanded sections
         private const val BASE_RELEVANCE = 1_000_000.0
         private const val SOURCE_PENALTY = 0.001
         private const val POSITION_PENALTY = 0.01

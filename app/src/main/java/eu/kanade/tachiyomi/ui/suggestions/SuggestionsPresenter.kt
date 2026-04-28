@@ -40,6 +40,9 @@ data class SuggestionsState(
     val endMessage: String? = null,
     val emptyMessage: String? = null,
     val sortOrder: SuggestionSortOrder = SuggestionSortOrder.Popular,
+    val expandedReasons: Set<String> = emptySet(),
+    val expandedSectionData: Map<String, List<Manga>> = emptyMap(),
+    val expandedSectionLoading: Set<String> = emptySet(),
 )
 
 class SuggestionsPresenter(
@@ -135,6 +138,9 @@ class SuggestionsPresenter(
             emptyMessage = null,
             hasReachedEnd = false,
             endMessage = null,
+            expandedReasons = emptySet(),
+            expandedSectionData = emptyMap(),
+            expandedSectionLoading = emptySet(),
         )
         updateLoadingState()
 
@@ -265,6 +271,44 @@ class SuggestionsPresenter(
         syncTagFilterState(next)
     }
 
+    fun expandSection(reason: String) {
+        val query = extractQueryFromReason(reason) ?: return
+        if (reason in _state.value.expandedReasons) {
+            _state.value = _state.value.copy(
+                expandedReasons = _state.value.expandedReasons - reason,
+                expandedSectionData = _state.value.expandedSectionData - reason,
+            )
+            return
+        }
+        _state.value = _state.value.copy(
+            expandedSectionLoading = _state.value.expandedSectionLoading + reason,
+        )
+        presenterScope.launchIO {
+            try {
+                val results = feedAggregator.fetchExpandedSection(
+                    query = query,
+                    reason = reason,
+                    sortOrder = _state.value.sortOrder,
+                )
+                val mangaList = results.map { suggested ->
+                    MangaImpl(source = suggested.source, url = suggested.url).apply {
+                        title = suggested.title
+                        thumbnail_url = suggested.thumbnailUrl
+                    }
+                }
+                _state.value = _state.value.copy(
+                    expandedReasons = _state.value.expandedReasons + reason,
+                    expandedSectionData = _state.value.expandedSectionData + (reason to mangaList),
+                    expandedSectionLoading = _state.value.expandedSectionLoading - reason,
+                )
+            } catch (_: Exception) {
+                _state.value = _state.value.copy(
+                    expandedSectionLoading = _state.value.expandedSectionLoading - reason,
+                )
+            }
+        }
+    }
+
     private fun rebuildFeed(sortOrder: SuggestionSortOrder) {
         feedGeneration.incrementAndGet()
         saveGridScrollPosition(index = 0, scrollOffset = 0)
@@ -281,6 +325,9 @@ class SuggestionsPresenter(
             endMessage = null,
             emptyMessage = null,
             sortOrder = sortOrder,
+            expandedReasons = emptySet(),
+            expandedSectionData = emptyMap(),
+            expandedSectionLoading = emptySet(),
         )
         presenterScope.launchIO {
             suggestionsRepository.deleteAll()

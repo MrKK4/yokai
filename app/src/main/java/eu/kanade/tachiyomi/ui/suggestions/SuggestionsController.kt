@@ -103,7 +103,7 @@ class SuggestionsController(
                     contentPadding = suggestionsContentPadding(),
                     onMangaClick = ::openManga,
                     onCanScrollUpChanged = ::onSuggestionsCanScrollUpChanged,
-                    onSearchTag = ::performGlobalSearch,
+                    onExpandSection = presenter::expandSection,
                 )
             }
         }

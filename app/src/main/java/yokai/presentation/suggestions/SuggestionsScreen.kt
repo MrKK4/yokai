@@ -12,13 +12,15 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.ExpandLess
+import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.Icon
@@ -55,7 +57,7 @@ fun SuggestionsScreen(
     contentPadding: PaddingValues,
     onMangaClick: (Manga) -> Unit,
     onCanScrollUpChanged: (Boolean) -> Unit,
-    onSearchTag: (String) -> Unit,
+    onExpandSection: (String) -> Unit,
 ) {
     val state by presenter.state.collectAsState()
     val gridState = rememberSaveable(saver = LazyGridState.Saver) {
@@ -111,14 +113,24 @@ fun SuggestionsScreen(
                             span = { GridItemSpan(maxLineSpan) },
                         ) {
                             val query = remember(reason) { presenter.extractQueryFromReason(reason) }
+                            val isExpanded = reason in state.expandedReasons
+                            val isLoading = reason in state.expandedSectionLoading
                             SuggestionHeader(
                                 reason = reason,
-                                onExpand = query?.let { q -> { onSearchTag(q) } },
+                                hasExpandButton = query != null,
+                                isExpanded = isExpanded,
+                                isLoading = isLoading,
+                                onExpand = query?.let { { onExpandSection(reason) } },
                             )
                         }
+                        val displayList = if (reason in state.expandedReasons) {
+                            state.expandedSectionData[reason] ?: mangaList
+                        } else {
+                            mangaList
+                        }
                         items(
-                            items = mangaList,
-                            key = { manga -> "$reason:${manga.source}:${manga.url}" },
+                            items = displayList,
+                            key = { manga -> "expanded:$reason:${manga.source}:${manga.url}" },
                         ) { manga ->
                             SuggestionItem(manga = manga, onClick = { onMangaClick(manga) })
                         }
@@ -280,7 +292,10 @@ private fun EndOfFeedFooter(message: String) {
 @Composable
 private fun SuggestionHeader(
     reason: String,
-    onExpand: (() -> Unit)? = null,
+    hasExpandButton: Boolean,
+    isExpanded: Boolean,
+    isLoading: Boolean,
+    onExpand: (() -> Unit)?,
 ) {
     Row(
         modifier = Modifier
@@ -297,13 +312,22 @@ private fun SuggestionHeader(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
-        if (onExpand != null) {
-            IconButton(onClick = onExpand) {
-                Icon(
-                    imageVector = Icons.Outlined.Search,
-                    contentDescription = "Explore $reason",
-                    tint = MaterialTheme.colorScheme.primary,
+        if (hasExpandButton) {
+            if (isLoading) {
+                CircularProgressIndicator(
+                    modifier = Modifier
+                        .size(24.dp)
+                        .padding(end = 12.dp),
+                    strokeWidth = 2.dp,
                 )
+            } else {
+                IconButton(onClick = { onExpand?.invoke() }) {
+                    Icon(
+                        imageVector = if (isExpanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                        contentDescription = if (isExpanded) "Collapse" else "Expand",
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                }
             }
         }
     }
