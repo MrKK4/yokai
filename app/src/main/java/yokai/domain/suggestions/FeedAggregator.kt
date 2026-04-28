@@ -3,6 +3,8 @@ package yokai.domain.suggestions
 import eu.kanade.tachiyomi.data.preference.PreferencesHelper
 import eu.kanade.tachiyomi.source.CatalogueSource
 import eu.kanade.tachiyomi.source.SourceManager
+import eu.kanade.tachiyomi.source.model.Filter
+import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.SManga
 import kotlin.random.Random
 import kotlinx.coroutines.CancellationException
@@ -10,6 +12,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import yokai.domain.manga.MangaRepository
 
@@ -19,90 +23,236 @@ class FeedAggregator(
     private val preferences: PreferencesHelper,
 ) {
     suspend fun fetch(suggestionQueries: List<SuggestionQuery>): List<SuggestedManga> {
+        return fetchPage(
+            suggestionQueries = suggestionQueries,
+            usedTags = emptySet(),
+            seenMangaUrls = emptySet(),
+            currentSortOrder = preferences.suggestionsSortOrder().get(),
+            includeSourceSection = true,
+        ).suggestions
+    }
+
+    suspend fun fetchPage(
+        suggestionQueries: List<SuggestionQuery>,
+        usedTags: Set<String>,
+        seenMangaUrls: Set<String>,
+        currentSortOrder: SuggestionSortOrder,
+        includeSourceSection: Boolean,
+    ): SuggestionFeedPage {
         val random = Random(System.nanoTime())
         val localManga = mangaRepository.getMangaList()
         val (localKeys, localTitles) = withContext(Dispatchers.Default) {
             localManga.map { it.source to it.url }.toSet() to
                 localManga.map { it.title.normalizedTitle() }.toSet()
         }
-        val sourceSelection = activeSourceSelection(random)
-        if (sourceSelection.isEmpty) return emptyList()
-
-        val latest = fetchLatestFromSources(
-            sources = sourceSelection.latestSources,
-            localKeys = localKeys,
-            localTitles = localTitles,
+        val blacklistedTags = preferences.suggestionsTagsBlacklist().get().normalizedQueries()
+        val normalizedSeenMangaUrls = seenMangaUrls.toSet()
+        val querySelection = selectQueriesForPage(
+            suggestionQueries = suggestionQueries,
+            usedTags = usedTags.normalizedQueries(),
+            blacklistedTags = blacklistedTags,
+            random = random,
         )
-        val latestTitles = withContext(Dispatchers.Default) {
-            latest.map { it.titleKey }.toSet()
+        val sources = activeSources(random)
+        if (sources.isEmpty) {
+            return SuggestionFeedPage(
+                suggestions = emptyList(),
+                usedTags = querySelection.selectedNormalizedTags,
+                hasReachedEnd = querySelection.hasReachedEnd,
+            )
         }
-        val popular = fetchPopularFromSources(
-            sources = sourceSelection.mixedSources,
-            random = random,
-            localKeys = localKeys,
-            localTitles = localTitles,
-        ).filterOutTitles(latestTitles)
-        val popularTitles = withContext(Dispatchers.Default) {
-            popular.map { it.titleKey }.toSet()
-        }
-        val personalizedQueries = withContext(Dispatchers.Default) {
-            suggestionQueries
-                .distinctBy { it.query.normalizedQuery() }
-                .shuffled(random)
-                .take(MAX_FEATURED_QUERIES)
-        }
-        val personalized = fetchPersonalizedFromSources(
-            sources = sourceSelection.mixedSources,
-            suggestionQueries = personalizedQueries,
-            random = random,
-            localKeys = localKeys,
-            localTitles = localTitles,
-        ).filterOutTitles(latestTitles + popularTitles)
 
-        return withContext(Dispatchers.Default) {
-            (latest + mixFeedForRefresh(popular, personalized, random))
+        val requestGate = Semaphore(MAX_CONCURRENT_SOURCE_REQUESTS)
+        val sectionTasks = buildSectionTasks(
+            sources = sources,
+            suggestionQueries = querySelection.selectedQueries,
+            currentSortOrder = currentSortOrder,
+            includeSourceSection = includeSourceSection,
+            random = random,
+        )
+        val sectionResults = coroutineScope {
+            sectionTasks.map { task ->
+                async {
+                    fetchSection(
+                        task = task,
+                        localKeys = localKeys,
+                        localTitles = localTitles,
+                        seenMangaUrls = normalizedSeenMangaUrls,
+                        blacklistedTags = blacklistedTags,
+                        requestGate = requestGate,
+                        random = random,
+                    )
+                }
+            }.awaitAll()
+        }
+
+        val suggestions = withContext(Dispatchers.Default) {
+            sectionResults
+                .flatten()
+                .filterNot { hit -> hit.manga.hasBlacklistedTag(blacklistedTags) }
                 .distinctBy { it.sourceId to it.manga.url }
                 .take(MAX_TOTAL)
                 .mapIndexed { index, hit ->
-                    hit.toSuggestion(displayScore = displayScoreFor(index))
+                    hit.toSuggestion(displayRank = index.toLong())
                 }
         }
+
+        return SuggestionFeedPage(
+            suggestions = suggestions,
+            usedTags = querySelection.selectedNormalizedTags,
+            hasReachedEnd = querySelection.hasReachedEnd,
+        )
     }
 
-    private suspend fun fetchLatestFromSources(
-        sources: List<CatalogueSource>,
-        localKeys: Set<Pair<Long, String>>,
-        localTitles: Set<String>,
-    ): List<ScoredManga> {
-        val latestSources = sources.filter { it.supportsLatest }
-        if (latestSources.isEmpty()) return emptyList()
-
-        val hits = coroutineScope {
-            latestSources
-                .mapIndexed { sourceIndex, source ->
-                    async { fetchLatestFromSource(source, sourceIndex, localKeys, localTitles) }
-                }
-                .awaitAll()
-                .flatten()
-        }
-
-        return withContext(Dispatchers.Default) {
-            hits.bestByTitle()
-                .sortedByDescending { it.relevance }
-                .take(MAX_LATEST_TOTAL)
-        }
-    }
-
-    private suspend fun fetchPopularFromSources(
-        sources: List<CatalogueSource>,
+    private suspend fun selectQueriesForPage(
+        suggestionQueries: List<SuggestionQuery>,
+        usedTags: Set<String>,
+        blacklistedTags: Set<String>,
         random: Random,
+    ): QuerySelection {
+        return withContext(Dispatchers.Default) {
+            val remainingQueries = suggestionQueries
+                .distinctBy { it.query.normalizedQuery() }
+                .filterNot { it.query.normalizedQuery() in usedTags }
+                .filterNot { it.query.normalizedQuery() in blacklistedTags }
+                .sortedByDescending { it.score }
+
+            val selectedQueries = remainingQueries.selectRankedBatch(random)
+            QuerySelection(
+                selectedQueries = selectedQueries,
+                selectedNormalizedTags = selectedQueries.map { it.query.normalizedQuery() }.toSet(),
+                hasReachedEnd = selectedQueries.size >= remainingQueries.size,
+            )
+        }
+    }
+
+    private fun List<SuggestionQuery>.selectRankedBatch(random: Random): List<SuggestionQuery> {
+        if (isEmpty()) return emptyList()
+
+        val highRank = take(HIGH_BUCKET_SIZE)
+        val midRank = drop(HIGH_BUCKET_SIZE).take(MID_BUCKET_SIZE)
+        val lowRank = drop(HIGH_BUCKET_SIZE + MID_BUCKET_SIZE)
+        val selected = mutableListOf<SuggestionQuery>()
+
+        selected.addFrom(highRank.shuffled(random), count = 1)
+        selected.addFrom(midRank.shuffled(random), count = 1)
+        selected.addFrom(lowRank.shuffled(random), count = PAGE_TAG_COUNT - selected.size)
+        selected.addFrom(shuffled(random), count = PAGE_TAG_COUNT - selected.size)
+
+        return selected
+            .take(PAGE_TAG_COUNT)
+            .shuffled(random)
+    }
+
+    private fun MutableList<SuggestionQuery>.addFrom(candidates: List<SuggestionQuery>, count: Int) {
+        if (count <= 0) return
+        candidates
+            .filterNot { it in this }
+            .take(count)
+            .forEach(::add)
+    }
+
+    private suspend fun buildSectionTasks(
+        sources: SourceSelection,
+        suggestionQueries: List<SuggestionQuery>,
+        currentSortOrder: SuggestionSortOrder,
+        includeSourceSection: Boolean,
+        random: Random,
+    ): List<SectionTask> {
+        return withContext(Dispatchers.Default) {
+            buildList {
+                if (includeSourceSection) {
+                    add(sourceSectionTask(sources, currentSortOrder))
+                }
+                suggestionQueries
+                    .shuffled(random)
+                    .forEachIndexed { index, suggestionQuery ->
+                        add(
+                            SectionTask(
+                                kind = SectionKind.Personalized,
+                                reason = suggestionQuery.reason,
+                                query = suggestionQuery,
+                                sortOrder = currentSortOrder,
+                                sources = sourcesForTask(sources.mixedSources, taskIndex = index + 1),
+                                fallbackSources = fallbackSourcesForTask(sources.mixedSources, taskIndex = index + 1),
+                            ),
+                        )
+                    }
+            }
+        }
+    }
+
+    private fun sourceSectionTask(
+        sources: SourceSelection,
+        currentSortOrder: SuggestionSortOrder,
+    ): SectionTask {
+        return when (currentSortOrder) {
+            SuggestionSortOrder.Latest -> SectionTask(
+                kind = SectionKind.Latest,
+                reason = LATEST_REASON,
+                sortOrder = currentSortOrder,
+                sources = sources.latestSources.take(MAX_LATEST_SOURCES),
+                fallbackSources = sources.latestSources.drop(MAX_LATEST_SOURCES),
+            )
+            SuggestionSortOrder.Popular -> SectionTask(
+                kind = SectionKind.Popular,
+                reason = POPULAR_REASON,
+                sortOrder = currentSortOrder,
+                sources = sourcesForTask(sources.mixedSources, taskIndex = 0),
+                fallbackSources = fallbackSourcesForTask(sources.mixedSources, taskIndex = 0),
+            )
+        }
+    }
+
+    private suspend fun fetchSection(
+        task: SectionTask,
         localKeys: Set<Pair<Long, String>>,
         localTitles: Set<String>,
+        seenMangaUrls: Set<String>,
+        blacklistedTags: Set<String>,
+        requestGate: Semaphore,
+        random: Random,
+    ): List<ScoredManga> {
+        if (task.sources.isEmpty()) return emptyList()
+
+        val primaryResults = when (task.kind) {
+            SectionKind.Latest -> fetchLatestSection(task, localKeys, localTitles, seenMangaUrls, blacklistedTags, requestGate)
+            SectionKind.Popular -> fetchPopularSection(task, localKeys, localTitles, seenMangaUrls, blacklistedTags, requestGate, random)
+            SectionKind.Personalized -> fetchPersonalizedSection(task, localKeys, localTitles, seenMangaUrls, blacklistedTags, requestGate, random)
+        }
+        if (primaryResults.isNotEmpty() || task.fallbackSources.isEmpty()) return primaryResults
+
+        val fallbackTask = task.copy(sources = task.fallbackSources, fallbackSources = emptyList())
+        return when (fallbackTask.kind) {
+            SectionKind.Latest -> fetchLatestSection(fallbackTask, localKeys, localTitles, seenMangaUrls, blacklistedTags, requestGate)
+            SectionKind.Popular -> fetchPopularSection(fallbackTask, localKeys, localTitles, seenMangaUrls, blacklistedTags, requestGate, random)
+            SectionKind.Personalized -> fetchPersonalizedSection(fallbackTask, localKeys, localTitles, seenMangaUrls, blacklistedTags, requestGate, random)
+        }
+    }
+
+    private suspend fun fetchLatestSection(
+        task: SectionTask,
+        localKeys: Set<Pair<Long, String>>,
+        localTitles: Set<String>,
+        seenMangaUrls: Set<String>,
+        blacklistedTags: Set<String>,
+        requestGate: Semaphore,
     ): List<ScoredManga> {
         val hits = coroutineScope {
-            sources
+            task.sources
+                .filter { it.supportsLatest }
                 .mapIndexed { sourceIndex, source ->
-                    async { fetchPopularFromSource(source, sourceIndex, localKeys, localTitles) }
+                    async {
+                        fetchLatestFromSource(
+                            source = source,
+                            sourceIndex = sourceIndex,
+                            localKeys = localKeys,
+                            localTitles = localTitles,
+                            seenMangaUrls = seenMangaUrls,
+                            blacklistedTags = blacklistedTags,
+                            requestGate = requestGate,
+                        )
+                    }
                 }
                 .awaitAll()
                 .flatten()
@@ -111,24 +261,72 @@ class FeedAggregator(
         return withContext(Dispatchers.Default) {
             hits.bestByTitle()
                 .sortedByDescending { it.relevance }
-                .take(MAX_POPULAR_TOTAL)
+                .take(MAX_SOURCE_SECTION_TOTAL)
+        }
+    }
+
+    private suspend fun fetchPopularSection(
+        task: SectionTask,
+        localKeys: Set<Pair<Long, String>>,
+        localTitles: Set<String>,
+        seenMangaUrls: Set<String>,
+        blacklistedTags: Set<String>,
+        requestGate: Semaphore,
+        random: Random,
+    ): List<ScoredManga> {
+        val hits = coroutineScope {
+            task.sources
+                .mapIndexed { sourceIndex, source ->
+                    async {
+                        fetchPopularFromSource(
+                            source = source,
+                            sourceIndex = sourceIndex,
+                            localKeys = localKeys,
+                            localTitles = localTitles,
+                            seenMangaUrls = seenMangaUrls,
+                            blacklistedTags = blacklistedTags,
+                            requestGate = requestGate,
+                        )
+                    }
+                }
+                .awaitAll()
+                .flatten()
+        }
+
+        return withContext(Dispatchers.Default) {
+            hits.bestByTitle()
+                .sortedByDescending { it.relevance }
+                .take(MAX_SOURCE_SECTION_TOTAL)
                 .shuffled(random)
         }
     }
 
-    private suspend fun fetchPersonalizedFromSources(
-        sources: List<CatalogueSource>,
-        suggestionQueries: List<SuggestionQuery>,
-        random: Random,
+    private suspend fun fetchPersonalizedSection(
+        task: SectionTask,
         localKeys: Set<Pair<Long, String>>,
         localTitles: Set<String>,
+        seenMangaUrls: Set<String>,
+        blacklistedTags: Set<String>,
+        requestGate: Semaphore,
+        random: Random,
     ): List<ScoredManga> {
-        if (suggestionQueries.isEmpty()) return emptyList()
-
+        val suggestionQuery = task.query ?: return emptyList()
         val hits = coroutineScope {
-            sources
-                .map { source ->
-                    async { fetchPersonalizedFromSource(source, suggestionQueries, localKeys, localTitles) }
+            task.sources
+                .mapIndexed { sourceIndex, source ->
+                    async {
+                        fetchPersonalizedFromSource(
+                            source = source,
+                            sourceIndex = sourceIndex,
+                            suggestionQuery = suggestionQuery,
+                            sortOrder = task.sortOrder,
+                            localKeys = localKeys,
+                            localTitles = localTitles,
+                            seenMangaUrls = seenMangaUrls,
+                            blacklistedTags = blacklistedTags,
+                            requestGate = requestGate,
+                        )
+                    }
                 }
                 .awaitAll()
                 .flatten()
@@ -136,7 +334,9 @@ class FeedAggregator(
 
         return withContext(Dispatchers.Default) {
             hits.bestByTitle()
-                .balancedByReason(random)
+                .sortedByDescending { it.relevance }
+                .take(MAX_PER_AFFINITY_SECTION)
+                .shuffled(random)
         }
     }
 
@@ -145,20 +345,24 @@ class FeedAggregator(
         sourceIndex: Int,
         localKeys: Set<Pair<Long, String>>,
         localTitles: Set<String>,
+        seenMangaUrls: Set<String>,
+        blacklistedTags: Set<String>,
+        requestGate: Semaphore,
     ): List<ScoredManga> {
         return sourceResult {
-            source.getLatestUpdates(1)
+            requestGate.withPermit {
+                source.getLatestUpdates(1)
+            }
         }
             ?.mangas
             ?.asSequence()
-            ?.filter { manga -> (source.id to manga.url) !in localKeys }
-            ?.filterNot { manga -> manga.title.normalizedTitle() in localTitles }
+            ?.filterAllowed(source.id, localKeys, localTitles, seenMangaUrls, blacklistedTags)
             ?.mapIndexed { index, manga ->
                 ScoredManga(
                     manga = manga,
                     titleKey = manga.title.normalizedTitle(),
                     sourceId = source.id,
-                    relevance = GENERIC_RELEVANCE - (sourceIndex * SOURCE_PENALTY) - (index * POSITION_PENALTY),
+                    relevance = BASE_RELEVANCE - (sourceIndex * SOURCE_PENALTY) - (index * POSITION_PENALTY),
                     reason = LATEST_REASON,
                     queryScore = 0.0,
                 )
@@ -172,20 +376,24 @@ class FeedAggregator(
         sourceIndex: Int,
         localKeys: Set<Pair<Long, String>>,
         localTitles: Set<String>,
+        seenMangaUrls: Set<String>,
+        blacklistedTags: Set<String>,
+        requestGate: Semaphore,
     ): List<ScoredManga> {
         return sourceResult {
-            source.getPopularManga(1)
+            requestGate.withPermit {
+                source.getPopularManga(1)
+            }
         }
             ?.mangas
             ?.asSequence()
-            ?.filter { manga -> (source.id to manga.url) !in localKeys }
-            ?.filterNot { manga -> manga.title.normalizedTitle() in localTitles }
+            ?.filterAllowed(source.id, localKeys, localTitles, seenMangaUrls, blacklistedTags)
             ?.mapIndexed { index, manga ->
                 ScoredManga(
                     manga = manga,
                     titleKey = manga.title.normalizedTitle(),
                     sourceId = source.id,
-                    relevance = GENERIC_RELEVANCE - (sourceIndex * SOURCE_PENALTY) - (index * POSITION_PENALTY),
+                    relevance = BASE_RELEVANCE - (sourceIndex * SOURCE_PENALTY) - (index * POSITION_PENALTY),
                     reason = POPULAR_REASON,
                     queryScore = 0.0,
                 )
@@ -196,38 +404,38 @@ class FeedAggregator(
 
     private suspend fun fetchPersonalizedFromSource(
         source: CatalogueSource,
-        suggestionQueries: List<SuggestionQuery>,
+        sourceIndex: Int,
+        suggestionQuery: SuggestionQuery,
+        sortOrder: SuggestionSortOrder,
         localKeys: Set<Pair<Long, String>>,
         localTitles: Set<String>,
+        seenMangaUrls: Set<String>,
+        blacklistedTags: Set<String>,
+        requestGate: Semaphore,
     ): List<ScoredManga> {
-        val sourceResults = mutableListOf<ScoredManga>()
-
-        suggestionQueries.forEach { suggestionQuery ->
-            sourceResult {
-                source.getSearchManga(1, suggestionQuery.query, source.getFilterList())
+        return sourceResult {
+            requestGate.withPermit {
+                source.getSearchManga(1, suggestionQuery.query, source.searchFiltersFor(sortOrder))
             }
-                ?.mangas
-                ?.asSequence()
-                ?.filter { manga -> (source.id to manga.url) !in localKeys }
-                ?.filterNot { manga -> manga.title.normalizedTitle() in localTitles }
-                ?.mapIndexed { index, manga ->
-                    ScoredManga(
-                        manga = manga,
-                        titleKey = manga.title.normalizedTitle(),
-                        sourceId = source.id,
-                        relevance = suggestionQuery.score - (index * POSITION_PENALTY),
-                        reason = suggestionQuery.reason,
-                        queryScore = suggestionQuery.score,
-                    )
-                }
-                ?.toList()
-                ?.let(sourceResults::addAll)
         }
-
-        return sourceResults.bestByTitle()
+            ?.mangas
+            ?.asSequence()
+            ?.filterAllowed(source.id, localKeys, localTitles, seenMangaUrls, blacklistedTags)
+            ?.mapIndexed { index, manga ->
+                ScoredManga(
+                    manga = manga,
+                    titleKey = manga.title.normalizedTitle(),
+                    sourceId = source.id,
+                    relevance = suggestionQuery.score - (sourceIndex * SOURCE_PENALTY) - (index * POSITION_PENALTY),
+                    reason = suggestionQuery.reason,
+                    queryScore = suggestionQuery.score,
+                )
+            }
+            ?.toList()
+            .orEmpty()
     }
 
-    private suspend fun activeSourceSelection(random: Random): SourceSelection {
+    private suspend fun activeSources(random: Random): SourceSelection {
         val pinnedCatalogueIds = preferences.pinnedCatalogues().get()
         val allSources = sourceManager.getCatalogueSources()
         val pinnedSources = allSources.filter { source -> source.id.toString() in pinnedCatalogueIds }
@@ -235,12 +443,69 @@ class FeedAggregator(
         val limit = if (pinnedSources.isNotEmpty()) MAX_ACTIVE_SOURCES else FALLBACK_SOURCE_COUNT
 
         return withContext(Dispatchers.Default) {
+            val selectedSources = sourceCandidates.take(limit)
             SourceSelection(
-                latestSources = sourceCandidates.take(limit),
-                mixedSources = sourceCandidates.shuffled(random).take(limit),
+                latestSources = selectedSources,
+                mixedSources = selectedSources.shuffled(random),
             )
         }
     }
+
+    private fun sourcesForTask(sources: List<CatalogueSource>, taskIndex: Int): List<CatalogueSource> {
+        if (sources.isEmpty()) return emptyList()
+        val sourceCount = minOf(MAX_SOURCES_PER_SECTION, sources.size)
+        return List(sourceCount) { offset ->
+            sources[(taskIndex + offset) % sources.size]
+        }
+    }
+
+    private fun fallbackSourcesForTask(sources: List<CatalogueSource>, taskIndex: Int): List<CatalogueSource> {
+        val primary = sourcesForTask(sources, taskIndex).toSet()
+        return sources.filterNot { it in primary }
+    }
+
+    private fun CatalogueSource.searchFiltersFor(sortOrder: SuggestionSortOrder): FilterList {
+        val filters = getFilterList()
+        val sortFilter = filters.filterIsInstance<Filter.Sort>().firstOrNull() ?: return filters
+        val sortIndex = sortFilter.values.indexOfFirst { value -> value.matchesSortOrder(sortOrder) }
+        if (sortIndex >= 0) {
+            sortFilter.state = Filter.Sort.Selection(index = sortIndex, ascending = false)
+        }
+        return filters
+    }
+
+    private fun String.matchesSortOrder(sortOrder: SuggestionSortOrder): Boolean {
+        val value = normalizedQuery()
+        return when (sortOrder) {
+            SuggestionSortOrder.Latest -> LATEST_SORT_KEYWORDS.any { it in value }
+            SuggestionSortOrder.Popular -> POPULAR_SORT_KEYWORDS.any { it in value }
+        }
+    }
+
+    private fun Sequence<SManga>.filterAllowed(
+        sourceId: Long,
+        localKeys: Set<Pair<Long, String>>,
+        localTitles: Set<String>,
+        seenMangaUrls: Set<String>,
+        blacklistedTags: Set<String>,
+    ): Sequence<SManga> {
+        return filter { manga -> (sourceId to manga.url) !in localKeys }
+            .filterNot { manga -> mangaKey(sourceId, manga.url) in seenMangaUrls }
+            .filterNot { manga -> manga.title.normalizedTitle() in localTitles }
+            .filterNot { manga -> manga.hasBlacklistedTag(blacklistedTags) }
+    }
+
+    private fun SManga.hasBlacklistedTag(blacklistedTags: Set<String>): Boolean {
+        if (blacklistedTags.isEmpty()) return false
+        return getGenres()
+            ?.any { tag -> tag.normalizedQuery() in blacklistedTags }
+            ?: false
+    }
+
+    private fun Set<String>.normalizedQueries(): Set<String> =
+        map { it.normalizedQuery() }
+            .filter { it.isNotBlank() }
+            .toSet()
 
     private fun String.normalizedTitle(): String =
         normalizedQuery()
@@ -258,9 +523,6 @@ class FeedAggregator(
         }
     }
 
-    private fun List<ScoredManga>.filterOutTitles(titleKeys: Set<String>): List<ScoredManga> =
-        filterNot { it.titleKey in titleKeys }
-
     private fun List<ScoredManga>.bestByTitle(): List<ScoredManga> {
         val bestHits = linkedMapOf<String, ScoredManga>()
         forEach { hit ->
@@ -273,12 +535,33 @@ class FeedAggregator(
         return bestHits.values.toList()
     }
 
+    private data class QuerySelection(
+        val selectedQueries: List<SuggestionQuery>,
+        val selectedNormalizedTags: Set<String>,
+        val hasReachedEnd: Boolean,
+    )
+
     private data class SourceSelection(
         val latestSources: List<CatalogueSource>,
         val mixedSources: List<CatalogueSource>,
     ) {
         val isEmpty: Boolean
             get() = latestSources.isEmpty() && mixedSources.isEmpty()
+    }
+
+    private data class SectionTask(
+        val kind: SectionKind,
+        val reason: String,
+        val sortOrder: SuggestionSortOrder,
+        val sources: List<CatalogueSource>,
+        val fallbackSources: List<CatalogueSource>,
+        val query: SuggestionQuery? = null,
+    )
+
+    private enum class SectionKind {
+        Latest,
+        Popular,
+        Personalized,
     }
 
     private data class ScoredManga(
@@ -293,69 +576,39 @@ class FeedAggregator(
             queryScore > other.queryScore ||
                 (queryScore == other.queryScore && relevance > other.relevance)
 
-        fun toSuggestion(displayScore: Double): SuggestedManga =
+        fun toSuggestion(displayRank: Long): SuggestedManga =
             SuggestedManga(
                 source = sourceId,
                 url = manga.url,
                 title = manga.title,
                 thumbnailUrl = manga.thumbnail_url,
                 reason = reason,
-                relevanceScore = displayScore,
+                relevanceScore = relevance,
+                displayRank = displayRank,
             )
     }
-
-    private fun List<ScoredManga>.balancedByReason(random: Random): List<ScoredManga> =
-        groupBy { it.reason }
-            .entries
-            .shuffled(random)
-            .flatMap { (_, hits) ->
-                hits.sortedByDescending { it.relevance }
-                    .take(MAX_PER_REASON)
-                    .shuffled(random)
-            }
-
-    private fun mixFeedForRefresh(
-        popular: List<ScoredManga>,
-        personalized: List<ScoredManga>,
-        random: Random,
-    ): List<ScoredManga> {
-        val personalizedQueue = personalized.shuffled(random).toMutableList()
-        val popularQueue = popular.shuffled(random).toMutableList()
-        val mixed = mutableListOf<ScoredManga>()
-
-        while ((personalizedQueue.isNotEmpty() || popularQueue.isNotEmpty()) && mixed.size < MAX_TOTAL) {
-            repeat(PERSONALIZED_BURST) {
-                personalizedQueue.popFirst()?.let(mixed::add)
-            }
-            repeat(POPULAR_BURST) {
-                popularQueue.popFirst()?.let(mixed::add)
-            }
-        }
-
-        return mixed
-    }
-
-    private fun MutableList<ScoredManga>.popFirst(): ScoredManga? =
-        if (isEmpty()) null else removeAt(0)
-
-    private fun displayScoreFor(index: Int): Double =
-        (MAX_TOTAL - index).toDouble()
 
     private companion object {
         private const val MAX_ACTIVE_SOURCES = 8
         private const val FALLBACK_SOURCE_COUNT = 3
-        private const val MAX_FEATURED_QUERIES = 2
-        private const val MAX_LATEST_TOTAL = 24
-        private const val MAX_POPULAR_TOTAL = 24
-        private const val MAX_PER_REASON = 12
-        private const val MAX_TOTAL = 84
-        private const val PERSONALIZED_BURST = 2
-        private const val POPULAR_BURST = 1
-        private const val GENERIC_RELEVANCE = 1_000_000.0
+        private const val MAX_SOURCES_PER_SECTION = 2
+        private const val MAX_LATEST_SOURCES = 4
+        private const val PAGE_TAG_COUNT = 2
+        private const val HIGH_BUCKET_SIZE = 5
+        private const val MID_BUCKET_SIZE = 5
+        private const val MAX_SOURCE_SECTION_TOTAL = 18
+        private const val MAX_PER_AFFINITY_SECTION = 12
+        private const val MAX_TOTAL = MAX_SOURCE_SECTION_TOTAL + (PAGE_TAG_COUNT * MAX_PER_AFFINITY_SECTION)
+        private const val MAX_CONCURRENT_SOURCE_REQUESTS = 2
+        private const val BASE_RELEVANCE = 1_000_000.0
         private const val SOURCE_PENALTY = 0.001
         private const val POSITION_PENALTY = 0.01
         private const val LATEST_REASON = "Latest from selected sources"
         private const val POPULAR_REASON = "Popular from selected sources"
+        private val LATEST_SORT_KEYWORDS = setOf("latest", "recent", "update", "updated", "uploaded", "date", "new")
+        private val POPULAR_SORT_KEYWORDS = setOf("popular", "views", "view", "follow", "follows", "rating", "score", "trend", "hot")
         private val WHITESPACE = Regex("\\s+")
+
+        private fun mangaKey(sourceId: Long, url: String): String = "$sourceId:$url"
     }
 }

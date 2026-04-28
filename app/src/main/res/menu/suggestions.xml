@@ -12,9 +12,15 @@
         app:showAsAction="collapseActionView|ifRoom" />
 
     <item
-        android:id="@+id/action_filter"
+        android:id="@+id/action_sort"
+        android:icon="@drawable/ic_sort_24dp"
+        android:title="@string/sort"
+        app:showAsAction="ifRoom" />
+
+    <item
+        android:id="@+id/action_tag_filter"
         android:icon="@drawable/ic_filter_list_24dp"
-        android:title="@string/filter"
+        android:title="Exclude tags"
         app:showAsAction="ifRoom" />
 
     <item

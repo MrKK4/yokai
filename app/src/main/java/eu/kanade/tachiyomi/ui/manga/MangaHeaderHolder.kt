@@ -200,6 +200,9 @@ class MangaHeaderHolder(
         binding ?: return
         if (binding.moreButton.visibility == View.VISIBLE || isTablet) {
             androidx.transition.TransitionManager.endTransitions(adapter.controller.binding.recycler)
+            if (animated) {
+                beginDescriptionTransition(includeSlide = true)
+            }
             binding.mangaSummary.maxLines = Integer.MAX_VALUE
             binding.mangaSummary.setTextIsSelectable(true)
             setDescription()
@@ -214,19 +217,6 @@ class MangaHeaderHolder(
             binding.title.maxLines = Integer.MAX_VALUE
             binding.mangaAuthor.maxLines = Integer.MAX_VALUE
             binding.mangaSummary.requestFocus()
-            if (animated) {
-                val transition = TransitionSet()
-                    .addTransition(androidx.transition.ChangeBounds())
-                    .addTransition(androidx.transition.Fade())
-                    .addTransition(androidx.transition.Slide())
-                transition.duration = binding.root.resources.getInteger(
-                    AR.integer.config_shortAnimTime,
-                ).toLong()
-                androidx.transition.TransitionManager.beginDelayedTransition(
-                    adapter.controller.binding.recycler,
-                    transition,
-                )
-            }
         }
     }
 
@@ -247,16 +237,7 @@ class MangaHeaderHolder(
                 null,
             )
             animVector?.start()
-            val transition = TransitionSet()
-                .addTransition(androidx.transition.ChangeBounds())
-                .addTransition(androidx.transition.Fade())
-            transition.duration = binding.root.resources.getInteger(
-                AR.integer.config_shortAnimTime,
-            ).toLong()
-            androidx.transition.TransitionManager.beginDelayedTransition(
-                adapter.controller.binding.recycler,
-                transition,
-            )
+            beginDescriptionTransition()
         }
         binding.mangaSummary.setTextIsSelectable(false)
         binding.mangaSummary.isClickable = true
@@ -269,6 +250,23 @@ class MangaHeaderHolder(
         adapter.recyclerView.post {
             adapter.delegate.updateScroll()
         }
+    }
+
+    private fun beginDescriptionTransition(includeSlide: Boolean = false) {
+        binding ?: return
+        val transition = TransitionSet()
+            .addTransition(androidx.transition.ChangeBounds())
+            .addTransition(androidx.transition.Fade())
+        if (includeSlide) {
+            transition.addTransition(androidx.transition.Slide())
+        }
+        transition.duration = binding.root.resources.getInteger(
+            AR.integer.config_shortAnimTime,
+        ).toLong()
+        androidx.transition.TransitionManager.beginDelayedTransition(
+            adapter.controller.binding.recycler,
+            transition,
+        )
     }
 
     private fun setDescription() {

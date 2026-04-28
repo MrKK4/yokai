@@ -6,26 +6,29 @@ CREATE TABLE suggestions(
     thumbnail_url TEXT,
     reason TEXT NOT NULL,
     relevance_score REAL NOT NULL DEFAULT 0.0,
+    display_rank INTEGER NOT NULL DEFAULT 0,
     fetched_at INTEGER NOT NULL DEFAULT 0,
     UNIQUE(source, url)
 );
 
 CREATE INDEX suggestions_relevance_score_index ON suggestions(relevance_score, fetched_at);
+CREATE INDEX suggestions_display_rank_index ON suggestions(display_rank);
 
 findAll:
 SELECT *
 FROM suggestions
-ORDER BY relevance_score DESC, fetched_at DESC;
+ORDER BY display_rank ASC;
 
 insert:
-INSERT INTO suggestions(source, url, title, thumbnail_url, reason, relevance_score, fetched_at)
-VALUES(:source, :url, :title, :thumbnailUrl, :reason, :relevanceScore, :fetchedAt)
+INSERT INTO suggestions(source, url, title, thumbnail_url, reason, relevance_score, display_rank, fetched_at)
+VALUES(:source, :url, :title, :thumbnailUrl, :reason, :relevanceScore, :displayRank, :fetchedAt)
 ON CONFLICT(source, url)
 DO UPDATE SET
     title = excluded.title,
     thumbnail_url = excluded.thumbnail_url,
     reason = excluded.reason,
     relevance_score = excluded.relevance_score,
+    display_rank = excluded.display_rank,
     fetched_at = excluded.fetched_at;
 
 deleteAll:

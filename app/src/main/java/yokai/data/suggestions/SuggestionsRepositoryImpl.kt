@@ -22,6 +22,7 @@ class SuggestionsRepositoryImpl(private val handler: DatabaseHandler) : Suggesti
                     thumbnailUrl = it.thumbnailUrl,
                     reason = it.reason,
                     relevanceScore = it.relevanceScore,
+                    displayRank = it.displayRank,
                     fetchedAt = it.fetchedAt,
                 )
             }
@@ -39,6 +40,7 @@ class SuggestionsRepositoryImpl(private val handler: DatabaseHandler) : Suggesti
                     thumbnailUrl = it.thumbnailUrl,
                     reason = it.reason,
                     relevanceScore = it.relevanceScore,
+                    displayRank = it.displayRank,
                     fetchedAt = it.fetchedAt,
                 )
             }
@@ -60,6 +62,7 @@ class SuggestionsRepositoryImpl(private val handler: DatabaseHandler) : Suggesti
         thumbnailUrl: String?,
         reason: String,
         relevanceScore: Double,
+        displayRank: Long,
         fetchedAt: Long,
-    ): SuggestedManga = SuggestedManga(_id, source, url, title, thumbnailUrl, reason, relevanceScore, fetchedAt)
+    ): SuggestedManga = SuggestedManga(_id, source, url, title, thumbnailUrl, reason, relevanceScore, displayRank, fetchedAt)
 }

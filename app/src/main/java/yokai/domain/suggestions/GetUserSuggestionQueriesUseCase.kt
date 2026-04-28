@@ -52,7 +52,7 @@ class GetUserSuggestionQueriesUseCase(
         private const val MIN_QUERY_LENGTH = 2
         private const val MAX_QUERY_LENGTH = 64
         private const val MAX_SAVED_SEARCH_QUERIES = 8
-        private const val MAX_TOTAL_QUERIES = 24
+        private const val MAX_TOTAL_QUERIES = 64
         private const val SAVED_SEARCH_SCORE = 1.5
         private val WHITESPACE = Regex("\\s+")
     }

@@ -15,6 +15,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.compose.ui.unit.dp
+import androidx.core.view.ScrollingView
 import androidx.core.view.WindowInsetsCompat.Type.systemBars
 import com.bluelinelabs.conductor.ControllerChangeHandler
 import com.bluelinelabs.conductor.ControllerChangeType
@@ -28,20 +29,25 @@ import eu.kanade.tachiyomi.ui.main.FloatingSearchInterface
 import eu.kanade.tachiyomi.ui.main.MainActivity
 import eu.kanade.tachiyomi.ui.main.RootSearchInterface
 import eu.kanade.tachiyomi.ui.manga.MangaDetailsController
+import eu.kanade.tachiyomi.ui.source.globalsearch.GlobalSearchController
 import eu.kanade.tachiyomi.util.system.dpToPx
 import eu.kanade.tachiyomi.util.system.launchIO
 import eu.kanade.tachiyomi.util.system.toast
 import eu.kanade.tachiyomi.util.system.withUIContext
 import eu.kanade.tachiyomi.util.view.activityBinding
 import eu.kanade.tachiyomi.util.view.doOnApplyWindowInsetsCompat
+import eu.kanade.tachiyomi.util.view.setOnQueryTextChangeListener
 import eu.kanade.tachiyomi.util.view.setStyle
 import eu.kanade.tachiyomi.util.view.withFadeTransaction
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
+import yokai.domain.suggestions.SuggestionSortOrder
+import yokai.i18n.MR
 import yokai.presentation.suggestions.SuggestionsScreen
 import yokai.presentation.theme.YokaiTheme
+import yokai.util.lang.getString
 
 class SuggestionsController(
     bundle: Bundle? = null,
@@ -55,6 +61,7 @@ class SuggestionsController(
 
     private var suggestionsCanScrollUp = false
     private var statusBarHeight = 0
+    private val appBarScrollProxy = ComposeAppBarScrollProxy()
 
     init {
         setHasOptionsMenu(true)
@@ -95,7 +102,7 @@ class SuggestionsController(
                     presenter = presenter,
                     contentPadding = suggestionsContentPadding(),
                     onMangaClick = ::openManga,
-                    onCanScrollUpChanged = { suggestionsCanScrollUp = it },
+                    onCanScrollUpChanged = ::onSuggestionsCanScrollUpChanged,
                 )
             }
         }
@@ -111,12 +118,26 @@ class SuggestionsController(
 
     override fun onCreateOptionsMenu(menu: Menu, inflater: MenuInflater) {
         inflater.inflate(R.menu.suggestions, menu)
+
+        activityBinding?.searchToolbar?.searchQueryHint = view?.context?.getString(MR.strings.global_search)
+        setOnQueryTextChangeListener(activityBinding?.searchToolbar?.searchView, true) {
+            if (!it.isNullOrBlank()) performGlobalSearch(it)
+            true
+        }
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         return when (item.itemId) {
             R.id.action_filter -> {
                 showFilterSheet()
+                true
+            }
+            R.id.action_sort -> {
+                showSortSheet()
+                true
+            }
+            R.id.action_tag_filter -> {
+                presenter.showTagFilterSheet()
                 true
             }
             else -> super.onOptionsItemSelected(item)
@@ -168,6 +189,52 @@ class SuggestionsController(
         }.show()
     }
 
+    private fun showSortSheet() {
+        val activity = activity ?: return
+        val selectedId = when (presenter.state.value.sortOrder) {
+            SuggestionSortOrder.Popular -> SORT_POPULAR
+            SuggestionSortOrder.Latest -> SORT_LATEST
+        }
+        val items = listOf(
+            MaterialMenuSheet.MenuSheetItem(
+                id = SORT_POPULAR,
+                drawable = R.drawable.ic_sort_24dp,
+                text = "Popular",
+                endDrawableRes = R.drawable.ic_check_24dp,
+            ),
+            MaterialMenuSheet.MenuSheetItem(
+                id = SORT_LATEST,
+                drawable = R.drawable.ic_new_releases_outline_24dp,
+                text = "Latest",
+                endDrawableRes = R.drawable.ic_check_24dp,
+            ),
+            MaterialMenuSheet.MenuSheetItem(
+                id = SORT_FILTER,
+                drawable = R.drawable.ic_filter_list_24dp,
+                text = "Filter sections",
+            ),
+        )
+
+        MaterialMenuSheet(
+            activity = activity,
+            items = items,
+            title = "Sort suggestions",
+            selectedId = selectedId,
+        ) { _, itemId ->
+            if (itemId == SORT_FILTER) {
+                binding.root.post { showFilterSheet() }
+            } else {
+                presenter.setSortOrder(
+                    when (itemId) {
+                        SORT_LATEST -> SuggestionSortOrder.Latest
+                        else -> SuggestionSortOrder.Popular
+                    },
+                )
+            }
+            true
+        }.show()
+    }
+
     private fun updateSwipeRefreshOffset() {
         if (!isBindingInitialized) return
         val headerHeight = statusBarHeight + currentAppBarHeight()
@@ -179,9 +246,24 @@ class SuggestionsController(
     }
 
     private fun syncAppBarMode() {
-        activityBinding?.appBar?.useTabsInPreLayout = false
-        activityBinding?.appBar?.setToolbarModeBy(this)
-        activityBinding?.appBar?.hideBigView(false)
+        val appBar = activityBinding?.appBar ?: return
+        appBar.lockYPos = false
+        appBar.useTabsInPreLayout = false
+        appBar.setToolbarModeBy(this)
+        appBar.hideBigView(false)
+        appBarScrollProxy.verticalOffset = if (suggestionsCanScrollUp) {
+            Int.MAX_VALUE / 4
+        } else {
+            0
+        }
+        appBar.updateAppBarAfterY(appBarScrollProxy)
+    }
+
+    private fun onSuggestionsCanScrollUpChanged(canScrollUp: Boolean) {
+        if (suggestionsCanScrollUp == canScrollUp) return
+        suggestionsCanScrollUp = canScrollUp
+        syncAppBarMode()
+        updateSwipeRefreshOffset()
     }
 
     @Composable
@@ -189,14 +271,24 @@ class SuggestionsController(
         val density = LocalDensity.current
         val top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
         val bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-        val appBarHeight = with(density) { currentAppBarHeight().toDp() }
+        val appBarHeight = with(density) {
+            currentAppBarHeight().toDp()
+                .coerceAtLeast(minimumExpandedAppBarHeight())
+        }
         return PaddingValues(
             start = 16.dp,
-            top = top + appBarHeight + 16.dp,
+            top = top + appBarHeight + 24.dp,
             end = 16.dp,
             bottom = bottom + 96.dp,
         )
     }
+
+    private fun minimumExpandedAppBarHeight() =
+        if (activityBinding?.appBar?.useLargeToolbar == true) {
+            228.dp
+        } else {
+            0.dp
+        }
 
     private fun currentAppBarHeight(): Int {
         return (activity as? MainActivity)?.bigToolbarHeight(
@@ -219,7 +311,30 @@ class SuggestionsController(
         }
     }
 
+    private fun performGlobalSearch(query: String) {
+        router.pushController(GlobalSearchController(query).withFadeTransaction())
+    }
+
+    private class ComposeAppBarScrollProxy : ScrollingView {
+        var verticalOffset: Int = 0
+
+        override fun computeHorizontalScrollExtent(): Int = 0
+
+        override fun computeHorizontalScrollOffset(): Int = 0
+
+        override fun computeHorizontalScrollRange(): Int = 0
+
+        override fun computeVerticalScrollExtent(): Int = 0
+
+        override fun computeVerticalScrollOffset(): Int = verticalOffset
+
+        override fun computeVerticalScrollRange(): Int = verticalOffset + 1
+    }
+
     private companion object {
         const val FILTER_ALL = 0
+        const val SORT_POPULAR = 1
+        const val SORT_LATEST = 2
+        const val SORT_FILTER = 3
     }
 }

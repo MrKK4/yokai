@@ -1,0 +1,3 @@
+ALTER TABLE suggestions ADD COLUMN display_rank INTEGER NOT NULL DEFAULT 0;
+
+CREATE INDEX suggestions_display_rank_index ON suggestions(display_rank);

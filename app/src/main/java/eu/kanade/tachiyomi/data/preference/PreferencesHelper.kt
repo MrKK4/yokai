@@ -26,6 +26,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import yokai.domain.suggestions.SuggestionSortOrder
 import eu.kanade.tachiyomi.data.preference.PreferenceKeys as Keys
 import eu.kanade.tachiyomi.data.preference.PreferenceValues as Values
 
@@ -203,6 +204,10 @@ class PreferencesHelper(val context: Context, val preferenceStore: PreferenceSto
     fun showLibrarySearchSuggestions() = preferenceStore.getBoolean(Keys.showLibrarySearchSuggestions, false)
 
     fun lastLibrarySuggestion() = preferenceStore.getLong("last_library_suggestion", 0L)
+
+    fun suggestionsTagsBlacklist() = preferenceStore.getStringSet("suggestions_tags_blacklist", emptySet())
+
+    fun suggestionsSortOrder() = preferenceStore.getEnum("suggestions_sort_order", SuggestionSortOrder.Popular)
 
     fun removeAfterReadSlots() = preferenceStore.getInt(Keys.removeAfterReadSlots, -1)
 

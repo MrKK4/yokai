@@ -2,6 +2,7 @@ package yokai.domain.suggestions
 
 import eu.kanade.tachiyomi.data.database.models.Chapter
 import eu.kanade.tachiyomi.data.database.models.History
+import eu.kanade.tachiyomi.data.preference.PreferencesHelper
 import eu.kanade.tachiyomi.domain.manga.models.Manga
 import kotlin.math.exp
 import kotlin.math.ln
@@ -16,24 +17,26 @@ class GetUserAffinityTagsUseCase(
     private val mangaRepository: MangaRepository,
     private val historyRepository: HistoryRepository,
     private val chapterRepository: ChapterRepository,
+    private val preferences: PreferencesHelper,
 ) {
     suspend fun execute(): List<AffinityTag> {
         val mangaList = mangaRepository.getMangaList()
         if (mangaList.isEmpty()) return emptyList()
         val histories = historyRepository.getAll()
         val chapters = chapterRepository.getAll()
+        val blacklistedTags = preferences.suggestionsTagsBlacklist().get().normalizedTagKeys()
 
         return withContext(Dispatchers.Default) {
             val tagNames = mutableMapOf<String, String>()
             val tagFrequency = mangaList
                 .asSequence()
-                .map { manga -> manga.tags().map { it.key }.distinct() }
+                .map { manga -> manga.tags(blacklistedTags).map { it.key }.distinct() }
                 .flatten()
                 .onEach { key -> tagNames.putIfAbsent(key, key.toDisplayTag()) }
                 .groupingBy { it }
                 .eachCount()
 
-            val totalDocs = mangaList.count { it.tags().isNotEmpty() }.coerceAtLeast(1)
+            val totalDocs = mangaList.count { it.tags(blacklistedTags).isNotEmpty() }.coerceAtLeast(1)
             val scoreMap = mutableMapOf<String, Double>()
             val historyByMangaId = histories.groupBy(
                 keySelector = { it.mangaId },
@@ -47,7 +50,7 @@ class GetUserAffinityTagsUseCase(
                 )
 
             for (manga in mangaList) {
-                val tags = manga.tags()
+                val tags = manga.tags(blacklistedTags)
                 if (tags.isEmpty()) continue
                 tags.forEach { tagNames.putIfAbsent(it.key, it.name) }
 
@@ -140,15 +143,24 @@ class GetUserAffinityTagsUseCase(
     private fun idf(tagFrequency: Int, totalDocs: Int): Double =
         ln(totalDocs.toDouble() / (1.0 + tagFrequency)).coerceAtLeast(MIN_IDF)
 
-    private fun Manga.tags(): List<NormalizedTag> =
+    private fun Manga.tags(blacklistedTags: Set<String>): List<NormalizedTag> =
         genre
             ?.split(",")
             ?.mapNotNull { raw ->
                 val tag = raw.trim()
-                tag.takeIf { it.isNotBlank() }?.let { NormalizedTag(name = it, key = it.lowercase()) }
+                tag.takeIf { it.isNotBlank() }?.let { NormalizedTag(name = it, key = it.normalizedTagKey()) }
             }
+            ?.filterNot { it.key in blacklistedTags }
             ?.distinctBy { it.key }
             .orEmpty()
+
+    private fun Set<String>.normalizedTagKeys(): Set<String> =
+        map { it.normalizedTagKey() }
+            .filter { it.isNotBlank() }
+            .toSet()
+
+    private fun String.normalizedTagKey(): String =
+        lowercase().trim().replace(WHITESPACE, " ")
 
     private fun String.toDisplayTag(): String =
         split(" ")
@@ -166,6 +178,7 @@ class GetUserAffinityTagsUseCase(
         private const val LN_2 = 0.6931471805599453
         private const val MILLIS_PER_DAY = 86_400_000.0
         private const val MIN_IDF = 0.05
-        private const val TOP_N = 15
+        private const val TOP_N = 50
+        private val WHITESPACE = Regex("\\s+")
     }
 }
