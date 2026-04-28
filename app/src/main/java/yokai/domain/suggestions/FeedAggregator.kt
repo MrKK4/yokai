@@ -91,6 +91,8 @@ class FeedAggregator(
                 .flatten()
                 .filterNot { hit -> hit.manga.hasBlacklistedTag(blacklistedTags) }
                 .distinctBy { it.sourceId to it.manga.url }
+                .sortedByDescending { it.relevance }
+                .capBySource(MAX_PER_SOURCE_GLOBAL)
                 .take(MAX_TOTAL)
                 .mapIndexed { index, hit ->
                     hit.toSuggestion(displayRank = index.toLong())
@@ -164,16 +166,23 @@ class FeedAggregator(
                 if (includeSourceSection) {
                     add(sourceSectionTask(sources, currentSortOrder))
                 }
+                var lastUsedSourceIds = emptySet<Long>()
                 suggestionQueries
                     .shuffled(random)
                     .forEachIndexed { index, suggestionQuery ->
+                        val taskSources = sourcesForTask(
+                            sources = sources.mixedSources,
+                            taskIndex = index + 1,
+                            usedInPreviousTask = lastUsedSourceIds,
+                        )
+                        lastUsedSourceIds = taskSources.map { it.id }.toSet()
                         add(
                             SectionTask(
                                 kind = SectionKind.Personalized,
                                 reason = suggestionQuery.reason,
                                 query = suggestionQuery,
                                 sortOrder = currentSortOrder,
-                                sources = sourcesForTask(sources.mixedSources, taskIndex = index + 1),
+                                sources = taskSources,
                                 fallbackSources = fallbackSourcesForTask(sources.mixedSources, taskIndex = index + 1),
                             ),
                         )
@@ -261,6 +270,7 @@ class FeedAggregator(
         return withContext(Dispatchers.Default) {
             hits.bestByTitle()
                 .sortedByDescending { it.relevance }
+                .capBySource(MAX_PER_SOURCE_PER_SECTION)
                 .take(MAX_SOURCE_SECTION_TOTAL)
         }
     }
@@ -296,6 +306,7 @@ class FeedAggregator(
         return withContext(Dispatchers.Default) {
             hits.bestByTitle()
                 .sortedByDescending { it.relevance }
+                .capBySource(MAX_PER_SOURCE_PER_SECTION)
                 .take(MAX_SOURCE_SECTION_TOTAL)
                 .shuffled(random)
         }
@@ -335,6 +346,7 @@ class FeedAggregator(
         return withContext(Dispatchers.Default) {
             hits.bestByTitle()
                 .sortedByDescending { it.relevance }
+                .capBySource(MAX_PER_SOURCE_PER_SECTION)
                 .take(MAX_PER_AFFINITY_SECTION)
                 .shuffled(random)
         }
@@ -451,11 +463,18 @@ class FeedAggregator(
         }
     }
 
-    private fun sourcesForTask(sources: List<CatalogueSource>, taskIndex: Int): List<CatalogueSource> {
+    private fun sourcesForTask(
+        sources: List<CatalogueSource>,
+        taskIndex: Int,
+        usedInPreviousTask: Set<Long> = emptySet(),
+    ): List<CatalogueSource> {
         if (sources.isEmpty()) return emptyList()
         val sourceCount = minOf(MAX_SOURCES_PER_SECTION, sources.size)
+        // Prefer sources that were NOT used in the previous task to reduce repetition
+        val preferred = sources.filterNot { it.id in usedInPreviousTask }
+        val pool = (preferred + sources).distinctBy { it.id }
         return List(sourceCount) { offset ->
-            sources[(taskIndex + offset) % sources.size]
+            pool[(taskIndex + offset) % pool.size]
         }
     }
 
@@ -588,6 +607,19 @@ class FeedAggregator(
             )
     }
 
+    private fun List<ScoredManga>.capBySource(max: Int): List<ScoredManga> {
+        val countBySource = mutableMapOf<Long, Int>()
+        return filter { hit ->
+            val count = countBySource.getOrDefault(hit.sourceId, 0)
+            if (count < max) {
+                countBySource[hit.sourceId] = count + 1
+                true
+            } else {
+                false
+            }
+        }
+    }
+
     private companion object {
         private const val MAX_ACTIVE_SOURCES = 8
         private const val FALLBACK_SOURCE_COUNT = 3
@@ -600,6 +632,9 @@ class FeedAggregator(
         private const val MAX_PER_AFFINITY_SECTION = 12
         private const val MAX_TOTAL = MAX_SOURCE_SECTION_TOTAL + (PAGE_TAG_COUNT * MAX_PER_AFFINITY_SECTION)
         private const val MAX_CONCURRENT_SOURCE_REQUESTS = 2
+        // Source diversity caps
+        private const val MAX_PER_SOURCE_PER_SECTION = 3  // per section (latest/popular/personalized)
+        private const val MAX_PER_SOURCE_GLOBAL = 8        // across the entire feed page
         private const val BASE_RELEVANCE = 1_000_000.0
         private const val SOURCE_PENALTY = 0.001
         private const val POSITION_PENALTY = 0.01

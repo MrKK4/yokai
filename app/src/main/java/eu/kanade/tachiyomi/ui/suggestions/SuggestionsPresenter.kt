@@ -375,6 +375,16 @@ class SuggestionsPresenter(
     private fun SuggestedManga.memoryKey(): String =
         "$source:$url"
 
+    fun extractQueryFromReason(reason: String): String? {
+        return when {
+            reason.startsWith(READ_REASON_PREFIX) ->
+                reason.removePrefix(READ_REASON_PREFIX)
+            reason.startsWith(SEARCH_REASON_PREFIX) ->
+                reason.removePrefix(SEARCH_REASON_PREFIX).removeSuffix("\"")
+            else -> null
+        }?.trim()?.takeIf { it.isNotBlank() }
+    }
+
     private fun String.toSuggestionQueryKey(): String? {
         return when {
             startsWith(READ_REASON_PREFIX) -> removePrefix(READ_REASON_PREFIX)
@@ -412,10 +422,10 @@ class SuggestionsPresenter(
 
     private class RefreshBlocked(val userMessage: String) : Exception(userMessage)
 
-    private companion object {
+    internal companion object {
         private const val END_OF_FEED_MESSAGE = "Read more manga to get more suggestions."
-        private const val READ_REASON_PREFIX = "Because you read "
-        private const val SEARCH_REASON_PREFIX = "Because you searched \""
+        internal const val READ_REASON_PREFIX = "Because you read "
+        internal const val SEARCH_REASON_PREFIX = "Because you searched \""
         private val WHITESPACE = Regex("\\s+")
     }
 }

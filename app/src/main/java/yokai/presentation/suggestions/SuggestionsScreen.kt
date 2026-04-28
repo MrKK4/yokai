@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -16,8 +17,12 @@ import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -25,6 +30,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -49,6 +55,7 @@ fun SuggestionsScreen(
     contentPadding: PaddingValues,
     onMangaClick: (Manga) -> Unit,
     onCanScrollUpChanged: (Boolean) -> Unit,
+    onSearchTag: (String) -> Unit,
 ) {
     val state by presenter.state.collectAsState()
     val gridState = rememberSaveable(saver = LazyGridState.Saver) {
@@ -103,7 +110,11 @@ fun SuggestionsScreen(
                             key = "header:$reason",
                             span = { GridItemSpan(maxLineSpan) },
                         ) {
-                            SuggestionHeader(reason = reason)
+                            val query = remember(reason) { presenter.extractQueryFromReason(reason) }
+                            SuggestionHeader(
+                                reason = reason,
+                                onExpand = query?.let { q -> { onSearchTag(q) } },
+                            )
                         }
                         items(
                             items = mangaList,
@@ -269,13 +280,33 @@ private fun EndOfFeedFooter(message: String) {
 @Composable
 private fun SuggestionHeader(
     reason: String,
+    onExpand: (() -> Unit)? = null,
 ) {
-    Text(
-        text = reason,
-        style = MaterialTheme.typography.titleLarge,
-        fontWeight = FontWeight.Bold,
-        modifier = Modifier.padding(top = 4.dp, bottom = 2.dp),
-    )
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 4.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(
+            text = reason,
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.weight(1f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (onExpand != null) {
+            IconButton(onClick = onExpand) {
+                Icon(
+                    imageVector = Icons.Outlined.Search,
+                    contentDescription = "Explore $reason",
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+            }
+        }
+    }
 }
 
 @Composable
