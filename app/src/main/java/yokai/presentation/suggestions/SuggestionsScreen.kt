@@ -12,14 +12,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
@@ -41,7 +39,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
@@ -113,24 +110,15 @@ fun SuggestionsScreen(
                             span = { GridItemSpan(maxLineSpan) },
                         ) {
                             val query = remember(reason) { presenter.extractQueryFromReason(reason) }
-                            val isExpanded = reason in state.expandedReasons
-                            val isLoading = reason in state.expandedSectionLoading
                             SuggestionHeader(
                                 reason = reason,
                                 hasExpandButton = query != null,
-                                isExpanded = isExpanded,
-                                isLoading = isLoading,
                                 onExpand = query?.let { { onExpandSection(reason) } },
                             )
                         }
-                        val displayList = if (reason in state.expandedReasons) {
-                            state.expandedSectionData[reason] ?: mangaList
-                        } else {
-                            mangaList
-                        }
                         items(
-                            items = displayList,
-                            key = { manga -> "expanded:$reason:${manga.source}:${manga.url}" },
+                            items = mangaList,
+                            key = { manga -> "$reason:${manga.source}:${manga.url}" },
                         ) { manga ->
                             SuggestionItem(manga = manga, onClick = { onMangaClick(manga) })
                         }
@@ -167,6 +155,18 @@ fun SuggestionsScreen(
                     blacklistedTags = state.blacklistedTags,
                     onTagToggled = presenter::setTagBlacklisted,
                     onDismissRequest = presenter::dismissTagFilterSheet,
+                )
+            }
+
+            val sheetReason = state.sheetReason
+            if (sheetReason != null) {
+                SuggestionsExpandedSheet(
+                    reason = sheetReason,
+                    results = state.sheetResults,
+                    isLoading = state.sheetIsLoading,
+                    error = state.sheetError,
+                    onMangaClick = onMangaClick,
+                    onDismiss = presenter::dismissExpandSheet,
                 )
             }
         }
@@ -293,8 +293,6 @@ private fun EndOfFeedFooter(message: String) {
 private fun SuggestionHeader(
     reason: String,
     hasExpandButton: Boolean,
-    isExpanded: Boolean,
-    isLoading: Boolean,
     onExpand: (() -> Unit)?,
 ) {
     Row(
@@ -313,28 +311,19 @@ private fun SuggestionHeader(
             overflow = TextOverflow.Ellipsis,
         )
         if (hasExpandButton) {
-            if (isLoading) {
-                CircularProgressIndicator(
-                    modifier = Modifier
-                        .size(24.dp)
-                        .padding(end = 12.dp),
-                    strokeWidth = 2.dp,
+            IconButton(onClick = { onExpand?.invoke() }) {
+                Icon(
+                    imageVector = Icons.Outlined.ExpandMore,
+                    contentDescription = "Expand $reason",
+                    tint = MaterialTheme.colorScheme.primary,
                 )
-            } else {
-                IconButton(onClick = { onExpand?.invoke() }) {
-                    Icon(
-                        imageVector = if (isExpanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
-                        contentDescription = if (isExpanded) "Collapse" else "Expand",
-                        tint = MaterialTheme.colorScheme.primary,
-                    )
-                }
             }
         }
     }
 }
 
 @Composable
-private fun SuggestionItem(manga: Manga, onClick: () -> Unit) {
+internal fun SuggestionItem(manga: Manga, onClick: () -> Unit) {
     ElevatedCard(
         modifier = Modifier
             .fillMaxWidth()

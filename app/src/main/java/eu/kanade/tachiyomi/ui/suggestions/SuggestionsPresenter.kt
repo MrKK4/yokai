@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.update
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 import yokai.domain.manga.interactor.GetManga
@@ -40,9 +41,10 @@ data class SuggestionsState(
     val endMessage: String? = null,
     val emptyMessage: String? = null,
     val sortOrder: SuggestionSortOrder = SuggestionSortOrder.Popular,
-    val expandedReasons: Set<String> = emptySet(),
-    val expandedSectionData: Map<String, List<Manga>> = emptyMap(),
-    val expandedSectionLoading: Set<String> = emptySet(),
+    val sheetReason: String? = null,
+    val sheetResults: List<Manga> = emptyList(),
+    val sheetIsLoading: Boolean = false,
+    val sheetError: String? = null,
 )
 
 class SuggestionsPresenter(
@@ -91,11 +93,11 @@ class SuggestionsPresenter(
                         }
                 }
                 val selectedReason = _state.value.selectedReason?.takeIf { it in grouped.keys }
-                _state.value = _state.value.copy(
+                _state.update { it.copy(
                     suggestions = grouped,
                     selectedReason = selectedReason,
-                    emptyMessage = _state.value.emptyMessage.takeIf { grouped.isEmpty() },
-                )
+                    emptyMessage = it.emptyMessage.takeIf { grouped.isEmpty() },
+                )}
             }
             .launchIn(presenterScope)
 
@@ -134,29 +136,30 @@ class SuggestionsPresenter(
         saveGridScrollPosition(index = 0, scrollOffset = 0)
         usedTags.clear()
         seenMangaUrls.clear()
-        _state.value = _state.value.copy(
+        _state.update { it.copy(
             emptyMessage = null,
             hasReachedEnd = false,
             endMessage = null,
-            expandedReasons = emptySet(),
-            expandedSectionData = emptyMap(),
-            expandedSectionLoading = emptySet(),
-        )
+            sheetReason = null,
+            sheetResults = emptyList(),
+            sheetIsLoading = false,
+            sheetError = null,
+        )}
         updateLoadingState()
 
         presenterScope.launchIO {
             try {
                 val suggestions = buildFreshSuggestions()
                 suggestionsRepository.replaceAll(suggestions)
-                _state.value = _state.value.copy(emptyMessage = null)
+                _state.update { it.copy(emptyMessage = null) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: RefreshBlocked) {
-                _state.value = _state.value.copy(emptyMessage = e.userMessage)
+                _state.update { it.copy(emptyMessage = e.userMessage) }
             } catch (_: Exception) {
-                _state.value = _state.value.copy(
+                _state.update { it.copy(
                     emptyMessage = "Couldn't refresh suggestions. Check your connection and source extensions.",
-                )
+                )}
             } finally {
                 isForegroundRefreshing.set(false)
                 updateLoadingState()
@@ -196,17 +199,17 @@ class SuggestionsPresenter(
                     seenMangaUrls.addAll(rankedSuggestions.map { it.memoryKey() })
                 }
 
-                _state.value = _state.value.copy(
+                _state.update { it.copy(
                     hasReachedEnd = page.hasReachedEnd,
                     endMessage = END_OF_FEED_MESSAGE.takeIf { page.hasReachedEnd },
                     emptyMessage = null,
-                )
+                )}
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
-                _state.value = _state.value.copy(
+                _state.update { it.copy(
                     emptyMessage = "Couldn't load more suggestions. Check your connection and source extensions.",
-                )
+                )}
             } finally {
                 if (generation == feedGeneration.get()) {
                     isPageFetching.set(false)
@@ -217,9 +220,9 @@ class SuggestionsPresenter(
     }
 
     fun setSelectedReason(reason: String?) {
-        _state.value = _state.value.copy(
+        _state.update { it.copy(
             selectedReason = reason?.takeIf { it in _state.value.suggestions.keys },
-        )
+        )}
     }
 
     fun saveGridScrollPosition(index: Int, scrollOffset: Int) {
@@ -236,13 +239,13 @@ class SuggestionsPresenter(
     fun showTagFilterSheet() {
         blacklistChangedInSheet = false
         syncTagFilterState(preferences.suggestionsTagsBlacklist().get())
-        _state.value = _state.value.copy(isTagFilterSheetVisible = true)
+        _state.update { it.copy(isTagFilterSheetVisible = true) }
     }
 
     fun dismissTagFilterSheet() {
         val shouldRefresh = blacklistChangedInSheet
         blacklistChangedInSheet = false
-        _state.value = _state.value.copy(isTagFilterSheetVisible = false)
+        _state.update { it.copy(isTagFilterSheetVisible = false) }
         if (shouldRefresh) {
             rebuildFeed(sortOrder = _state.value.sortOrder)
         }
@@ -273,16 +276,15 @@ class SuggestionsPresenter(
 
     fun expandSection(reason: String) {
         val query = extractQueryFromReason(reason) ?: return
-        if (reason in _state.value.expandedReasons) {
-            _state.value = _state.value.copy(
-                expandedReasons = _state.value.expandedReasons - reason,
-                expandedSectionData = _state.value.expandedSectionData - reason,
-            )
-            return
-        }
-        _state.value = _state.value.copy(
-            expandedSectionLoading = _state.value.expandedSectionLoading + reason,
-        )
+        if (_state.value.sheetIsLoading) return
+
+        _state.update { it.copy(
+            sheetReason = reason,
+            sheetResults = emptyList(),
+            sheetIsLoading = true,
+            sheetError = null,
+        )}
+
         presenterScope.launchIO {
             try {
                 val results = feedAggregator.fetchExpandedSection(
@@ -296,17 +298,26 @@ class SuggestionsPresenter(
                         thumbnail_url = suggested.thumbnailUrl
                     }
                 }
-                _state.value = _state.value.copy(
-                    expandedReasons = _state.value.expandedReasons + reason,
-                    expandedSectionData = _state.value.expandedSectionData + (reason to mangaList),
-                    expandedSectionLoading = _state.value.expandedSectionLoading - reason,
-                )
+                _state.update { it.copy(
+                    sheetResults = mangaList,
+                    sheetIsLoading = false,
+                )}
             } catch (_: Exception) {
-                _state.value = _state.value.copy(
-                    expandedSectionLoading = _state.value.expandedSectionLoading - reason,
-                )
+                _state.update { it.copy(
+                    sheetIsLoading = false,
+                    sheetError = "Couldn't load results. Check your connection.",
+                )}
             }
         }
+    }
+
+    fun dismissExpandSheet() {
+        _state.update { it.copy(
+            sheetReason = null,
+            sheetResults = emptyList(),
+            sheetIsLoading = false,
+            sheetError = null,
+        )}
     }
 
     private fun rebuildFeed(sortOrder: SuggestionSortOrder) {
@@ -316,7 +327,7 @@ class SuggestionsPresenter(
         seenMangaUrls.clear()
         isForegroundRefreshing.set(false)
         isPageFetching.set(false)
-        _state.value = _state.value.copy(
+        _state.update { it.copy(
             suggestions = emptyMap(),
             selectedReason = null,
             isLoading = false,
@@ -325,10 +336,11 @@ class SuggestionsPresenter(
             endMessage = null,
             emptyMessage = null,
             sortOrder = sortOrder,
-            expandedReasons = emptySet(),
-            expandedSectionData = emptyMap(),
-            expandedSectionLoading = emptySet(),
-        )
+            sheetReason = null,
+            sheetResults = emptyList(),
+            sheetIsLoading = false,
+            sheetError = null,
+        )}
         presenterScope.launchIO {
             suggestionsRepository.deleteAll()
             loadNextPage(includeSourceSection = true)
@@ -373,10 +385,10 @@ class SuggestionsPresenter(
 
         val suggestions = page.suggestions.withDisplayRanks(startRank = 0L)
         seenMangaUrls.addAll(suggestions.map { it.memoryKey() })
-        _state.value = _state.value.copy(
+        _state.update { it.copy(
             hasReachedEnd = page.hasReachedEnd,
             endMessage = END_OF_FEED_MESSAGE.takeIf { page.hasReachedEnd },
-        )
+        )}
         if (suggestions.isEmpty()) {
             throw RefreshBlocked(
                 if (page.hasReachedEnd) {
@@ -390,10 +402,10 @@ class SuggestionsPresenter(
     }
 
     private fun updateLoadingState() {
-        _state.value = _state.value.copy(
+        _state.update { it.copy(
             isLoading = isForegroundRefreshing.get() || isWorkerRefreshing,
             isFetching = isForegroundRefreshing.get() || isPageFetching.get(),
-        )
+        )}
     }
 
     private fun shouldKeepCurrentSuggestions(suggestedList: List<SuggestedManga>): Boolean {
@@ -448,10 +460,10 @@ class SuggestionsPresenter(
             .filter { it.isNotBlank() }
             .distinctBy { it.normalizedQuery() }
             .sortedWith(String.CASE_INSENSITIVE_ORDER)
-        _state.value = _state.value.copy(
+        _state.update { it.copy(
             availableTags = availableTags,
             blacklistedTags = blacklistedTags,
-        )
+        )}
     }
 
     private fun List<Manga>.extractKnownTags(): List<String> {

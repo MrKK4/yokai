@@ -428,6 +428,8 @@ class FeedAggregator(
         val localTitles = localManga.map { it.title.normalizedTitle() }.toSet()
         val blacklistedTags = preferences.suggestionsTagsBlacklist().get().normalizedQueries()
         val allSources = sourceManager.getCatalogueSources()
+            .shuffled(random)
+            .take(MAX_ACTIVE_SOURCES)
         val requestGate = Semaphore(MAX_CONCURRENT_SOURCE_REQUESTS)
         val suggestionQuery = SuggestionQuery(query = query, reason = reason, score = 0.0)
 
