@@ -81,6 +81,18 @@ android {
         }
     }
 
+    val keystoreFile = project.findProperty("KEYSTORE_FILE") as? String
+    if (!keystoreFile.isNullOrEmpty()) {
+        signingConfigs {
+            create("release") {
+                storeFile = file(keystoreFile)
+                storePassword = project.findProperty("KEYSTORE_PASSWORD") as? String
+                keyAlias = project.findProperty("KEY_ALIAS") as? String
+                keyPassword = project.findProperty("KEY_PASSWORD") as? String
+            }
+        }
+    }
+
     buildTypes {
         getByName("debug") {
             applicationIdSuffix = ".debugYokai"
@@ -91,6 +103,9 @@ android {
             isShrinkResources = true
             isMinifyEnabled = true
             proguardFiles("proguard-android-optimize.txt", "proguard-rules.pro")
+            if (!keystoreFile.isNullOrEmpty()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
         create("beta") {
             initWith(getByName("release"))
