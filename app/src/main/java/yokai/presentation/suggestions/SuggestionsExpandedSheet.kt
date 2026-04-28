@@ -138,7 +138,8 @@ fun SuggestionsExpandedSheet(
                                 manga = manga,
                                 onClick = {
                                     onMangaClick(manga)
-                                    onDismiss()
+                                    // Don't dismiss — presenter state is preserved while the
+                                    // controller is in the backstack. Sheet will reconstruct on return.
                                 },
                             )
                         }

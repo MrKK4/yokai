@@ -27,6 +27,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -193,6 +194,7 @@ private fun ReportScrollPosition(
     gridState: LazyGridState,
     onScrollPositionChanged: (index: Int, scrollOffset: Int) -> Unit,
 ) {
+    // Fires on every scroll change (async)
     LaunchedEffect(gridState) {
         snapshotFlow {
             gridState.firstVisibleItemIndex to gridState.firstVisibleItemScrollOffset
@@ -201,6 +203,16 @@ private fun ReportScrollPosition(
             .collect { (index, scrollOffset) ->
                 onScrollPositionChanged(index, scrollOffset)
             }
+    }
+    // Fires synchronously on composition dispose (tab switch / navigation).
+    // Guarantees the very last position is saved even if the flow hadn't emitted yet.
+    DisposableEffect(gridState) {
+        onDispose {
+            onScrollPositionChanged(
+                gridState.firstVisibleItemIndex,
+                gridState.firstVisibleItemScrollOffset,
+            )
+        }
     }
 }
 
