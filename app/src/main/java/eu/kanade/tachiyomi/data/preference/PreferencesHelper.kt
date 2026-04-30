@@ -209,6 +209,10 @@ class PreferencesHelper(val context: Context, val preferenceStore: PreferenceSto
 
     fun suggestionsSortOrder() = preferenceStore.getEnum("suggestions_sort_order", SuggestionSortOrder.Popular)
 
+    fun usedSuggestionTags() = preferenceStore.getStringSet("used_suggestion_tags", emptySet())
+
+    fun recentlyUsedSourceIds() = preferenceStore.getStringSet("recently_used_source_ids", emptySet())
+
     fun removeAfterReadSlots() = preferenceStore.getInt(Keys.removeAfterReadSlots, -1)
 
     fun removeAfterMarkedAsRead() = preferenceStore.getBoolean(Keys.removeAfterMarkedAsRead, false)

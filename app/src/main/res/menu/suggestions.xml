@@ -24,8 +24,9 @@
         app:showAsAction="ifRoom" />
 
     <item
-        android:id="@+id/action_more"
-        android:icon="@drawable/ic_more_vert_24dp"
-        android:title="@string/more"
-        app:showAsAction="ifRoom" />
+        android:id="@+id/action_filter"
+        android:icon="@drawable/ic_label_outline_24dp"
+        android:title="Filter by section"
+        app:showAsAction="never" />
+
 </menu>

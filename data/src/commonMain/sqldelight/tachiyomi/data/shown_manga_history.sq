@@ -1,0 +1,24 @@
+CREATE TABLE shown_manga_history(
+    source INTEGER NOT NULL,
+    url TEXT NOT NULL,
+    shown_at INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (source, url)
+);
+
+CREATE INDEX shown_manga_history_shown_at_index ON shown_manga_history(shown_at);
+
+deleteOlderThan:
+DELETE FROM shown_manga_history WHERE shown_at < :cutoff;
+
+insertShown:
+INSERT OR REPLACE INTO shown_manga_history(source, url, shown_at)
+VALUES (:source, :url, :shownAt);
+
+findAllKeys:
+SELECT (source || ':' || url) AS key FROM shown_manga_history;
+
+count:
+SELECT COUNT(*) FROM shown_manga_history;
+
+deleteAll:
+DELETE FROM shown_manga_history;

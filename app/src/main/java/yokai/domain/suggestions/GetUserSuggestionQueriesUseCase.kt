@@ -14,9 +14,14 @@ class GetUserSuggestionQueriesUseCase(
 
         return withContext(Dispatchers.Default) {
             val tagQueries = affinityTags.map { tag ->
+                val reason = when {
+                    tag.score > HIGH_AFFINITY_THRESHOLD -> "Because you love ${tag.name}"
+                    tag.score > MID_AFFINITY_THRESHOLD  -> "Because you often read ${tag.name}"
+                    else                                -> "Because you read ${tag.name}"
+                }
                 SuggestionQuery(
                     query = tag.name,
-                    reason = "Because you read ${tag.name}",
+                    reason = reason,
                     score = tag.score,
                 )
             }
@@ -54,6 +59,10 @@ class GetUserSuggestionQueriesUseCase(
         private const val MAX_SAVED_SEARCH_QUERIES = 8
         private const val MAX_TOTAL_QUERIES = 64
         private const val SAVED_SEARCH_SCORE = 1.5
+        /** Score above which the reason says "Because you love <tag>" */
+        private const val HIGH_AFFINITY_THRESHOLD = 5.0
+        /** Score above which the reason says "Because you often read <tag>" */
+        private const val MID_AFFINITY_THRESHOLD = 2.0
         private val WHITESPACE = Regex("\\s+")
     }
 }

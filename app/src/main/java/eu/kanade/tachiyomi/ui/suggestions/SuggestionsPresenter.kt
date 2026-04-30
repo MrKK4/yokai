@@ -26,6 +26,7 @@ import yokai.domain.manga.interactor.UpdateManga
 import yokai.domain.manga.models.MangaUpdate
 import yokai.domain.suggestions.FeedAggregator
 import yokai.domain.suggestions.GetUserSuggestionQueriesUseCase
+import yokai.domain.suggestions.ShownMangaHistoryRepository
 import yokai.domain.suggestions.SuggestedManga
 import yokai.domain.suggestions.SuggestionSortOrder
 import yokai.domain.suggestions.SuggestionsRepository
@@ -52,6 +53,7 @@ data class SuggestionsState(
 class SuggestionsPresenter(
     private val context: Context,
     private val suggestionsRepository: SuggestionsRepository = Injekt.get(),
+    private val shownHistoryRepository: ShownMangaHistoryRepository = Injekt.get(),
     private val preferences: PreferencesHelper = Injekt.get(),
     private val getManga: GetManga = Injekt.get(),
     private val insertManga: InsertManga = Injekt.get(),
@@ -82,6 +84,16 @@ class SuggestionsPresenter(
 
     override fun onCreate() {
         super.onCreate()
+
+        // Load persistent shown history into the session seen-set so refreshes
+        // never re-show manga that appeared in a previous session.
+        presenterScope.launchIO {
+            shownHistoryRepository.deleteOlderThan(
+                System.currentTimeMillis() - HISTORY_TTL_MILLIS,
+            )
+            val history = shownHistoryRepository.getAllKeys()
+            seenMangaUrls.addAll(history)
+        }
 
         suggestionsRepository.getSuggestionsAsFlow()
             .onEach { suggestedList ->
@@ -137,11 +149,15 @@ class SuggestionsPresenter(
     fun refresh() {
         if (!isForegroundRefreshing.compareAndSet(false, true)) return
         feedGeneration.incrementAndGet()
-        currentPageOffset = Random.nextInt(1, 4)   // randomize page 1–3 on each refresh
+        currentPageOffset = Random.nextInt(1, 8)   // randomize page 1–7 on each refresh
         isPageFetching.set(false)
         saveGridScrollPosition(index = 0, scrollOffset = 0)
         usedTags.clear()
-        seenMangaUrls.clear()
+        // seenMangaUrls is NOT cleared — it survives refreshes via persistent history
+
+        // Load persisted tag rotation so we pick up where we left off
+        usedTags.addAll(preferences.usedSuggestionTags().get())
+
         _state.update { it.copy(
             emptyMessage = null,
             hasReachedEnd = false,
@@ -158,6 +174,14 @@ class SuggestionsPresenter(
             try {
                 val suggestions = buildFreshSuggestions(currentPageOffset)
                 suggestionsRepository.replaceAll(suggestions)
+                // Persist shown manga into the 30-day history
+                shownHistoryRepository.insertAll(
+                    suggestions.map { it.source to it.url },
+                )
+                // Persist tag rotation: if all tags exhausted, reset
+                val allUsed = usedTags.toSet()
+                val nextUsed = if (allUsed.size >= TOTAL_TAG_ROTATION_SIZE) emptySet() else allUsed
+                preferences.usedSuggestionTags().set(nextUsed)
                 _state.update { it.copy(emptyMessage = null) }
             } catch (e: CancellationException) {
                 throw e
@@ -206,6 +230,10 @@ class SuggestionsPresenter(
                 if (rankedSuggestions.isNotEmpty()) {
                     suggestionsRepository.insertSuggestions(rankedSuggestions)
                     seenMangaUrls.addAll(rankedSuggestions.map { it.memoryKey() })
+                    // Persist shown manga into the 30-day history
+                    shownHistoryRepository.insertAll(
+                        rankedSuggestions.map { it.source to it.url },
+                    )
                 }
 
                 _state.update { it.copy(
@@ -229,9 +257,9 @@ class SuggestionsPresenter(
     }
 
     fun setSelectedReason(reason: String?) {
-        _state.update { it.copy(
-            selectedReason = reason?.takeIf { it in _state.value.suggestions.keys },
-        )}
+        _state.update { state ->
+            state.copy(selectedReason = reason?.takeIf { it in state.suggestions.keys })
+        }
     }
 
     fun saveGridScrollPosition(index: Int, scrollOffset: Int) {
@@ -294,12 +322,15 @@ class SuggestionsPresenter(
             sheetError = null,
         )}
 
+        val currentSeenUrls = seenMangaUrls.toSet() // capture snapshot before coroutine
+
         presenterScope.launchIO {
             try {
                 val results = feedAggregator.fetchExpandedSection(
                     query = query,
                     reason = reason,
                     sortOrder = _state.value.sortOrder,
+                    seenMangaUrls = currentSeenUrls,
                 )
                 val mangaList = results.map { suggested ->
                     MangaImpl(source = suggested.source, url = suggested.url).apply {
@@ -351,10 +382,10 @@ class SuggestionsPresenter(
 
     private fun rebuildFeed(sortOrder: SuggestionSortOrder) {
         feedGeneration.incrementAndGet()
-        currentPageOffset = Random.nextInt(1, 4)   // re-roll page offset on sort/filter rebuild
+        currentPageOffset = Random.nextInt(1, 8)   // re-roll page offset on sort/filter rebuild
         saveGridScrollPosition(index = 0, scrollOffset = 0)
         usedTags.clear()
-        seenMangaUrls.clear()
+        // seenMangaUrls is NOT cleared — persistent history handles deduplication
         isForegroundRefreshing.set(false)
         isPageFetching.set(false)
         _state.update { it.copy(
@@ -405,10 +436,13 @@ class SuggestionsPresenter(
     }
 
     private suspend fun buildFreshSuggestions(pageOffset: Int = 1): List<SuggestedManga> {
+        // Algorithm Issue 1: detect cold-start (no library) before fetching
+        val librarySize = getManga.awaitAll().size
+
         val page = feedAggregator.fetchPage(
             suggestionQueries = getSuggestionQueries.execute(),
-            usedTags = emptySet(),
-            seenMangaUrls = emptySet(),
+            usedTags = usedTags.toSet(),
+            seenMangaUrls = seenMangaUrls.toSet(),
             currentSortOrder = _state.value.sortOrder,
             includeSourceSection = true,
             pageOffset = pageOffset,
@@ -423,10 +457,13 @@ class SuggestionsPresenter(
         )}
         if (suggestions.isEmpty()) {
             throw RefreshBlocked(
-                if (page.hasReachedEnd) {
-                    END_OF_FEED_MESSAGE
-                } else {
-                    "No latest updates or personalized matches came back from your active sources."
+                when {
+                    librarySize == 0 ->
+                        "Add some manga to your library to get personalized suggestions."
+                    page.hasReachedEnd ->
+                        END_OF_FEED_MESSAGE
+                    else ->
+                        "No latest updates or personalized matches came back from your active sources."
                 },
             )
         }
@@ -436,7 +473,8 @@ class SuggestionsPresenter(
     private fun updateLoadingState() {
         _state.update { it.copy(
             isLoading = isForegroundRefreshing.get() || isWorkerRefreshing,
-            isFetching = isForegroundRefreshing.get() || isPageFetching.get(),
+            // isFetching drives the pagination spinner only — not the full-refresh spinner
+            isFetching = isPageFetching.get() && !isForegroundRefreshing.get(),
         )}
     }
 
@@ -467,9 +505,12 @@ class SuggestionsPresenter(
         "$source:$url"
 
     fun extractQueryFromReason(reason: String): String? {
+        // Match all three reason tiers: "Because you love X",
+        // "Because you often read X", "Because you read X", and saved-search.
+        val tagPrefix = READ_REASON_PREFIXES.firstOrNull { reason.startsWith(it) }
         return when {
-            reason.startsWith(READ_REASON_PREFIX) ->
-                reason.removePrefix(READ_REASON_PREFIX)
+            tagPrefix != null ->
+                reason.removePrefix(tagPrefix)
             reason.startsWith(SEARCH_REASON_PREFIX) ->
                 reason.removePrefix(SEARCH_REASON_PREFIX).removeSuffix("\"")
             else -> null
@@ -477,8 +518,9 @@ class SuggestionsPresenter(
     }
 
     private fun String.toSuggestionQueryKey(): String? {
+        val tagPrefix = READ_REASON_PREFIXES.firstOrNull { startsWith(it) }
         return when {
-            startsWith(READ_REASON_PREFIX) -> removePrefix(READ_REASON_PREFIX)
+            tagPrefix != null -> removePrefix(tagPrefix)
             startsWith(SEARCH_REASON_PREFIX) -> removePrefix(SEARCH_REASON_PREFIX).substringBeforeLast("\"")
             else -> null
         }
@@ -515,8 +557,19 @@ class SuggestionsPresenter(
 
     internal companion object {
         private const val END_OF_FEED_MESSAGE = "Read more manga to get more suggestions."
+        // Ordered longest-first so the more specific prefixes match before the shorter one.
+        internal val READ_REASON_PREFIXES = listOf(
+            "Because you love ",
+            "Because you often read ",
+            "Because you read ",
+        )
+        /** Legacy alias kept so call-sites that use READ_REASON_PREFIX still compile. */
         internal const val READ_REASON_PREFIX = "Because you read "
         internal const val SEARCH_REASON_PREFIX = "Because you searched \""
         private val WHITESPACE = Regex("\\s+")
+        /** After this many distinct tags are used, reset the rotation so all tags are eligible again. */
+        private const val TOTAL_TAG_ROTATION_SIZE = 50
+        /** Shown manga older than 30 days become eligible to appear again. */
+        private const val HISTORY_TTL_MILLIS = 30L * 24 * 60 * 60 * 1_000
     }
 }

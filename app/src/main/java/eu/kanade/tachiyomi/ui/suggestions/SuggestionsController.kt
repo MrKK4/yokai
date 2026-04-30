@@ -70,7 +70,7 @@ class SuggestionsController(
     override fun createBinding(inflater: LayoutInflater) = SuggestionsControllerBinding.inflate(inflater)
 
     override fun getTitle(): String? {
-        return "Suggestions"
+        return view?.context?.getString(MR.strings.suggestions) ?: "Suggestions"
     }
 
     override fun getSearchTitle(): String? {
@@ -214,7 +214,7 @@ class SuggestionsController(
             MaterialMenuSheet.MenuSheetItem(
                 id = SORT_FILTER,
                 drawable = R.drawable.ic_filter_list_24dp,
-                text = "Filter sections",
+                text = "Filter by section",
             ),
         )
 

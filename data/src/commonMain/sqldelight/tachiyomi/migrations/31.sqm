@@ -1,0 +1,8 @@
+CREATE TABLE shown_manga_history(
+    source INTEGER NOT NULL,
+    url TEXT NOT NULL,
+    shown_at INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (source, url)
+);
+
+CREATE INDEX shown_manga_history_shown_at_index ON shown_manga_history(shown_at);

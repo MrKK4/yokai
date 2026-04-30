@@ -26,6 +26,26 @@ class GetUserAffinityTagsUseCase(
         val chapters = chapterRepository.getAll()
         val blacklistedTags = preferences.suggestionsTagsBlacklist().get().normalizedTagKeys()
 
+        // Small-library fast path: IDF is meaningless with very few titles,
+        // so just return raw tag frequency ranking instead.
+        if (mangaList.size < MIN_CORPUS_SIZE) {
+            return withContext(Dispatchers.Default) {
+                mangaList
+                    .flatMap { manga -> manga.tags(blacklistedTags) }
+                    .groupingBy { it.key }
+                    .eachCount()
+                    .entries
+                    .sortedByDescending { it.value }
+                    .take(TOP_N)
+                    .map { (key, count) ->
+                        AffinityTag(
+                            name = key.toDisplayTag(),
+                            score = count.toDouble(),
+                        )
+                    }
+            }
+        }
+
         return withContext(Dispatchers.Default) {
             val tagNames = mutableMapOf<String, String>()
             val tagFrequency = mangaList
@@ -75,6 +95,28 @@ class GetUserAffinityTagsUseCase(
                         tagFrequency = tagFrequency,
                         scoreMap = scoreMap,
                     )
+                }
+            }
+
+            // Apply DROPPED_EARLY suppression: reduce scores for tags from manga the user
+            // abandoned quickly. Uses a penalty multiplier so one dropped title doesn't
+            // completely cancel out many positive signals for the same tag.
+            for (manga in mangaList) {
+                val mangaId = manga.id ?: continue
+                val mangaChapters = chaptersByMangaId[mangaId].orEmpty()
+                val mangaHistories = historyByMangaId[mangaId].orEmpty()
+                val chaptersRead = mangaChapters.count { it.read || it.last_page_read > 0 }
+                val lastReadAt = mangaHistories.maxOfOrNull { it.last_read } ?: 0L
+                val interaction = InteractionClassifier.classify(
+                    chaptersRead = chaptersRead,
+                    totalChapters = mangaChapters.size,
+                    isFavorited = false,
+                    lastReadAt = lastReadAt,
+                )
+                if (interaction == InteractionType.DROPPED_EARLY) {
+                    manga.tags(blacklistedTags).forEach { tag ->
+                        scoreMap[tag.key] = (scoreMap[tag.key] ?: 0.0) * DROPPED_TAG_PENALTY
+                    }
                 }
             }
 
@@ -179,6 +221,10 @@ class GetUserAffinityTagsUseCase(
         private const val MILLIS_PER_DAY = 86_400_000.0
         private const val MIN_IDF = 0.05
         private const val TOP_N = 50
+        /** Minimum library size before IDF scoring is applied. Below this, use raw frequency. */
+        private const val MIN_CORPUS_SIZE = 15
+        /** Multiply tag scores by this when the manga was dropped early (not zeroed — other reads may still signal the tag). */
+        private const val DROPPED_TAG_PENALTY = 0.4
         private val WHITESPACE = Regex("\\s+")
     }
 }

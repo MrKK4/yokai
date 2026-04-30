@@ -178,7 +178,7 @@ class FeedAggregator(
                                 sortOrder = currentSortOrder,
                                 sources = taskSources,
                                 fallbackSources = fallbackSourcesForTask(sources.mixedSources, taskIndex = index + 1),
-                                pageOffset = random.nextInt(1, 3),  // Random page 1–2 for search (page 3+ is often empty for niche tags)
+                                pageOffset = random.nextInt(1, 6),  // Random page 1–5 for search to reach deeper into catalogues
                             ),
                         )
                     }
@@ -400,7 +400,7 @@ class FeedAggregator(
         requestGate: Semaphore,
         random: Random = Random.Default,
     ): List<ScoredManga> {
-        val page = random.nextInt(1, 4)
+        val page = random.nextInt(1, 8)
         return sourceResult {
             requestGate.withPermit {
                 source.getPopularManga(page)
@@ -427,6 +427,7 @@ class FeedAggregator(
         query: String,
         reason: String,
         sortOrder: SuggestionSortOrder,
+        seenMangaUrls: Set<String> = emptySet(),
     ): List<SuggestedManga> {
         val random = Random(System.nanoTime())
         val localManga = mangaRepository.getMangaList()
@@ -451,7 +452,7 @@ class FeedAggregator(
                         sortOrder = sortOrder,
                         localKeys = localKeys,
                         localTitles = localTitles,
-                        seenMangaUrls = emptySet(),
+                        seenMangaUrls = seenMangaUrls,
                         blacklistedTags = blacklistedTags,
                         requestGate = requestGate,
                         random = random,
@@ -507,13 +508,21 @@ class FeedAggregator(
 
     private suspend fun activeSources(random: Random): SourceSelection {
         val pinnedCatalogueIds = preferences.pinnedCatalogues().get()
+        val recentSourceIds = preferences.recentlyUsedSourceIds().get()
         val allSources = sourceManager.getCatalogueSources()
         val pinnedSources = allSources.filter { source -> source.id.toString() in pinnedCatalogueIds }
         val sourceCandidates = pinnedSources.takeIf { it.isNotEmpty() } ?: allSources
         val limit = if (pinnedSources.isNotEmpty()) MAX_ACTIVE_SOURCES else FALLBACK_SOURCE_COUNT
 
         return withContext(Dispatchers.Default) {
-            val selectedSources = sourceCandidates.shuffled(random).take(limit)
+            // Deprioritize sources that were used in the previous refresh
+            val selectedSources = sourceCandidates
+                .sortedBy { if (it.id.toString() in recentSourceIds) 1 else 0 }
+                .shuffled(random)
+                .take(limit)
+            preferences.recentlyUsedSourceIds().set(
+                selectedSources.map { it.id.toString() }.toSet(),
+            )
             SourceSelection(
                 latestSources = selectedSources,
                 mixedSources = selectedSources.shuffled(random),
@@ -685,8 +694,8 @@ class FeedAggregator(
         private const val MAX_SOURCES_PER_SECTION = 5
         private const val MAX_SOURCES_FOR_POPULAR = 6
         private const val MAX_LATEST_SOURCES = 4
-        private const val PAGE_TAG_COUNT = 2
-        private const val TAG_SELECTION_JITTER = 0.6  // Higher = more variety, lower = more quality bias
+        private const val PAGE_TAG_COUNT = 4
+        private const val TAG_SELECTION_JITTER = 0.25  // Lower = more quality bias, rotation handles variety
         private const val MAX_SOURCE_SECTION_TOTAL = 30
         private const val MAX_PER_AFFINITY_SECTION = 20
         private const val MAX_TOTAL = MAX_SOURCE_SECTION_TOTAL + (PAGE_TAG_COUNT * MAX_PER_AFFINITY_SECTION)

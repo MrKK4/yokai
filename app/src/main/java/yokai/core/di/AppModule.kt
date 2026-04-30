@@ -36,9 +36,11 @@ import uy.kohesive.injekt.api.get
 import yokai.data.AndroidDatabaseHandler
 import yokai.data.Database
 import yokai.data.DatabaseHandler
+import yokai.data.suggestions.ShownMangaHistoryRepositoryImpl
 import yokai.data.suggestions.SuggestionsRepositoryImpl
 import yokai.domain.SplashState
 import yokai.domain.storage.StorageManager
+import yokai.domain.suggestions.ShownMangaHistoryRepository
 import yokai.domain.suggestions.SuggestionsRepository
 
 fun appModule(app: Application) = module {
@@ -46,6 +48,7 @@ fun appModule(app: Application) = module {
     single<Context> { app }
 
     single<SuggestionsRepository> { SuggestionsRepositoryImpl(get()) }
+    single<ShownMangaHistoryRepository> { ShownMangaHistoryRepositoryImpl(get()) }
 
     single<SqlDriver> {
         AndroidSqliteDriver(

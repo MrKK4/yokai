@@ -247,6 +247,9 @@
     <string name="search_tips_show_periodically">Search tips will show up periodically. Long press the suggestion to search it.</string>
     <string name="enable_chapter_swipe_action">Enable chapter swipe action</string>
 
+    <!-- Suggestions -->
+    <string name="suggestions">Suggestions</string>
+
     <!-- Recents -->
     <string name="recents">Recents</string>
     <string name="updates_and_history">Updates &amp; history</string>
