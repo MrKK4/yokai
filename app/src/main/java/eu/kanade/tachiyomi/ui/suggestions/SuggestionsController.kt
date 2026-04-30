@@ -131,16 +131,8 @@ class SuggestionsController(
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         return when (item.itemId) {
-            R.id.action_filter -> {
-                showFilterSheet()
-                true
-            }
             R.id.action_sort -> {
                 showSortSheet()
-                true
-            }
-            R.id.action_tag_filter -> {
-                presenter.showTagFilterSheet()
                 true
             }
             else -> super.onOptionsItemSelected(item)
@@ -216,6 +208,11 @@ class SuggestionsController(
                 drawable = R.drawable.ic_filter_list_24dp,
                 text = "Filter by section",
             ),
+            MaterialMenuSheet.MenuSheetItem(
+                id = SORT_TAG_FILTER,
+                drawable = R.drawable.ic_label_outline_24dp,
+                text = "Exclude tags",
+            ),
         )
 
         MaterialMenuSheet(
@@ -224,10 +221,10 @@ class SuggestionsController(
             title = "Sort suggestions",
             selectedId = selectedId,
         ) { _, itemId ->
-            if (itemId == SORT_FILTER) {
-                binding.root.post { showFilterSheet() }
-            } else {
-                presenter.setSortOrder(
+            when (itemId) {
+                SORT_FILTER -> binding.root.post { showFilterSheet() }
+                SORT_TAG_FILTER -> binding.root.post { presenter.showTagFilterSheet() }
+                else -> presenter.setSortOrder(
                     when (itemId) {
                         SORT_LATEST -> SuggestionSortOrder.Latest
                         else -> SuggestionSortOrder.Popular
@@ -344,5 +341,6 @@ class SuggestionsController(
         const val SORT_POPULAR = 1
         const val SORT_LATEST = 2
         const val SORT_FILTER = 3
+        const val SORT_TAG_FILTER = 4
     }
 }
