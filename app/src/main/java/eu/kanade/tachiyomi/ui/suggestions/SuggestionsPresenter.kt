@@ -10,6 +10,7 @@ import eu.kanade.tachiyomi.ui.base.presenter.BaseCoroutinePresenter
 import eu.kanade.tachiyomi.util.system.launchIO
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.random.Random
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -75,6 +76,9 @@ class SuggestionsPresenter(
         private set
     private val getSuggestionQueries: GetUserSuggestionQueriesUseCase = Injekt.get()
     private val feedAggregator: FeedAggregator = Injekt.get()
+    /** Random page offset (1–3) re-rolled on every user-initiated refresh so each
+     *  refresh fetches a different page from each source, guaranteeing variety. */
+    @Volatile private var currentPageOffset: Int = 1
 
     override fun onCreate() {
         super.onCreate()
@@ -133,6 +137,7 @@ class SuggestionsPresenter(
     fun refresh() {
         if (!isForegroundRefreshing.compareAndSet(false, true)) return
         feedGeneration.incrementAndGet()
+        currentPageOffset = Random.nextInt(1, 4)   // randomize page 1–3 on each refresh
         isPageFetching.set(false)
         saveGridScrollPosition(index = 0, scrollOffset = 0)
         usedTags.clear()
@@ -151,7 +156,7 @@ class SuggestionsPresenter(
 
         presenterScope.launchIO {
             try {
-                val suggestions = buildFreshSuggestions()
+                val suggestions = buildFreshSuggestions(currentPageOffset)
                 suggestionsRepository.replaceAll(suggestions)
                 _state.update { it.copy(emptyMessage = null) }
             } catch (e: CancellationException) {
@@ -178,6 +183,7 @@ class SuggestionsPresenter(
         if (currentState.hasReachedEnd || currentState.selectedReason != null) return
         if (!isPageFetching.compareAndSet(false, true)) return
         val generation = feedGeneration.get()
+        val pageOffset = currentPageOffset
         updateLoadingState()
 
         presenterScope.launchIO {
@@ -188,6 +194,7 @@ class SuggestionsPresenter(
                     seenMangaUrls = seenMangaUrls.toSet(),
                     currentSortOrder = _state.value.sortOrder,
                     includeSourceSection = includeSourceSection,
+                    pageOffset = pageOffset,
                 )
                 if (generation != feedGeneration.get()) return@launchIO
                 usedTags.addAll(page.usedTags)
@@ -344,6 +351,7 @@ class SuggestionsPresenter(
 
     private fun rebuildFeed(sortOrder: SuggestionSortOrder) {
         feedGeneration.incrementAndGet()
+        currentPageOffset = Random.nextInt(1, 4)   // re-roll page offset on sort/filter rebuild
         saveGridScrollPosition(index = 0, scrollOffset = 0)
         usedTags.clear()
         seenMangaUrls.clear()
@@ -396,13 +404,14 @@ class SuggestionsPresenter(
         }.takeIf { it.id != null }
     }
 
-    private suspend fun buildFreshSuggestions(): List<SuggestedManga> {
+    private suspend fun buildFreshSuggestions(pageOffset: Int = 1): List<SuggestedManga> {
         val page = feedAggregator.fetchPage(
             suggestionQueries = getSuggestionQueries.execute(),
             usedTags = emptySet(),
             seenMangaUrls = emptySet(),
             currentSortOrder = _state.value.sortOrder,
             includeSourceSection = true,
+            pageOffset = pageOffset,
         )
         usedTags.addAll(page.usedTags)
 

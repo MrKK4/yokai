@@ -29,6 +29,7 @@ class FeedAggregator(
             seenMangaUrls = emptySet(),
             currentSortOrder = preferences.suggestionsSortOrder().get(),
             includeSourceSection = true,
+            pageOffset = 1,
         ).suggestions
     }
 
@@ -38,6 +39,7 @@ class FeedAggregator(
         seenMangaUrls: Set<String>,
         currentSortOrder: SuggestionSortOrder,
         includeSourceSection: Boolean,
+        pageOffset: Int = 1,
     ): SuggestionFeedPage {
         val random = Random(System.nanoTime())
         val localManga = mangaRepository.getMangaList()
@@ -68,6 +70,7 @@ class FeedAggregator(
             suggestionQueries = querySelection.selectedQueries,
             currentSortOrder = currentSortOrder,
             includeSourceSection = includeSourceSection,
+            pageOffset = pageOffset,
             random = random,
         )
         val sectionResults = coroutineScope {
@@ -159,12 +162,13 @@ class FeedAggregator(
         suggestionQueries: List<SuggestionQuery>,
         currentSortOrder: SuggestionSortOrder,
         includeSourceSection: Boolean,
+        pageOffset: Int,
         random: Random,
     ): List<SectionTask> {
         return withContext(Dispatchers.Default) {
             buildList {
                 if (includeSourceSection) {
-                    add(sourceSectionTask(sources, currentSortOrder))
+                    add(sourceSectionTask(sources, currentSortOrder, pageOffset, random))
                 }
                 var lastUsedSourceIds = emptySet<Long>()
                 suggestionQueries
@@ -184,6 +188,7 @@ class FeedAggregator(
                                 sortOrder = currentSortOrder,
                                 sources = taskSources,
                                 fallbackSources = fallbackSourcesForTask(sources.mixedSources, taskIndex = index + 1),
+                                pageOffset = pageOffset,
                             ),
                         )
                     }
@@ -194,6 +199,8 @@ class FeedAggregator(
     private fun sourceSectionTask(
         sources: SourceSelection,
         currentSortOrder: SuggestionSortOrder,
+        pageOffset: Int,
+        random: Random,
     ): SectionTask {
         return when (currentSortOrder) {
             SuggestionSortOrder.Latest -> SectionTask(
@@ -202,6 +209,7 @@ class FeedAggregator(
                 sortOrder = currentSortOrder,
                 sources = sources.latestSources.take(MAX_LATEST_SOURCES),
                 fallbackSources = sources.latestSources.drop(MAX_LATEST_SOURCES),
+                pageOffset = pageOffset,
             )
             SuggestionSortOrder.Popular -> SectionTask(
                 kind = SectionKind.Popular,
@@ -209,6 +217,7 @@ class FeedAggregator(
                 sortOrder = currentSortOrder,
                 sources = sources.mixedSources.take(MAX_SOURCES_FOR_POPULAR),
                 fallbackSources = sources.mixedSources.drop(MAX_SOURCES_FOR_POPULAR),
+                pageOffset = pageOffset,
             )
         }
     }
@@ -225,7 +234,7 @@ class FeedAggregator(
         if (task.sources.isEmpty()) return emptyList()
 
         val primaryResults = when (task.kind) {
-            SectionKind.Latest -> fetchLatestSection(task, localKeys, localTitles, seenMangaUrls, blacklistedTags, requestGate)
+            SectionKind.Latest -> fetchLatestSection(task, localKeys, localTitles, seenMangaUrls, blacklistedTags, requestGate, random)
             SectionKind.Popular -> fetchPopularSection(task, localKeys, localTitles, seenMangaUrls, blacklistedTags, requestGate, random)
             SectionKind.Personalized -> fetchPersonalizedSection(task, localKeys, localTitles, seenMangaUrls, blacklistedTags, requestGate, random)
         }
@@ -233,7 +242,7 @@ class FeedAggregator(
 
         val fallbackTask = task.copy(sources = task.fallbackSources, fallbackSources = emptyList())
         return when (fallbackTask.kind) {
-            SectionKind.Latest -> fetchLatestSection(fallbackTask, localKeys, localTitles, seenMangaUrls, blacklistedTags, requestGate)
+            SectionKind.Latest -> fetchLatestSection(fallbackTask, localKeys, localTitles, seenMangaUrls, blacklistedTags, requestGate, random)
             SectionKind.Popular -> fetchPopularSection(fallbackTask, localKeys, localTitles, seenMangaUrls, blacklistedTags, requestGate, random)
             SectionKind.Personalized -> fetchPersonalizedSection(fallbackTask, localKeys, localTitles, seenMangaUrls, blacklistedTags, requestGate, random)
         }
@@ -246,7 +255,9 @@ class FeedAggregator(
         seenMangaUrls: Set<String>,
         blacklistedTags: Set<String>,
         requestGate: Semaphore,
+        random: Random,
     ): List<ScoredManga> {
+        val page = task.pageOffset.coerceAtLeast(1)
         val hits = coroutineScope {
             task.sources
                 .filter { it.supportsLatest }
@@ -255,6 +266,7 @@ class FeedAggregator(
                         fetchLatestFromSource(
                             source = source,
                             sourceIndex = sourceIndex,
+                            page = page,
                             localKeys = localKeys,
                             localTitles = localTitles,
                             seenMangaUrls = seenMangaUrls,
@@ -323,6 +335,7 @@ class FeedAggregator(
         random: Random,
     ): List<ScoredManga> {
         val suggestionQuery = task.query ?: return emptyList()
+        val page = task.pageOffset.coerceAtLeast(1)
         val hits = coroutineScope {
             task.sources
                 .mapIndexed { sourceIndex, source ->
@@ -330,6 +343,7 @@ class FeedAggregator(
                         fetchPersonalizedFromSource(
                             source = source,
                             sourceIndex = sourceIndex,
+                            page = page,
                             suggestionQuery = suggestionQuery,
                             sortOrder = task.sortOrder,
                             localKeys = localKeys,
@@ -356,6 +370,7 @@ class FeedAggregator(
     private suspend fun fetchLatestFromSource(
         source: CatalogueSource,
         sourceIndex: Int,
+        page: Int = 1,
         localKeys: Set<Pair<Long, String>>,
         localTitles: Set<String>,
         seenMangaUrls: Set<String>,
@@ -364,7 +379,7 @@ class FeedAggregator(
     ): List<ScoredManga> {
         return sourceResult {
             requestGate.withPermit {
-                source.getLatestUpdates(1)
+                source.getLatestUpdates(page)
             }
         }
             ?.mangas
@@ -464,6 +479,7 @@ class FeedAggregator(
     private suspend fun fetchPersonalizedFromSource(
         source: CatalogueSource,
         sourceIndex: Int,
+        page: Int = 1,
         suggestionQuery: SuggestionQuery,
         sortOrder: SuggestionSortOrder,
         localKeys: Set<Pair<Long, String>>,
@@ -474,7 +490,7 @@ class FeedAggregator(
     ): List<ScoredManga> {
         return sourceResult {
             requestGate.withPermit {
-                source.getSearchManga(1, suggestionQuery.query, source.searchFiltersFor(sortOrder))
+                source.getSearchManga(page, suggestionQuery.query, source.searchFiltersFor(sortOrder))
             }
         }
             ?.mangas
@@ -622,6 +638,7 @@ class FeedAggregator(
         val sources: List<CatalogueSource>,
         val fallbackSources: List<CatalogueSource>,
         val query: SuggestionQuery? = null,
+        val pageOffset: Int = 1,
     )
 
     private enum class SectionKind {
