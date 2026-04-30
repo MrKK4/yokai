@@ -133,28 +133,18 @@ class FeedAggregator(
 
     private fun List<SuggestionQuery>.selectRankedBatch(random: Random): List<SuggestionQuery> {
         if (isEmpty()) return emptyList()
+        if (size <= PAGE_TAG_COUNT) return shuffled(random)
 
-        val highRank = take(HIGH_BUCKET_SIZE)
-        val midRank = drop(HIGH_BUCKET_SIZE).take(MID_BUCKET_SIZE)
-        val lowRank = drop(HIGH_BUCKET_SIZE + MID_BUCKET_SIZE)
-        val selected = mutableListOf<SuggestionQuery>()
-
-        selected.addFrom(highRank.shuffled(random), count = 1)
-        selected.addFrom(midRank.shuffled(random), count = 1)
-        selected.addFrom(lowRank.shuffled(random), count = PAGE_TAG_COUNT - selected.size)
-        selected.addFrom(shuffled(random), count = PAGE_TAG_COUNT - selected.size)
-
-        return selected
+        // Score-weighted jitter: every query gets a chance proportional to its score,
+        // but a generous random jitter lets lower-ranked tags bubble up regularly.
+        val maxScore = first().score.coerceAtLeast(0.01)
+        return map { query ->
+            query to (query.score / maxScore + random.nextDouble() * TAG_SELECTION_JITTER)
+        }
+            .sortedByDescending { it.second }
             .take(PAGE_TAG_COUNT)
+            .map { it.first }
             .shuffled(random)
-    }
-
-    private fun MutableList<SuggestionQuery>.addFrom(candidates: List<SuggestionQuery>, count: Int) {
-        if (count <= 0) return
-        candidates
-            .filterNot { it in this }
-            .take(count)
-            .forEach(::add)
     }
 
     private suspend fun buildSectionTasks(
@@ -188,7 +178,7 @@ class FeedAggregator(
                                 sortOrder = currentSortOrder,
                                 sources = taskSources,
                                 fallbackSources = fallbackSourcesForTask(sources.mixedSources, taskIndex = index + 1),
-                                pageOffset = pageOffset,
+                                pageOffset = random.nextInt(1, 3),  // Random page 1–2 for search (page 3+ is often empty for niche tags)
                             ),
                         )
                     }
@@ -284,6 +274,7 @@ class FeedAggregator(
                 .sortedByDescending { it.relevance }
                 .capBySource(MAX_PER_SOURCE_PER_SECTION)
                 .take(MAX_SOURCE_SECTION_TOTAL)
+                .shuffled(random)
         }
     }
 
@@ -390,7 +381,7 @@ class FeedAggregator(
                     manga = manga,
                     titleKey = manga.title.normalizedTitle(),
                     sourceId = source.id,
-                    relevance = BASE_RELEVANCE - (sourceIndex * SOURCE_PENALTY) - (index * POSITION_PENALTY),
+                    relevance = BASE_RELEVANCE - (sourceIndex * SOURCE_PENALTY) - (index * POSITION_PENALTY) + (Random.nextDouble() * 0.0001),
                     reason = LATEST_REASON,
                     queryScore = 0.0,
                 )
@@ -423,7 +414,7 @@ class FeedAggregator(
                     manga = manga,
                     titleKey = manga.title.normalizedTitle(),
                     sourceId = source.id,
-                    relevance = BASE_RELEVANCE - (sourceIndex * SOURCE_PENALTY) - (index * POSITION_PENALTY),
+                    relevance = BASE_RELEVANCE - (sourceIndex * SOURCE_PENALTY) - (index * POSITION_PENALTY) + (random.nextDouble() * 0.0001),
                     reason = POPULAR_REASON,
                     queryScore = 0.0,
                 )
@@ -447,6 +438,7 @@ class FeedAggregator(
             .take(MAX_ACTIVE_SOURCES)
         val requestGate = Semaphore(MAX_CONCURRENT_SOURCE_REQUESTS)
         val suggestionQuery = SuggestionQuery(query = query, reason = reason, score = 0.0)
+        val page = random.nextInt(1, 4)
 
         val hits = coroutineScope {
             allSources.mapIndexed { index, source ->
@@ -454,6 +446,7 @@ class FeedAggregator(
                     fetchPersonalizedFromSource(
                         source = source,
                         sourceIndex = index,
+                        page = page,
                         suggestionQuery = suggestionQuery,
                         sortOrder = sortOrder,
                         localKeys = localKeys,
@@ -461,6 +454,7 @@ class FeedAggregator(
                         seenMangaUrls = emptySet(),
                         blacklistedTags = blacklistedTags,
                         requestGate = requestGate,
+                        random = random,
                     )
                 }
             }.awaitAll().flatten()
@@ -487,6 +481,7 @@ class FeedAggregator(
         seenMangaUrls: Set<String>,
         blacklistedTags: Set<String>,
         requestGate: Semaphore,
+        random: Random = Random.Default,
     ): List<ScoredManga> {
         return sourceResult {
             requestGate.withPermit {
@@ -501,7 +496,7 @@ class FeedAggregator(
                     manga = manga,
                     titleKey = manga.title.normalizedTitle(),
                     sourceId = source.id,
-                    relevance = suggestionQuery.score - (sourceIndex * SOURCE_PENALTY) - (index * POSITION_PENALTY),
+                    relevance = suggestionQuery.score - (sourceIndex * SOURCE_PENALTY) - (index * POSITION_PENALTY) + (random.nextDouble() * 0.0001),
                     reason = suggestionQuery.reason,
                     queryScore = suggestionQuery.score,
                 )
@@ -691,8 +686,7 @@ class FeedAggregator(
         private const val MAX_SOURCES_FOR_POPULAR = 6
         private const val MAX_LATEST_SOURCES = 4
         private const val PAGE_TAG_COUNT = 2
-        private const val HIGH_BUCKET_SIZE = 5
-        private const val MID_BUCKET_SIZE = 5
+        private const val TAG_SELECTION_JITTER = 0.6  // Higher = more variety, lower = more quality bias
         private const val MAX_SOURCE_SECTION_TOTAL = 30
         private const val MAX_PER_AFFINITY_SECTION = 20
         private const val MAX_TOTAL = MAX_SOURCE_SECTION_TOTAL + (PAGE_TAG_COUNT * MAX_PER_AFFINITY_SECTION)
