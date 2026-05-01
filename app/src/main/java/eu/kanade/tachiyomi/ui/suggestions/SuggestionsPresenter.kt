@@ -178,10 +178,8 @@ class SuggestionsPresenter(
                 shownHistoryRepository.insertAll(
                     suggestions.map { it.source to it.url },
                 )
-                // Persist tag rotation: if all tags exhausted, reset
-                val allUsed = usedTags.toSet()
-                val nextUsed = if (allUsed.size >= TOTAL_TAG_ROTATION_SIZE) emptySet() else allUsed
-                preferences.usedSuggestionTags().set(nextUsed)
+                // Persist tag rotation — reset is handled inside buildFreshSuggestions
+                preferences.usedSuggestionTags().set(usedTags.toSet())
                 _state.update { it.copy(emptyMessage = null) }
             } catch (e: CancellationException) {
                 throw e
@@ -438,9 +436,22 @@ class SuggestionsPresenter(
     private suspend fun buildFreshSuggestions(pageOffset: Int = 1): List<SuggestedManga> {
         // Algorithm Issue 1: detect cold-start (no library) before fetching
         val librarySize = getManga.awaitAll().size
+        val suggestionQueries = getSuggestionQueries.execute()
+
+        // Tag rotation reset: if usedTags has covered every available tag query,
+        // the rotation is exhausted → clear it so all tags become eligible again.
+        // This is tag-count-aware: works correctly whether the user has 5 or 500 tags.
+        val availableTagKeys = suggestionQueries
+            .map { it.query.trim().lowercase() }
+            .toSet()
+        val unusedTagKeys = availableTagKeys - usedTags.map { it.trim().lowercase() }.toSet()
+        if (availableTagKeys.isNotEmpty() && unusedTagKeys.isEmpty()) {
+            usedTags.clear()
+            preferences.usedSuggestionTags().set(emptySet())
+        }
 
         val page = feedAggregator.fetchPage(
-            suggestionQueries = getSuggestionQueries.execute(),
+            suggestionQueries = suggestionQueries,
             usedTags = usedTags.toSet(),
             seenMangaUrls = seenMangaUrls.toSet(),
             currentSortOrder = _state.value.sortOrder,
@@ -567,8 +578,6 @@ class SuggestionsPresenter(
         internal const val READ_REASON_PREFIX = "Because you read "
         internal const val SEARCH_REASON_PREFIX = "Because you searched \""
         private val WHITESPACE = Regex("\\s+")
-        /** After this many distinct tags are used, reset the rotation so all tags are eligible again. */
-        private const val TOTAL_TAG_ROTATION_SIZE = 50
         /** Shown manga older than 30 days become eligible to appear again. */
         private const val HISTORY_TTL_MILLIS = 30L * 24 * 60 * 60 * 1_000
     }
