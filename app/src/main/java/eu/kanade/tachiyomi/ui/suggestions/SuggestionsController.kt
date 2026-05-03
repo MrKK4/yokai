@@ -99,6 +99,17 @@ class SuggestionsController(
             .onEach { state -> binding.swipeRefresh.isRefreshing = state.isLoading }
             .launchIn(viewScope)
 
+        // Bug 8b: if the background worker has been failing for >24h, show a single
+        // non-intrusive toast so the user knows suggestions may be stale.
+        val preferences: eu.kanade.tachiyomi.data.preference.PreferencesHelper = Injekt.get()
+        val lastFailed = preferences.suggestionsWorkerLastFailedAt().get()
+        val dayMillis = 24L * 60 * 60 * 1_000
+        if (lastFailed > 0L && System.currentTimeMillis() - lastFailed > dayMillis) {
+            activity?.toast("Suggestions background refresh has been failing. Check your connection.")
+            // Clear so the banner doesn't show on every tab visit.
+            preferences.suggestionsWorkerLastFailedAt().set(0L)
+        }
+
         binding.composeView.setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
         binding.composeView.setContent {
             YokaiTheme {
@@ -252,6 +263,7 @@ class SuggestionsController(
 
     private fun updateSwipeRefreshOffset() {
         if (!isBindingInitialized) return
+        if (binding.swipeRefresh.isRefreshing) return   // don't interrupt the active refresh animation
         val headerHeight = statusBarHeight + currentAppBarHeight()
         binding.swipeRefresh.setProgressViewOffset(
             true,

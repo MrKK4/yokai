@@ -144,6 +144,13 @@ class SuggestionsPresenter(
      * Cleared by [refresh] and [rebuildFeed] (but NOT by the sort-change restore path).
      */
     @Volatile private var frozenForSort: SuggestionSortOrder? = null
+    /**
+     * Generation value captured at the time the most recent [rebuildFeed] or [refresh] starts.
+     * The DB flow observer rejects any emission where [feedGeneration] no longer matches this
+     * value, preventing stale in-flight results from overwriting new sort/filter state.
+     * (Bug 3 fix — replaces the incomplete `frozenForSort == null` guard in the flow observer.)
+     */
+    @Volatile private var activeFlowGeneration = 0L
     private val usedTags = linkedSetOf<String>()
     private val seenMangaUrls = linkedSetOf<String>()
     private var knownTags = emptyList<String>()
@@ -188,12 +195,21 @@ class SuggestionsPresenter(
             shownHistoryRepository.deleteOlderThan(
                 System.currentTimeMillis() - HISTORY_TTL_MILLIS,
             )
-            val history = shownHistoryRepository.getAllKeys()
+            // Bug 4 fix: only load the last 24 hours of shown history into the in-memory
+            // set on startup. The full 30-day DB TTL is unchanged, but seeding the set
+            // with 30 days of data meant hundreds of manga were globally filtered out,
+            // making soft refresh return almost no new content after a few days.
+            val cutoff = System.currentTimeMillis() - RECENT_HISTORY_SEED_MILLIS
+            val history = shownHistoryRepository.getKeysShownAfter(cutoff)
             seenMangaUrls.addAll(history)
         }
 
         suggestionsRepository.getSuggestionsAsFlow()
             .onEach { suggestedList ->
+                // Bug 3 fix: reject emissions that belong to a previous feed generation.
+                // Without this guard, in-flight network requests from the previous sort can
+                // insert results into the DB whose flow emission then overwrites the new state.
+                if (feedGeneration.get() != activeFlowGeneration) return@onEach
                 // While showing a snapshot-restored sort, the DB may still hold results
                 // from the previous (in-flight) sort.  Skip the emission so the cached
                 // state is not overwritten until the user explicitly refreshes.
@@ -266,8 +282,13 @@ class SuggestionsPresenter(
         // DB flow observer so it can write new results to state as they arrive.
         frozenForSort = null
         sortSnapshotCache.clear()
+        sectionLastFetchedAt.clear()   // Bug 5 fix: always force re-fetch on explicit user refresh
+        if (hardRefresh) {
+            seenMangaUrls.clear()      // Bug 4 fix: allow full candidate re-evaluation on hard refresh
+        }
         if (!isForegroundRefreshing.compareAndSet(false, true)) return
         feedGeneration.incrementAndGet()
+        activeFlowGeneration = feedGeneration.get()  // Bug 3: record generation for DB observer guard
         currentPageOffset = Random.nextInt(1, 8)   // randomize page 1–7 on each refresh
         isPageFetching.set(false)
         isSectionBatchFetching.set(false)
@@ -444,7 +465,9 @@ class SuggestionsPresenter(
                 // Cancel any in-flight requests from the previous rebuild so they
                 // don't write stale results to state or the DB.
                 feedGeneration.incrementAndGet()
-                isForegroundRefreshing.set(false)
+                // Bug 7 fix: do NOT set isForegroundRefreshing to false here. The sort-switch
+                // snapshot restore is unrelated to an active foreground refresh. If a refresh
+                // coroutine is running, it manages its own isForegroundRefreshing flag.
                 isPageFetching.set(false)
                 isSectionBatchFetching.set(false)
                 // Freeze the DB flow observer so it doesn't overwrite cached content.
@@ -602,6 +625,7 @@ class SuggestionsPresenter(
         sortSnapshotCache.clear()
         if (preferences.suggestionsV2Enabled().get()) {
             feedGeneration.incrementAndGet()
+            activeFlowGeneration = feedGeneration.get()  // Bug 3: record generation for DB observer guard
             currentPageOffset = Random.nextInt(1, 8)
             saveGridScrollPosition(index = 0, scrollOffset = 0)
             isForegroundRefreshing.set(false)
@@ -637,6 +661,7 @@ class SuggestionsPresenter(
         }
 
         feedGeneration.incrementAndGet()
+        activeFlowGeneration = feedGeneration.get()  // Bug 3: record generation for DB observer guard
         currentPageOffset = Random.nextInt(1, 8)   // re-roll page offset on sort/filter rebuild
         saveGridScrollPosition(index = 0, scrollOffset = 0)
         usedTags.clear()
@@ -813,6 +838,13 @@ class SuggestionsPresenter(
             var inserted = loadNextSectionBatchInternal(generation = generation, pageOffset = pageOffset, refreshId = refreshId)
             while (generation == feedGeneration.get() && inserted == 0 && !_state.value.allSectionsLoaded) {
                 inserted += loadNextSectionBatchInternal(generation = generation, pageOffset = pageOffset, refreshId = refreshId)
+            }
+        } else if (staleSections.isEmpty()) {
+            // Bug 8c: user pulled to refresh but all sections were cache-fresh — give brief feedback.
+            _state.update { it.copy(emptyMessage = "Suggestions are up to date.") }
+            presenterScope.launchIO {
+                delay(2_000L)
+                _state.update { it.copy(emptyMessage = null) }
             }
         }
 
@@ -1018,12 +1050,21 @@ class SuggestionsPresenter(
      * flowing so the next batch is usually ready by the time the user scrolls
      * to the bottom of the current one.
      *
+     * Bug 9 fix: Only prefetch one batch ahead — not unbounded. If the next batch
+     * start index is already more than one batch-size beyond the number of loaded
+     * sections, the user is nowhere near the bottom and the prefetch is wasted.
+     *
      * Uses [isSectionBatchFetching] as a guard so it's a no-op if a fetch is
      * already in-flight (e.g. triggered by both speculative pre-fetch and the
      * scroll threshold at the same time).
      */
     private fun speculativelyPrefetchNextBatch(generation: Long, pageOffset: Int, refreshId: Long) {
         if (isSectionBatchFetching.get()) return
+        // Bug 9 fix: only prefetch one batch ahead; skip if the pipeline is already far
+        // beyond what the user can see, to avoid burning network on unreachable content.
+        val nextIndex = _state.value.nextBatchStartIndex
+        val loadedCount = _state.value.suggestions.size
+        if (nextIndex > loadedCount + SuggestionsConfig.SECTION_BATCH_SIZE) return
         presenterScope.launchIO {
             loadNextSectionBatchInternal(
                 generation = generation,
@@ -1096,6 +1137,10 @@ class SuggestionsPresenter(
         }
         // ─────────────────────────────────────────────────────────────────────────
 
+        // Bug 6 fix: purge stale content for this section before inserting fresh results.
+        // Without this, re-fetched sections accumulate old manga that the source no longer
+        // returns, growing the section indefinitely. The `reason` field maps 1:1 to a section.
+        suggestionsRepository.deleteByReason(result.section.displayReason)
         suggestionsRepository.insertSuggestions(suggestions)
         shownHistoryRepository.insertAll(suggestions.map { it.source to it.url })
         seenMangaUrls.addAll(suggestions.map { it.memoryKey() })
@@ -1252,5 +1297,11 @@ class SuggestionsPresenter(
         private val WHITESPACE = Regex("\\s+")
         /** Shown manga older than 30 days become eligible to appear again. */
         private const val HISTORY_TTL_MILLIS = 30L * 24 * 60 * 60 * 1_000
+        /**
+         * Bug 4 fix: only seed [seenMangaUrls] from the last 24 hours of shown history
+         * on startup. Seeding from 30 days caused hundreds of manga to be globally filtered
+         * out, making soft refreshes return almost no new content over time.
+         */
+        private const val RECENT_HISTORY_SEED_MILLIS = 24L * 60 * 60 * 1_000
     }
 }

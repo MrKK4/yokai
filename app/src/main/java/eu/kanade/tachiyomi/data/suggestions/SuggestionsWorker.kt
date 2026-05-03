@@ -148,8 +148,13 @@ class SuggestionsWorker(
         }
     }
 
-    private fun retryOrFailure(): Result =
-        if (runAttemptCount < MAX_RETRIES) Result.retry() else Result.failure()
+    private fun retryOrFailure(): Result {
+        if (runAttemptCount < MAX_RETRIES) return Result.retry()
+        // Bug 8b: persist failure timestamp so the UI can surface a non-intrusive banner
+        // if suggestions haven't been refreshed for more than 24 hours.
+        preferences.suggestionsWorkerLastFailedAt().set(System.currentTimeMillis())
+        return Result.failure()
+    }
 
     companion object {
         private const val TAG = "Suggestions"

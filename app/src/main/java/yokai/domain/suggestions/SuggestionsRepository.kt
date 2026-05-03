@@ -19,6 +19,7 @@ interface SuggestionsRepository {
     suspend fun insertSuggestions(suggestions: List<SuggestedManga>)
     suspend fun replaceAll(suggestions: List<SuggestedManga>)
     suspend fun deleteAll()
+    suspend fun deleteByReason(reason: String)
     suspend fun count(): Long
 }
 

@@ -34,5 +34,8 @@ DO UPDATE SET
 deleteAll:
 DELETE FROM suggestions;
 
+deleteByReason:
+DELETE FROM suggestions WHERE reason = :reason;
+
 count:
 SELECT COUNT(*) FROM suggestions;

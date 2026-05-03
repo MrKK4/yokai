@@ -12,6 +12,11 @@ class ShownMangaHistoryRepositoryImpl(
             shown_manga_historyQueries.findAllKeys()
         }.toSet()
 
+    override suspend fun getKeysShownAfter(cutoffMillis: Long): Set<String> =
+        handler.awaitList {
+            shown_manga_historyQueries.findKeysShownAfter(cutoffMillis)
+        }.toSet()
+
     override suspend fun insertAll(entries: List<Pair<Long, String>>) {
         if (entries.isEmpty()) return
         val now = System.currentTimeMillis()

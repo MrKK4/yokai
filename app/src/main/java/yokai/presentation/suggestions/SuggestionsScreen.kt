@@ -31,7 +31,9 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -66,12 +68,19 @@ fun SuggestionsScreen(
         )
     }
     // Scroll to top whenever a hard refresh or sort-order change fires.
-    // Using the trigger value as the key so this fires on every increment.
+    // Track the previously-seen trigger so the effect only fires on actual increments
+    // and never overrides the restored scroll position on tab re-entry.
     val scrollToTopTrigger = state.scrollToTopTrigger
+    var seenTrigger by remember { mutableLongStateOf(-1L) }
     LaunchedEffect(scrollToTopTrigger) {
-        // Only act on actual increments (skip the initial 0 value to avoid
-        // overriding the restored position on first composition).
-        if (scrollToTopTrigger > 0L) {
+        if (seenTrigger == -1L) {
+            // First composition — record the current value without scrolling so we
+            // don't race against the position-restore effect below.
+            seenTrigger = scrollToTopTrigger
+            return@LaunchedEffect
+        }
+        if (scrollToTopTrigger != seenTrigger) {
+            seenTrigger = scrollToTopTrigger
             gridState.scrollToItem(0)
         }
     }

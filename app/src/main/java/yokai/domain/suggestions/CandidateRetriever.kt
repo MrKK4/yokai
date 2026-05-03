@@ -167,7 +167,7 @@ class CandidateRetriever(
         requestGate: Semaphore,
         countBySource: ConcurrentHashMap<Long, AtomicInteger>,
     ): List<SuggestionCandidate> {
-        val pageResult = sourceResult {
+        val pageResult = sourceResult(sourceId = source.id) {
             requestGate.withPermit {
                 when (section.sortOrder) {
                     SuggestionSortOrder.Latest ->
@@ -216,7 +216,7 @@ class CandidateRetriever(
                 LogType.SECTION_SELECTED,
                 "Source ${source.id} (${source.name}): genre filter injected for '$canonicalTag'",
             )
-            sourceResult {
+            sourceResult(sourceId = source.id) {
                 requestGate.withPermit {
                     source.getSearchManga(page, query = "", injectedFilters)
                 }
@@ -233,7 +233,7 @@ class CandidateRetriever(
                     "Source ${source.id} (${source.name}): no genre filter for '$canonicalTag' — text search with '$query'",
                 )
             }
-            sourceResult {
+            sourceResult(sourceId = source.id) {
                 requestGate.withPermit {
                     source.getSearchManga(page, query, source.searchFiltersFor(section.sortOrder))
                 }
@@ -279,8 +279,13 @@ class CandidateRetriever(
                     }
                 }
             }
-        } catch (_: Exception) {
-            // Vocabulary learning is best-effort; never fail the fetch.
+        } catch (e: Exception) {
+            // Bug 8d: log vocabulary learning failures to the debug log.
+            // No user-facing change needed — this is best-effort only.
+            debugLog.add(
+                LogType.SECTION_DROPPED,
+                "learnVocabulary DB write failed for source $sourceId: ${e.javaClass.simpleName}: ${e.message}",
+            )
         }
     }
 
@@ -432,12 +437,20 @@ class CandidateRetriever(
         }
     }
 
-    private suspend fun <T> sourceResult(block: suspend () -> T): T? =
+    private suspend fun <T> sourceResult(sourceId: Long? = null, block: suspend () -> T): T? =
         try {
             block()
         } catch (e: CancellationException) {
             throw e
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            // Log individual source failures to the debug log (Bug 8a).
+            // Not surfaced to the user per-source; only aggregate failures are shown.
+            if (sourceId != null) {
+                debugLog.add(
+                    LogType.SECTION_DROPPED,
+                    "Source $sourceId network error: ${e.javaClass.simpleName}: ${e.message}",
+                )
+            }
             null
         }
 

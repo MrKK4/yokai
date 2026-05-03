@@ -223,6 +223,9 @@ class PreferencesHelper(val context: Context, val preferenceStore: PreferenceSto
 
     fun suggestionsSortFallbackCount() = preferenceStore.getInt("suggestions_sort_fallback_count", 0)
 
+    /** Bug 8b: written by [SuggestionsWorker] when it exhausts all retries. Epoch millis. */
+    fun suggestionsWorkerLastFailedAt() = preferenceStore.getLong("suggestions_worker_last_failed_at", 0L)
+
     fun usedSuggestionTags() = preferenceStore.getStringSet("used_suggestion_tags", emptySet())
 
     fun recentlyUsedSourceIds() = preferenceStore.getStringSet("recently_used_source_ids", emptySet())

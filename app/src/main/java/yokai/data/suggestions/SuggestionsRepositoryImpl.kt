@@ -51,6 +51,10 @@ class SuggestionsRepositoryImpl(private val handler: DatabaseHandler) : Suggesti
         handler.await { suggestionsQueries.deleteAll() }
     }
 
+    override suspend fun deleteByReason(reason: String) {
+        handler.await { suggestionsQueries.deleteByReason(reason) }
+    }
+
     override suspend fun count(): Long =
         handler.awaitOne { suggestionsQueries.count() }
 

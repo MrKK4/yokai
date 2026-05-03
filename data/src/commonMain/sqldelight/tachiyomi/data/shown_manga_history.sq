@@ -17,6 +17,9 @@ VALUES (:source, :url, :shownAt);
 findAllKeys:
 SELECT (source || ':' || url) AS key FROM shown_manga_history;
 
+findKeysShownAfter:
+SELECT (source || ':' || url) AS key FROM shown_manga_history WHERE shown_at >= :cutoff;
+
 count:
 SELECT COUNT(*) FROM shown_manga_history;
 
