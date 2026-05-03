@@ -8,6 +8,7 @@ import eu.kanade.tachiyomi.data.suggestions.SuggestionsWorker
 import eu.kanade.tachiyomi.domain.manga.models.Manga
 import eu.kanade.tachiyomi.ui.base.presenter.BaseCoroutinePresenter
 import eu.kanade.tachiyomi.util.system.launchIO
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.random.Random
@@ -27,12 +28,16 @@ import yokai.domain.manga.models.MangaUpdate
 import yokai.domain.suggestions.FeedAggregator
 import yokai.domain.suggestions.GetUserSuggestionQueriesUseCase
 import yokai.domain.suggestions.CandidateRetriever
+import yokai.domain.suggestions.CandidateRetrievalResult
 import yokai.domain.suggestions.InterestProfileBuilder
 import yokai.domain.suggestions.TagCanonicalizer
 import yokai.domain.suggestions.TagProfileRepository
 import yokai.domain.suggestions.TagState
+import yokai.domain.suggestions.PlannedSection
 import yokai.domain.suggestions.PlannedSectionRepository
 import yokai.domain.suggestions.SectionPlanner
+import yokai.domain.suggestions.SectionBatcher
+import yokai.domain.suggestions.SectionType
 import yokai.domain.suggestions.SessionContext
 import yokai.domain.suggestions.ShownMangaHistoryRepository
 import yokai.domain.suggestions.SuggestionRanker
@@ -43,7 +48,6 @@ import yokai.domain.suggestions.SuggestionsRepository
 import yokai.domain.suggestions.SuggestionsConfig
 import yokai.domain.suggestions.SuggestionsDebugLog
 import yokai.domain.suggestions.LogType
-import yokai.domain.source.browse.filter.SavedSearchRepository
 
 data class SuggestionsState(
     val suggestions: Map<String, List<Manga>> = emptyMap(),
@@ -53,6 +57,10 @@ data class SuggestionsState(
     val isTagFilterSheetVisible: Boolean = false,
     val isLoading: Boolean = false,
     val isFetching: Boolean = false,
+    val plannedSections: List<PlannedSection> = emptyList(),
+    val nextBatchStartIndex: Int = 0,
+    val isFetchingBatch: Boolean = false,
+    val allSectionsLoaded: Boolean = false,
     val hasReachedEnd: Boolean = false,
     val endMessage: String? = null,
     val emptyMessage: String? = null,
@@ -78,7 +86,6 @@ class SuggestionsPresenter(
     private val candidateRetriever: CandidateRetriever = Injekt.get(),
     private val suggestionRanker: SuggestionRanker = Injekt.get(),
     private val suggestionSeenLogRepository: SuggestionSeenLogRepository = Injekt.get(),
-    private val savedSearchRepository: SavedSearchRepository = Injekt.get(),
     private val sessionContext: SessionContext = Injekt.get(),
     private val debugLog: SuggestionsDebugLog = Injekt.get(),
     private val tagCanonicalizer: TagCanonicalizer = Injekt.get(),
@@ -91,6 +98,7 @@ class SuggestionsPresenter(
     val state: StateFlow<SuggestionsState> = _state.asStateFlow()
     private val isForegroundRefreshing = AtomicBoolean(false)
     private val isPageFetching = AtomicBoolean(false)
+    private val isSectionBatchFetching = AtomicBoolean(false)
     private val feedGeneration = AtomicLong(0L)
     private var isWorkerRefreshing = false
     private val usedTags = linkedSetOf<String>()
@@ -103,6 +111,8 @@ class SuggestionsPresenter(
         private set
     private val getSuggestionQueries: GetUserSuggestionQueriesUseCase = Injekt.get()
     private val feedAggregator: FeedAggregator = Injekt.get()
+    private val sectionLastFetchedAt = ConcurrentHashMap<String, Long>()
+    private var currentV2RefreshId = 0L
     /** Random page offset (1–3) re-rolled on every user-initiated refresh so each
      *  refresh fetches a different page from each source, guaranteeing variety. */
     @Volatile private var currentPageOffset: Int = 1
@@ -165,6 +175,9 @@ class SuggestionsPresenter(
             .launchIn(presenterScope)
 
         presenterScope.launchIO {
+            if (preferences.suggestionsV2Enabled().get()) {
+                restoreV2PlanState()
+            }
             if (suggestionsRepository.count() == 0L) {
                 refresh()
             }
@@ -176,6 +189,7 @@ class SuggestionsPresenter(
         feedGeneration.incrementAndGet()
         currentPageOffset = Random.nextInt(1, 8)   // randomize page 1–7 on each refresh
         isPageFetching.set(false)
+        isSectionBatchFetching.set(false)
         saveGridScrollPosition(index = 0, scrollOffset = 0)
         usedTags.clear()
         // seenMangaUrls is NOT cleared — it survives refreshes via persistent history
@@ -185,6 +199,10 @@ class SuggestionsPresenter(
 
         _state.update { it.copy(
             emptyMessage = null,
+            plannedSections = emptyList(),
+            nextBatchStartIndex = 0,
+            isFetchingBatch = false,
+            allSectionsLoaded = false,
             hasReachedEnd = false,
             endMessage = null,
             sheetReason = null,
@@ -197,15 +215,22 @@ class SuggestionsPresenter(
 
         presenterScope.launchIO {
             try {
-                val suggestions = buildFreshSuggestions(currentPageOffset)
-                suggestionsRepository.replaceAll(suggestions)
-                // Persist shown manga into the 30-day history
-                shownHistoryRepository.insertAll(
-                    suggestions.map { it.source to it.url },
-                )
-                // Persist tag rotation — reset is handled inside buildFreshSuggestions
-                preferences.usedSuggestionTags().set(usedTags.toSet())
-                _state.update { it.copy(emptyMessage = null) }
+                if (preferences.suggestionsV2Enabled().get()) {
+                    refreshV2(
+                        generation = feedGeneration.get(),
+                        pageOffset = currentPageOffset,
+                    )
+                } else {
+                    val suggestions = buildFreshSuggestions(currentPageOffset)
+                    suggestionsRepository.replaceAll(suggestions)
+                    // Persist shown manga into the 30-day history
+                    shownHistoryRepository.insertAll(
+                        suggestions.map { it.source to it.url },
+                    )
+                    // Persist tag rotation — reset is handled inside buildFreshSuggestions
+                    preferences.usedSuggestionTags().set(usedTags.toSet())
+                    _state.update { it.copy(emptyMessage = null) }
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: RefreshBlocked) {
@@ -223,7 +248,7 @@ class SuggestionsPresenter(
 
     fun loadNextPage() {
         if (preferences.suggestionsV2Enabled().get()) {
-            _state.update { it.copy(hasReachedEnd = true, endMessage = null, isFetching = false) }
+            loadNextSectionBatch()
             return
         }
         loadNextPage(includeSourceSection = false)
@@ -422,11 +447,16 @@ class SuggestionsPresenter(
             saveGridScrollPosition(index = 0, scrollOffset = 0)
             isForegroundRefreshing.set(false)
             isPageFetching.set(false)
+            isSectionBatchFetching.set(false)
             _state.update { it.copy(
                 suggestions = emptyMap(),
                 selectedReason = null,
                 isLoading = false,
                 isFetching = false,
+                plannedSections = emptyList(),
+                nextBatchStartIndex = 0,
+                isFetchingBatch = false,
+                allSectionsLoaded = false,
                 hasReachedEnd = false,
                 endMessage = null,
                 emptyMessage = null,
@@ -451,11 +481,16 @@ class SuggestionsPresenter(
         // seenMangaUrls is NOT cleared — persistent history handles deduplication
         isForegroundRefreshing.set(false)
         isPageFetching.set(false)
+        isSectionBatchFetching.set(false)
         _state.update { it.copy(
             suggestions = emptyMap(),
             selectedReason = null,
             isLoading = false,
             isFetching = true,
+            plannedSections = emptyList(),
+            nextBatchStartIndex = 0,
+            isFetchingBatch = false,
+            allSectionsLoaded = false,
             hasReachedEnd = false,
             endMessage = null,
             emptyMessage = null,
@@ -499,10 +534,6 @@ class SuggestionsPresenter(
     }
 
     private suspend fun buildFreshSuggestions(pageOffset: Int = 1): List<SuggestedManga> {
-        if (preferences.suggestionsV2Enabled().get()) {
-            return buildFreshSuggestionsV2(pageOffset)
-        }
-
         // Algorithm Issue 1: detect cold-start (no library) before fetching
         val librarySize = getManga.awaitAll().size
         val suggestionQueries = getSuggestionQueries.execute()
@@ -550,61 +581,54 @@ class SuggestionsPresenter(
         return suggestions
     }
 
-    private suspend fun buildFreshSuggestionsV2(pageOffset: Int): List<SuggestedManga> {
+    private suspend fun refreshV2(generation: Long, pageOffset: Int) {
         val now = System.currentTimeMillis()
         debugLog.add(LogType.REFRESH_MODE, "Hard refresh - rebuilding profile, resetting seen log")
         suggestionSeenLogRepository.deleteOlderThan(now - SuggestionsConfig.SEEN_LOG_TTL_MS)
+        suggestionsRepository.deleteAll()
+        sectionLastFetchedAt.clear()
 
         interestProfileBuilder.buildProfile(now)
         syncLegacyTagStateForV2(now)
         val profiles = tagProfileRepository.getAllProfiles()
-        val savedSearches = savedSearchRepository.findAll()
-            .mapNotNull { it.query?.trim()?.takeIf { query -> query.length in 2..64 } }
 
         val plannedSections = sectionPlanner.plan(
             profiles = profiles,
             sortOrder = _state.value.sortOrder,
-            savedSearches = savedSearches,
             now = now,
         )
         plannedSectionRepository.replaceAll(plannedSections)
 
-        val sectionSeenKeys = plannedSections.associate { section ->
-            section.sectionKey to suggestionSeenLogRepository.recentKeysForSection(
-                sectionKey = section.sectionKey,
-                cutoff = now - SuggestionsConfig.SEEN_LOG_TTL_MS,
-            )
-        }
-
-        val retrievalResults = candidateRetriever.retrieve(plannedSections, pageOffset)
-        val suggestions = suggestionRanker.rank(
-            retrievalResults = retrievalResults,
-            globalSeenKeys = seenMangaUrls.toSet(),
-            sectionSeenKeys = sectionSeenKeys,
-            sessionContext = sessionContext,
-        ).withDisplayRanks(startRank = 0L)
-
         val totalRefreshCount = preferences.suggestionsTotalRefreshCount()
         val refreshId = totalRefreshCount.get() + 1L
         totalRefreshCount.set(refreshId.toInt())
+        currentV2RefreshId = refreshId
         preferences.suggestionsLastHardRefreshAt().set(now)
-        seenMangaUrls.addAll(suggestions.map { it.memoryKey() })
-        val sectionKeyByReason = plannedSections.associate { it.displayReason to it.sectionKey }
-        suggestions.forEach { suggestion ->
-            suggestionSeenLogRepository.insertSeen(
-                sectionKey = sectionKeyByReason[suggestion.reason] ?: suggestion.reason.normalizedQuery(),
-                mangaKey = suggestion.memoryKey(),
-                shownAt = now,
+
+        _state.update { it.copy(
+            plannedSections = plannedSections,
+            nextBatchStartIndex = 0,
+            isFetchingBatch = false,
+            allSectionsLoaded = plannedSections.isEmpty(),
+            hasReachedEnd = plannedSections.isEmpty(),
+            endMessage = null,
+            emptyMessage = null,
+        )}
+
+        var inserted = loadNextSectionBatchInternal(
+            generation = generation,
+            pageOffset = pageOffset,
+            refreshId = refreshId,
+        )
+        while (generation == feedGeneration.get() && inserted == 0 && !_state.value.allSectionsLoaded) {
+            inserted += loadNextSectionBatchInternal(
+                generation = generation,
+                pageOffset = pageOffset,
                 refreshId = refreshId,
             )
         }
 
-        _state.update { it.copy(
-            hasReachedEnd = true,
-            endMessage = null,
-        )}
-
-        if (suggestions.isEmpty()) {
+        if (suggestionsRepository.count() == 0L) {
             throw RefreshBlocked(
                 if (getManga.awaitAll().isEmpty()) {
                     "Add some manga to your library to get personalized suggestions."
@@ -613,8 +637,163 @@ class SuggestionsPresenter(
                 },
             )
         }
+    }
 
-        return suggestions
+    private suspend fun restoreV2PlanState() {
+        val plannedSections = plannedSectionRepository.getPlannedSections()
+        if (plannedSections.isEmpty()) return
+
+        val loadedReasons = suggestionsRepository.getSuggestions()
+            .map { it.reason }
+            .toSet()
+        val nextIndex = plannedSections
+            .indexOfLast { it.displayReason in loadedReasons }
+            .plus(1)
+            .coerceAtLeast(0)
+        val allLoaded = nextIndex >= plannedSections.size
+        currentV2RefreshId = preferences.suggestionsTotalRefreshCount().get().toLong()
+        _state.update { it.copy(
+            plannedSections = plannedSections,
+            nextBatchStartIndex = nextIndex,
+            allSectionsLoaded = allLoaded,
+            hasReachedEnd = allLoaded,
+            endMessage = sectionEndMessage(nextIndex, plannedSections.size).takeIf { allLoaded },
+        )}
+    }
+
+    private fun loadNextSectionBatch() {
+        val generation = feedGeneration.get()
+        val pageOffset = currentPageOffset
+        val refreshId = currentV2RefreshId.takeIf { it > 0L }
+            ?: preferences.suggestionsTotalRefreshCount().get().toLong()
+        presenterScope.launchIO {
+            loadNextSectionBatchInternal(
+                generation = generation,
+                pageOffset = pageOffset,
+                refreshId = refreshId,
+            )
+        }
+    }
+
+    private suspend fun loadNextSectionBatchInternal(
+        generation: Long,
+        pageOffset: Int,
+        refreshId: Long,
+    ): Int {
+        val state = _state.value
+        if (state.allSectionsLoaded || state.nextBatchStartIndex >= state.plannedSections.size) {
+            markAllV2SectionsLoaded()
+            return 0
+        }
+        if (!isSectionBatchFetching.compareAndSet(false, true)) return 0
+
+        val batchStartIndex = state.nextBatchStartIndex
+        val batch = SectionBatcher.nextBatch(
+            plannedSections = state.plannedSections,
+            startIndex = batchStartIndex,
+        )
+        if (batch.isEmpty()) {
+            isSectionBatchFetching.set(false)
+            markAllV2SectionsLoaded()
+            return 0
+        }
+
+        _state.update { it.copy(
+            isFetchingBatch = true,
+            isFetching = !isForegroundRefreshing.get(),
+            emptyMessage = null,
+        )}
+
+        var insertedCount = 0
+        try {
+            val now = System.currentTimeMillis()
+            val sectionsToFetch = batch.filterNot { section -> isSectionCacheFresh(section, now) }
+            candidateRetriever.retrieveProgressively(sectionsToFetch, pageOffset) { result ->
+                if (generation == feedGeneration.get()) {
+                    insertedCount += appendSectionResult(
+                        result = result,
+                        refreshId = refreshId,
+                    )
+                }
+            }
+        } finally {
+            val nextIndex = (batchStartIndex + batch.size).coerceAtMost(state.plannedSections.size)
+            val allLoaded = nextIndex >= state.plannedSections.size
+            isSectionBatchFetching.set(false)
+            if (generation == feedGeneration.get()) {
+                _state.update { current ->
+                    current.copy(
+                        nextBatchStartIndex = nextIndex,
+                        isFetchingBatch = false,
+                        isFetching = false,
+                        allSectionsLoaded = allLoaded,
+                        hasReachedEnd = allLoaded,
+                        endMessage = sectionEndMessage(nextIndex, current.plannedSections.size).takeIf { allLoaded },
+                    )
+                }
+            } else {
+                updateLoadingState()
+            }
+        }
+
+        return insertedCount
+    }
+
+    private fun isSectionCacheFresh(section: PlannedSection, now: Long): Boolean {
+        val fetchedAt = sectionLastFetchedAt[section.sectionKey] ?: return false
+        val ttl = when (section.type) {
+            SectionType.DISCOVERY -> SuggestionsConfig.DISCOVERY_CACHE_TTL_MS
+            else -> SuggestionsConfig.TAG_SECTION_CACHE_TTL_MS
+        }
+        return now - fetchedAt <= ttl
+    }
+
+    private suspend fun appendSectionResult(
+        result: CandidateRetrievalResult,
+        refreshId: Long,
+    ): Int {
+        val now = System.currentTimeMillis()
+        val sectionSeenKeys = mapOf(
+            result.section.sectionKey to suggestionSeenLogRepository.recentKeysForSection(
+                sectionKey = result.section.sectionKey,
+                cutoff = now - SuggestionsConfig.SEEN_LOG_TTL_MS,
+            ),
+        )
+        val suggestions = suggestionRanker.rank(
+            retrievalResults = listOf(result),
+            globalSeenKeys = seenMangaUrls.toSet(),
+            sectionSeenKeys = sectionSeenKeys,
+            sessionContext = sessionContext,
+        ).withSectionDisplayRanks(result.section)
+
+        sectionLastFetchedAt[result.section.sectionKey] = now
+        if (suggestions.isEmpty()) {
+            debugLog.add(LogType.SECTION_DROPPED, "Section '${result.section.sectionKey}' dropped - 0 results after filters")
+            return 0
+        }
+
+        suggestionsRepository.insertSuggestions(suggestions)
+        shownHistoryRepository.insertAll(suggestions.map { it.source to it.url })
+        seenMangaUrls.addAll(suggestions.map { it.memoryKey() })
+        suggestions.forEach { suggestion ->
+            suggestionSeenLogRepository.insertSeen(
+                sectionKey = result.section.sectionKey,
+                mangaKey = suggestion.memoryKey(),
+                shownAt = now,
+                refreshId = refreshId,
+            )
+        }
+        return suggestions.size
+    }
+
+    private fun markAllV2SectionsLoaded() {
+        _state.update { it.copy(
+            allSectionsLoaded = true,
+            hasReachedEnd = true,
+            isFetchingBatch = false,
+            isFetching = false,
+            endMessage = sectionEndMessage(it.nextBatchStartIndex, it.plannedSections.size),
+        )}
     }
 
     private suspend fun syncLegacyTagStateForV2(now: Long) {
@@ -636,7 +815,8 @@ class SuggestionsPresenter(
         _state.update { it.copy(
             isLoading = isForegroundRefreshing.get() || isWorkerRefreshing,
             // isFetching drives the pagination spinner only — not the full-refresh spinner
-            isFetching = isPageFetching.get() && !isForegroundRefreshing.get(),
+            isFetching = (isPageFetching.get() || isSectionBatchFetching.get()) && !isForegroundRefreshing.get(),
+            isFetchingBatch = isSectionBatchFetching.get(),
         )}
     }
 
@@ -645,6 +825,7 @@ class SuggestionsPresenter(
             _state.value.suggestions.isNotEmpty() &&
             !isForegroundRefreshing.get() &&
             !isPageFetching.get() &&
+            !isSectionBatchFetching.get() &&
             !isWorkerRefreshing
     }
 
@@ -663,8 +844,16 @@ class SuggestionsPresenter(
             suggestion.copy(displayRank = startRank + index.toLong())
         }
 
+    private fun List<SuggestedManga>.withSectionDisplayRanks(section: PlannedSection): List<SuggestedManga> =
+        mapIndexed { index, suggestion ->
+            suggestion.copy(displayRank = section.rank * SECTION_DISPLAY_RANK_STRIDE + index.toLong())
+        }
+
     private fun SuggestedManga.memoryKey(): String =
         "$source:$url"
+
+    private fun sectionEndMessage(loadedCount: Int, plannedCount: Int): String =
+        "All ${loadedCount.coerceAtMost(plannedCount)} interest sections loaded"
 
     fun extractQueryFromReason(reason: String): String? {
         // Match all three reason tiers: "Because you love X",
@@ -673,6 +862,8 @@ class SuggestionsPresenter(
         return when {
             tagPrefix != null ->
                 reason.removePrefix(tagPrefix)
+            reason.startsWith(PINNED_REASON_PREFIX) ->
+                reason.removePrefix(PINNED_REASON_PREFIX)
             reason.startsWith(SEARCH_REASON_PREFIX) ->
                 reason.removePrefix(SEARCH_REASON_PREFIX).removeSuffix("\"")
             else -> null
@@ -683,6 +874,7 @@ class SuggestionsPresenter(
         val tagPrefix = READ_REASON_PREFIXES.firstOrNull { startsWith(it) }
         return when {
             tagPrefix != null -> removePrefix(tagPrefix)
+            startsWith(PINNED_REASON_PREFIX) -> removePrefix(PINNED_REASON_PREFIX)
             startsWith(SEARCH_REASON_PREFIX) -> removePrefix(SEARCH_REASON_PREFIX).substringBeforeLast("\"")
             else -> null
         }
@@ -725,9 +917,11 @@ class SuggestionsPresenter(
             "Because you often read ",
             "Because you read ",
         )
+        internal const val PINNED_REASON_PREFIX = "Pinned: "
         /** Legacy alias kept so call-sites that use READ_REASON_PREFIX still compile. */
         internal const val READ_REASON_PREFIX = "Because you read "
         internal const val SEARCH_REASON_PREFIX = "Because you searched \""
+        private const val SECTION_DISPLAY_RANK_STRIDE = 1_000L
         private val WHITESPACE = Regex("\\s+")
         /** Shown manga older than 30 days become eligible to appear again. */
         private const val HISTORY_TTL_MILLIS = 30L * 24 * 60 * 60 * 1_000

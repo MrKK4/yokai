@@ -107,7 +107,6 @@ class InterestProfileBuilder(
                         lastSeenAt = accumulator.lastSeenAt,
                         state = TagState.MANAGED,
                         pinnedAt = null,
-                        cooldownUntil = 0L,
                         updatedAt = now,
                     )
                 }

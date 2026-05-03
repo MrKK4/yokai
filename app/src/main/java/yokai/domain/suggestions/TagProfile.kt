@@ -11,7 +11,6 @@ data class TagProfile(
     val lastSeenAt: Long,
     val state: TagState,
     val pinnedAt: Long?,
-    val cooldownUntil: Long,
     val updatedAt: Long,
 ) {
     val affinity: Double
@@ -25,9 +24,6 @@ data class TagProfile(
 
     val isManaged: Boolean
         get() = state == TagState.MANAGED
-
-    fun isOnCooldown(now: Long = System.currentTimeMillis()): Boolean =
-        cooldownUntil > now
 }
 
 data class TagAlias(

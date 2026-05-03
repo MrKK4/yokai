@@ -3,9 +3,7 @@ package yokai.domain.suggestions
 enum class SectionType {
     DISCOVERY,
     PINNED_TAG,
-    GUARANTEED_TAG,
-    ROTATING_TAG,
-    SAVED_SEARCH,
+    MANAGED_TAG,
 }
 
 data class PlannedSection(

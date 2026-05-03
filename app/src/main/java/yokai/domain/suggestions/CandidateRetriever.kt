@@ -12,7 +12,9 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 
@@ -60,6 +62,46 @@ class CandidateRetriever(
             preferences.recentlyUsedSourceIds().set(discoverySourceIds)
         }
         return results
+    }
+
+    suspend fun retrieveProgressively(
+        sections: List<PlannedSection>,
+        pageOffset: Int = 1,
+        onResult: suspend (CandidateRetrievalResult) -> Unit,
+    ) {
+        if (sections.isEmpty()) return
+        coroutineScope {
+            val requestGate = Semaphore(MAX_CONCURRENT_SOURCE_REQUESTS)
+            val results = Channel<CandidateRetrievalResult>(Channel.UNLIMITED)
+            sections.forEach { section ->
+                launch {
+                    results.send(
+                        CandidateRetrievalResult(
+                            section = section,
+                            candidates = retrieveSection(
+                                section = section,
+                                pageOffset = pageOffset,
+                                requestGate = requestGate,
+                            ),
+                        ),
+                    )
+                }
+            }
+
+            repeat(sections.size) {
+                val result = results.receive()
+                if (result.section.type == SectionType.DISCOVERY) {
+                    val discoverySourceIds = result.candidates
+                        .map { it.sourceId.toString() }
+                        .toSet()
+                    if (discoverySourceIds.isNotEmpty()) {
+                        preferences.recentlyUsedSourceIds().set(discoverySourceIds)
+                    }
+                }
+                onResult(result)
+            }
+            results.close()
+        }
     }
 
     private suspend fun retrieveSection(

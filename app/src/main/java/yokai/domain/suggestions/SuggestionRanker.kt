@@ -42,9 +42,7 @@ class SuggestionRanker(
             )
         }
 
-        return rankedBySection
-            .capSuggestionsBySource(SuggestionsConfig.MAX_PER_SOURCE_FEED)
-            .mapIndexed { index, suggestion -> suggestion.copy(displayRank = index.toLong()) }
+        return rankedBySection.mapIndexed { index, suggestion -> suggestion.copy(displayRank = index.toLong()) }
     }
 
     private suspend fun rankSection(
@@ -144,12 +142,10 @@ class SuggestionRanker(
         return tagAffinityScore * 0.50 +
             freshnessScore * 0.20 +
             sessionBoost +
-            velocityBoost * 0.10 +
+            velocityBoost +
             explorationNoise -
             sourcePenalty
     }
-
-    private fun SuggestedManga.sourceKey(): Long = source
 
     private fun SuggestionCandidate.mangaKey(): String =
         "$sourceId:${manga.url}"
@@ -181,19 +177,6 @@ class SuggestionRanker(
             val count = counts.getOrDefault(scored.candidate.sourceId, 0)
             if (count < max) {
                 counts[scored.candidate.sourceId] = count + 1
-                true
-            } else {
-                false
-            }
-        }
-    }
-
-    private fun List<SuggestedManga>.capSuggestionsBySource(max: Int): List<SuggestedManga> {
-        val counts = mutableMapOf<Long, Int>()
-        return filter { suggestion ->
-            val count = counts.getOrDefault(suggestion.sourceKey(), 0)
-            if (count < max) {
-                counts[suggestion.sourceKey()] = count + 1
                 true
             } else {
                 false

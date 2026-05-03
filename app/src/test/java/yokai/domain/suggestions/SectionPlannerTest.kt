@@ -5,81 +5,119 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
-import kotlin.random.Random
 
 class SectionPlannerTest {
 
     @Test
-    fun `plan orders discovery pinned guaranteed then rotating sections`() = runBlocking {
+    fun `plan orders discovery pinned then every managed tag by affinity`() = runBlocking {
         val repository = FakeTagProfileRepository()
-        val planner = SectionPlanner(repository, SuggestionsDebugLog(), Random(1))
-        val now = 10_000L
+        val planner = SectionPlanner(repository, SuggestionsDebugLog())
         val profiles = listOf(
             profile("romance", recent = 10.0),
-            profile("action", recent = 8.0, state = TagState.PINNED, pinnedAt = 1L),
+            profile("action", recent = 8.0, state = TagState.PINNED, pinnedAt = 2L),
             profile("fantasy", recent = 6.0),
-            profile("comedy", recent = 4.0),
+            profile("comedy", recent = 4.0, state = TagState.PINNED, pinnedAt = 1L),
             profile("drama", recent = 3.0),
         )
 
         val sections = planner.plan(
             profiles = profiles,
             sortOrder = SuggestionSortOrder.Popular,
-            now = now,
-            applyCooldown = false,
+            now = 10_000L,
         )
 
         assertEquals(SectionType.DISCOVERY, sections[0].type)
-        assertEquals(SectionType.PINNED_TAG, sections[1].type)
-        assertEquals("action", sections[1].canonicalTag)
-        assertEquals(SectionType.GUARANTEED_TAG, sections[2].type)
-        assertEquals("romance", sections[2].canonicalTag)
-        assertTrue(sections.drop(3).all { it.type == SectionType.ROTATING_TAG })
+        assertEquals(listOf("comedy", "action"), sections.drop(1).take(2).map { it.canonicalTag })
+        assertEquals(listOf("romance", "fantasy", "drama"), sections.drop(3).map { it.canonicalTag })
+        assertTrue(sections.drop(3).all { it.type == SectionType.MANAGED_TAG })
     }
 
     @Test
-    fun `plan excludes blacklisted tags and skips rotating cooldown tags`() = runBlocking {
+    fun `plan excludes blacklisted and zero affinity managed tags`() = runBlocking {
         val repository = FakeTagProfileRepository()
-        val planner = SectionPlanner(repository, SuggestionsDebugLog(), Random(1))
-        val now = 10_000L
+        val planner = SectionPlanner(repository, SuggestionsDebugLog())
         val profiles = listOf(
             profile("romance", recent = 10.0),
             profile("action", recent = 8.0, state = TagState.BLACKLISTED),
-            profile("fantasy", recent = 6.0, cooldownUntil = now + 1_000L),
-            profile("comedy", recent = 4.0),
-            profile("drama", recent = 3.0),
+            profile("zero", recent = 0.0),
         )
 
         val sections = planner.plan(
             profiles = profiles,
             sortOrder = SuggestionSortOrder.Latest,
-            now = now,
-            applyCooldown = false,
+            now = 10_000L,
         )
 
         assertFalse(sections.any { it.canonicalTag == "action" })
-        assertFalse(sections.any { it.type == SectionType.ROTATING_TAG && it.canonicalTag == "fantasy" })
+        assertFalse(sections.any { it.canonicalTag == "zero" })
+        assertEquals("Latest from your sources", sections.first().displayReason)
     }
 
     @Test
-    fun `plan writes cooldown for rotating sections`() = runBlocking {
+    fun `managed reason strings use affinity tiers`() = runBlocking {
         val repository = FakeTagProfileRepository()
-        val planner = SectionPlanner(repository, SuggestionsDebugLog(), Random(1))
-        val now = 10_000L
+        val planner = SectionPlanner(repository, SuggestionsDebugLog())
 
-        planner.plan(
+        val sections = planner.plan(
             profiles = listOf(
                 profile("romance", recent = 10.0),
-                profile("fantasy", recent = 6.0),
-                profile("comedy", recent = 4.0),
-                profile("drama", recent = 3.0),
+                profile("fantasy", recent = 4.0),
+                profile("drama", recent = 1.0),
             ),
             sortOrder = SuggestionSortOrder.Popular,
-            now = now,
-            refreshIntervalMillis = 100L,
+            now = 10_000L,
         )
 
-        assertTrue(repository.cooldowns.values.all { it == now + 200L })
+        assertEquals("Because you love Romance", sections[1].displayReason)
+        assertEquals("Because you often read Fantasy", sections[2].displayReason)
+        assertEquals("Because you read Drama", sections[3].displayReason)
+    }
+
+    @Test
+    fun `section batcher returns five sections from start index`() {
+        val planned = (0 until 12).map { index ->
+            PlannedSection(
+                sectionKey = "tag:$index",
+                type = SectionType.MANAGED_TAG,
+                canonicalTag = "$index",
+                displayReason = "Because you read $index",
+                searchTerms = listOf("$index"),
+                sortOrder = SuggestionSortOrder.Popular,
+                rank = index.toLong(),
+            )
+        }
+
+        assertEquals(listOf("tag:0", "tag:1", "tag:2", "tag:3", "tag:4"), SectionBatcher.nextBatch(planned, 0).map { it.sectionKey })
+        assertEquals(listOf("tag:10", "tag:11"), SectionBatcher.nextBatch(planned, 10).map { it.sectionKey })
+        assertTrue(SectionBatcher.nextBatch(planned, 12).isEmpty())
+    }
+
+    @Test
+    fun `section batcher threshold triggers within two loaded sections from end`() {
+        assertFalse(
+            SectionBatcher.shouldLoadMore(
+                lastVisibleSectionIndex = 2,
+                loadedSectionCount = 5,
+                isFetchingBatch = false,
+                allSectionsLoaded = false,
+            ),
+        )
+        assertTrue(
+            SectionBatcher.shouldLoadMore(
+                lastVisibleSectionIndex = 3,
+                loadedSectionCount = 5,
+                isFetchingBatch = false,
+                allSectionsLoaded = false,
+            ),
+        )
+        assertFalse(
+            SectionBatcher.shouldLoadMore(
+                lastVisibleSectionIndex = 4,
+                loadedSectionCount = 5,
+                isFetchingBatch = true,
+                allSectionsLoaded = false,
+            ),
+        )
     }
 }
 
@@ -89,7 +127,6 @@ internal fun profile(
     longTerm: Double = 0.0,
     state: TagState = TagState.MANAGED,
     pinnedAt: Long? = null,
-    cooldownUntil: Long = 0L,
 ): TagProfile =
     TagProfile(
         canonicalTag = canonicalTag,
@@ -102,7 +139,6 @@ internal fun profile(
         lastSeenAt = 0L,
         state = state,
         pinnedAt = pinnedAt,
-        cooldownUntil = cooldownUntil,
         updatedAt = 0L,
     )
 
@@ -110,7 +146,6 @@ internal class FakeTagProfileRepository : TagProfileRepository {
     private val profiles = linkedMapOf<String, TagProfile>()
     private val aliases = linkedMapOf<Pair<String, Long>, TagAlias>()
     private val variantCounts = linkedMapOf<Pair<String, String>, Int>()
-    val cooldowns = linkedMapOf<String, Long>()
 
     override suspend fun getAllProfiles(): List<TagProfile> = profiles.values.toList()
 
@@ -133,14 +168,6 @@ internal class FakeTagProfileRepository : TagProfileRepository {
         profiles[canonicalTag] = existing.copy(
             state = state,
             pinnedAt = if (state == TagState.PINNED) now else null,
-            updatedAt = now,
-        )
-    }
-
-    override suspend fun updateCooldown(canonicalTag: String, cooldownUntil: Long, now: Long) {
-        cooldowns[canonicalTag] = cooldownUntil
-        profiles[canonicalTag] = (profiles[canonicalTag] ?: profile(canonicalTag)).copy(
-            cooldownUntil = cooldownUntil,
             updatedAt = now,
         )
     }

@@ -48,6 +48,7 @@ import eu.kanade.tachiyomi.ui.suggestions.SuggestionsPresenter
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
 import yokai.domain.manga.models.cover
+import yokai.domain.suggestions.SectionBatcher
 
 @Composable
 fun SuggestionsScreen(
@@ -67,6 +68,9 @@ fun SuggestionsScreen(
     val visibleSuggestions = state.selectedReason
         ?.let { reason -> state.suggestions.filterKeys { it == reason } }
         ?: state.suggestions
+    val sectionStartIndexes = remember(visibleSuggestions) {
+        visibleSuggestions.values.toSectionStartIndexes()
+    }
 
     ReportScrollState(gridState, onCanScrollUpChanged)
     ReportScrollPosition(
@@ -76,6 +80,11 @@ fun SuggestionsScreen(
     ReportLoadMoreState(
         gridState = gridState,
         enabled = state.selectedReason == null && !state.isLoading && !state.isFetching && !state.hasReachedEnd,
+        sectionStartIndexes = sectionStartIndexes,
+        loadedSectionCount = visibleSuggestions.size,
+        isFetchingBatch = state.isFetchingBatch,
+        allSectionsLoaded = state.allSectionsLoaded,
+        useSectionThreshold = state.plannedSections.isNotEmpty(),
         onLoadMore = presenter::loadNextPage,
     )
 
@@ -219,15 +228,38 @@ private fun ReportScrollPosition(
 private fun ReportLoadMoreState(
     gridState: LazyGridState,
     enabled: Boolean,
+    sectionStartIndexes: List<Int>,
+    loadedSectionCount: Int,
+    isFetchingBatch: Boolean,
+    allSectionsLoaded: Boolean,
+    useSectionThreshold: Boolean,
     onLoadMore: () -> Unit,
 ) {
-    LaunchedEffect(gridState, enabled) {
+    LaunchedEffect(
+        gridState,
+        enabled,
+        sectionStartIndexes,
+        loadedSectionCount,
+        isFetchingBatch,
+        allSectionsLoaded,
+        useSectionThreshold,
+    ) {
         if (!enabled) return@LaunchedEffect
 
         snapshotFlow {
             val layoutInfo = gridState.layoutInfo
             val lastVisibleItem = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-            layoutInfo.totalItemsCount > 0 && lastVisibleItem >= layoutInfo.totalItemsCount - LOAD_MORE_THRESHOLD
+            if (useSectionThreshold) {
+                val lastVisibleSectionIndex = sectionStartIndexes.indexOfLast { it <= lastVisibleItem }
+                SectionBatcher.shouldLoadMore(
+                    lastVisibleSectionIndex = lastVisibleSectionIndex,
+                    loadedSectionCount = loadedSectionCount,
+                    isFetchingBatch = isFetchingBatch,
+                    allSectionsLoaded = allSectionsLoaded,
+                )
+            } else {
+                layoutInfo.totalItemsCount > 0 && lastVisibleItem >= layoutInfo.totalItemsCount - LOAD_MORE_THRESHOLD
+            }
         }
             .distinctUntilChanged()
             .filter { it }
@@ -379,3 +411,13 @@ internal fun SuggestionItem(manga: Manga, onClick: () -> Unit) {
 
 private val MANGA_GRID_MIN_WIDTH = 104.dp
 private const val LOAD_MORE_THRESHOLD = 3
+
+private fun Collection<List<Manga>>.toSectionStartIndexes(): List<Int> {
+    val indexes = mutableListOf<Int>()
+    var itemIndex = 0
+    forEach { mangaList ->
+        indexes += itemIndex
+        itemIndex += 1 + mangaList.size + 1
+    }
+    return indexes
+}

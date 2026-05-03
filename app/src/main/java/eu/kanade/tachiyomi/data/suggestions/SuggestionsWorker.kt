@@ -23,6 +23,7 @@ import yokai.domain.suggestions.FeedAggregator
 import yokai.domain.suggestions.GetUserSuggestionQueriesUseCase
 import yokai.domain.suggestions.InterestProfileBuilder
 import yokai.domain.suggestions.PlannedSectionRepository
+import yokai.domain.suggestions.SectionBatcher
 import yokai.domain.suggestions.SectionPlanner
 import yokai.domain.suggestions.SessionContext
 import yokai.domain.suggestions.ShownMangaHistoryRepository
@@ -33,7 +34,6 @@ import yokai.domain.suggestions.SuggestionsRepository
 import yokai.domain.suggestions.TagCanonicalizer
 import yokai.domain.suggestions.TagProfileRepository
 import yokai.domain.suggestions.TagState
-import yokai.domain.source.browse.filter.SavedSearchRepository
 
 class SuggestionsWorker(
     context: Context,
@@ -51,7 +51,6 @@ class SuggestionsWorker(
     private val suggestionRanker: SuggestionRanker = Injekt.get()
     private val suggestionSeenLogRepository: SuggestionSeenLogRepository = Injekt.get()
     private val shownMangaHistoryRepository: ShownMangaHistoryRepository = Injekt.get()
-    private val savedSearchRepository: SavedSearchRepository = Injekt.get()
     private val sessionContext: SessionContext = Injekt.get()
     private val tagCanonicalizer: TagCanonicalizer = Injekt.get()
     private val tagProfileRepository: TagProfileRepository = Injekt.get()
@@ -77,31 +76,34 @@ class SuggestionsWorker(
         val now = System.currentTimeMillis()
         suggestionSeenLogRepository.deleteOlderThan(now - SuggestionsConfig.SEEN_LOG_TTL_MS)
 
-        var plannedSections = plannedSectionRepository.getPlannedSections()
-        if (plannedSections.isEmpty()) {
+        var profiles = tagProfileRepository.getAllProfiles()
+        if (profiles.isEmpty()) {
             interestProfileBuilder.buildProfile(now)
             syncLegacyTagStateForV2(now)
-            val profiles = tagProfileRepository.getAllProfiles()
-            val savedSearches = savedSearchRepository.findAll()
-                .mapNotNull { it.query?.trim()?.takeIf { query -> query.length in 2..64 } }
-            plannedSections = sectionPlanner.plan(
-                profiles = profiles,
-                sortOrder = preferences.suggestionsSortOrder().get(),
-                savedSearches = savedSearches,
-                now = now,
-                applyCooldown = false,
-            )
-            plannedSectionRepository.replaceAll(plannedSections)
+            profiles = tagProfileRepository.getAllProfiles()
         }
+        val plannedSections = sectionPlanner.plan(
+            profiles = profiles,
+            sortOrder = preferences.suggestionsSortOrder().get(),
+            now = now,
+        )
+        plannedSectionRepository.replaceAll(plannedSections)
 
-        val sectionSeenKeys = plannedSections.associate { section ->
+        val loadedReasons = suggestionsRepository.getSuggestions()
+            .map { it.reason }
+            .toSet()
+        val sectionsToFetch = plannedSections
+            .filter { it.displayReason in loadedReasons }
+            .ifEmpty { SectionBatcher.nextBatch(plannedSections, 0) }
+
+        val sectionSeenKeys = sectionsToFetch.associate { section ->
             section.sectionKey to suggestionSeenLogRepository.recentKeysForSection(
                 sectionKey = section.sectionKey,
                 cutoff = now - SuggestionsConfig.SEEN_LOG_TTL_MS,
             )
         }
         val suggestions = suggestionRanker.rank(
-            retrievalResults = candidateRetriever.retrieve(plannedSections),
+            retrievalResults = candidateRetriever.retrieve(sectionsToFetch),
             globalSeenKeys = shownMangaHistoryRepository.getAllKeys(),
             sectionSeenKeys = sectionSeenKeys,
             sessionContext = sessionContext,
@@ -110,7 +112,7 @@ class SuggestionsWorker(
 
         suggestionsRepository.replaceAll(suggestions)
         shownMangaHistoryRepository.insertAll(suggestions.map { it.source to it.url })
-        val sectionKeyByReason = plannedSections.associate { it.displayReason to it.sectionKey }
+        val sectionKeyByReason = sectionsToFetch.associate { it.displayReason to it.sectionKey }
         val refreshId = preferences.suggestionsTotalRefreshCount().get() + 1L
         preferences.suggestionsTotalRefreshCount().set(refreshId.toInt())
         suggestions.forEach { suggestion ->

@@ -49,7 +49,7 @@ class PlannedSectionRepositoryImpl(
     ): PlannedSection =
         PlannedSection(
             sectionKey = sectionKey,
-            type = runCatching { SectionType.valueOf(sectionType) }.getOrDefault(SectionType.DISCOVERY),
+            type = sectionType.toSectionType(),
             canonicalTag = canonicalTag,
             displayReason = displayReason,
             searchTerms = searchTerms
@@ -64,5 +64,11 @@ class PlannedSectionRepositoryImpl(
 
     private companion object {
         private const val SEARCH_TERM_SEPARATOR = "\u001F"
+
+        private fun String.toSectionType(): SectionType =
+            when (this) {
+                "GUARANTEED_TAG", "ROTATING_TAG" -> SectionType.MANAGED_TAG
+                else -> runCatching { SectionType.valueOf(this) }.getOrDefault(SectionType.DISCOVERY)
+            }
     }
 }

@@ -7,7 +7,6 @@ interface TagProfileRepository {
     suspend fun upsertProfile(profile: TagProfile)
     suspend fun upsertProfiles(profiles: List<TagProfile>)
     suspend fun setTagState(canonicalTag: String, state: TagState, now: Long = System.currentTimeMillis())
-    suspend fun updateCooldown(canonicalTag: String, cooldownUntil: Long, now: Long = System.currentTimeMillis())
 
     suspend fun findAlias(rawKey: String, sourceId: Long? = null): TagAlias?
     suspend fun getSearchTerms(canonicalTag: String): List<String>

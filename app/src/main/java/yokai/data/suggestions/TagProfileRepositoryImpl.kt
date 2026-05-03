@@ -67,16 +67,6 @@ class TagProfileRepositoryImpl(
         }
     }
 
-    override suspend fun updateCooldown(canonicalTag: String, cooldownUntil: Long, now: Long) {
-        handler.await {
-            tag_profileQueries.updateCooldown(
-                cooldownUntil = cooldownUntil,
-                updatedAt = now,
-                canonicalTag = canonicalTag,
-            )
-        }
-    }
-
     override suspend fun findAlias(rawKey: String, sourceId: Long?): TagAlias? {
         val sourceKey = sourceId ?: GLOBAL_SOURCE_KEY
         return handler.awaitOneOrNull {
@@ -144,7 +134,6 @@ class TagProfileRepositoryImpl(
         lastSeenAt: Long,
         state: String,
         pinnedAt: Long?,
-        cooldownUntil: Long,
         updatedAt: Long,
     ): TagProfile =
         TagProfile(
@@ -158,7 +147,6 @@ class TagProfileRepositoryImpl(
             lastSeenAt = lastSeenAt,
             state = state.toTagState(),
             pinnedAt = pinnedAt,
-            cooldownUntil = cooldownUntil,
             updatedAt = updatedAt,
         )
 
