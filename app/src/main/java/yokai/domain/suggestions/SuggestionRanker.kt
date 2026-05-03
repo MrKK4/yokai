@@ -6,6 +6,19 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import yokai.domain.manga.MangaRepository
 
+/**
+ * Snapshot of the expensive, batch-stable data that [SuggestionRanker] needs to rank
+ * candidates. Fetch once per batch with [SuggestionRanker.buildRankingContext] and pass
+ * the same instance into every [SuggestionRanker.rankWithContext] call, eliminating
+ * redundant full-table DB reads across sections.
+ */
+data class RankingContext(
+    val localKeys: Set<Pair<Long, String>>,
+    val localTitles: Set<String>,
+    val profiles: Map<String, TagProfile>,
+    val blacklistedTags: Set<String>,
+)
+
 class SuggestionRanker(
     private val mangaRepository: MangaRepository,
     private val tagCanonicalizer: TagCanonicalizer,
@@ -13,36 +26,57 @@ class SuggestionRanker(
     private val debugLog: SuggestionsDebugLog,
     private val random: Random = Random.Default,
 ) {
+    /** Build the batch-stable ranking context from DB. Call once per batch, not per section. */
+    suspend fun buildRankingContext(): RankingContext {
+        val localManga = mangaRepository.getMangaList()
+        val profiles = tagProfileRepository.getAllProfiles().associateBy { it.canonicalTag }
+        return RankingContext(
+            localKeys = localManga.map { it.source to it.url }.toSet(),
+            localTitles = localManga.map { it.title.normalizedTitle() }.toSet(),
+            profiles = profiles,
+            blacklistedTags = profiles.values
+                .filter { it.isBlacklisted }
+                .map { it.canonicalTag }
+                .toSet(),
+        )
+    }
+
+    /**
+     * Rank using a pre-built [RankingContext]. Use this in batch flows to avoid
+     * re-fetching local manga + profiles from the DB for every section.
+     */
+    suspend fun rankWithContext(
+        retrievalResults: List<CandidateRetrievalResult>,
+        context: RankingContext,
+        globalSeenKeys: Set<String>,
+        sectionSeenKeys: Map<String, Set<String>>,
+        sessionContext: SessionContext,
+    ): List<SuggestedManga> {
+        val recentSessionTags = sessionContext.getRecentTags()
+        val rankedBySection = retrievalResults.flatMap { result ->
+            rankSection(
+                result = result,
+                localKeys = context.localKeys,
+                localTitles = context.localTitles,
+                globalSeenKeys = globalSeenKeys,
+                sectionSeenKeys = sectionSeenKeys[result.section.sectionKey].orEmpty(),
+                profiles = context.profiles,
+                blacklistedTags = context.blacklistedTags,
+                recentSessionTags = recentSessionTags,
+            )
+        }
+        return rankedBySection.mapIndexed { index, suggestion -> suggestion.copy(displayRank = index.toLong()) }
+    }
+
+    /** Legacy overload — fetches context from DB on every call. Use [rankWithContext] in batch flows. */
     suspend fun rank(
         retrievalResults: List<CandidateRetrievalResult>,
         globalSeenKeys: Set<String>,
         sectionSeenKeys: Map<String, Set<String>>,
         sessionContext: SessionContext,
     ): List<SuggestedManga> {
-        val localManga = mangaRepository.getMangaList()
-        val localKeys = localManga.map { it.source to it.url }.toSet()
-        val localTitles = localManga.map { it.title.normalizedTitle() }.toSet()
-        val profiles = tagProfileRepository.getAllProfiles().associateBy { it.canonicalTag }
-        val blacklistedTags = profiles.values
-            .filter { it.isBlacklisted }
-            .map { it.canonicalTag }
-            .toSet()
-        val recentSessionTags = sessionContext.getRecentTags()
-
-        val rankedBySection = retrievalResults.flatMap { result ->
-            rankSection(
-                result = result,
-                localKeys = localKeys,
-                localTitles = localTitles,
-                globalSeenKeys = globalSeenKeys,
-                sectionSeenKeys = sectionSeenKeys[result.section.sectionKey].orEmpty(),
-                profiles = profiles,
-                blacklistedTags = blacklistedTags,
-                recentSessionTags = recentSessionTags,
-            )
-        }
-
-        return rankedBySection.mapIndexed { index, suggestion -> suggestion.copy(displayRank = index.toLong()) }
+        val context = buildRankingContext()
+        return rankWithContext(retrievalResults, context, globalSeenKeys, sectionSeenKeys, sessionContext)
     }
 
     private suspend fun rankSection(
@@ -55,6 +89,7 @@ class SuggestionRanker(
         blacklistedTags: Set<String>,
         recentSessionTags: Set<String>,
     ): List<SuggestedManga> {
+
         val bestByTitle = linkedMapOf<String, ScoredCandidate>()
         for (candidate in result.candidates) {
             val mangaKey = candidate.mangaKey()

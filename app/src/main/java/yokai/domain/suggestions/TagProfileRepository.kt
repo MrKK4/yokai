@@ -20,11 +20,20 @@ interface TagProfileRepository {
 
 interface SuggestionSeenLogRepository {
     suspend fun insertSeen(sectionKey: String, mangaKey: String, shownAt: Long, refreshId: Long)
+    suspend fun insertSeenBatch(entries: List<SeenEntry>)
     suspend fun deleteOlderThan(cutoff: Long)
     suspend fun recentKeysForSection(sectionKey: String, cutoff: Long): Set<String>
+    suspend fun recentKeysForSections(sectionKeys: Collection<String>, cutoff: Long): Map<String, Set<String>>
     suspend fun keysSinceRefresh(minimumRefreshId: Long): Set<String>
     suspend fun shownAt(sectionKey: String, mangaKey: String): Long?
 }
+
+data class SeenEntry(
+    val sectionKey: String,
+    val mangaKey: String,
+    val shownAt: Long,
+    val refreshId: Long,
+)
 
 interface PlannedSectionRepository {
     suspend fun getPlannedSections(): List<PlannedSection>

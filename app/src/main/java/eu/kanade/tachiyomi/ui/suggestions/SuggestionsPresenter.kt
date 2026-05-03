@@ -30,6 +30,8 @@ import yokai.domain.suggestions.GetUserSuggestionQueriesUseCase
 import yokai.domain.suggestions.CandidateRetriever
 import yokai.domain.suggestions.CandidateRetrievalResult
 import yokai.domain.suggestions.InterestProfileBuilder
+import yokai.domain.suggestions.RankingContext
+import yokai.domain.suggestions.SeenEntry
 import yokai.domain.suggestions.TagCanonicalizer
 import yokai.domain.suggestions.TagProfileRepository
 import yokai.domain.suggestions.TagState
@@ -70,6 +72,13 @@ data class SuggestionsState(
     val sheetIsLoading: Boolean = false,
     val sheetError: String? = null,
     val sheetSuppressed: Boolean = false,
+    /**
+     * Monotonically increasing counter that increments on every hard refresh.
+     * [SuggestionsScreen] observes this to call [LazyGridState.scrollToItem](0)
+     * so the grid returns to the top after a refresh without going through the
+     * presenter's saved-position fields.
+     */
+    val scrollToTopTrigger: Long = 0L,
 )
 
 class SuggestionsPresenter(
@@ -116,9 +125,28 @@ class SuggestionsPresenter(
     /** Random page offset (1–3) re-rolled on every user-initiated refresh so each
      *  refresh fetches a different page from each source, guaranteeing variety. */
     @Volatile private var currentPageOffset: Int = 1
+    /**
+     * Guards against [onCreate] running its setup logic more than once.
+     * Conductor recreates the View (and calls onViewCreated → presenter.onCreate)
+     * each time the tab is re-selected, but the presenter itself is retained via
+     * `by lazy`. Without this guard every tab switch would register duplicate
+     * flow collectors and potentially trigger a spurious refresh.
+     */
+    private var isInitialized = false
+
+    /**
+     * The sort order that was most recently *committed* by the user (i.e. the
+     * latest call to [setSortOrder]). Written immediately on the calling thread
+     * so the next [setSortOrder] call can guard against redundant rebuilds even
+     * while a previous rebuild's network calls are still in-flight.
+     */
+    @Volatile private var committedSortOrder: SuggestionSortOrder =
+        preferences.suggestionsSortOrder().get()
 
     override fun onCreate() {
         super.onCreate()
+        if (isInitialized) return
+        isInitialized = true
 
         // Load persistent shown history into the session seen-set so refreshes
         // never re-show manga that appeared in a previous session.
@@ -184,12 +212,25 @@ class SuggestionsPresenter(
         }
     }
 
-    fun refresh() {
+    /**
+     * Refresh the feed.
+     *
+     * - [hardRefresh] = false (default, pull-to-refresh): **soft refresh** — rebuild
+     *   the interest profile from local DB, re-order sections by updated affinity scores,
+     *   re-rank stored results, and only hit the network for sections whose cache has expired.
+     *   This is fast (mostly local) and means the user sees re-ordered content immediately.
+     *
+     * - [hardRefresh] = true: full wipe + network fetch. Used on first load or when
+     *   there are no stored suggestions.
+     */
+    fun refresh(hardRefresh: Boolean = false) {
         if (!isForegroundRefreshing.compareAndSet(false, true)) return
         feedGeneration.incrementAndGet()
         currentPageOffset = Random.nextInt(1, 8)   // randomize page 1–7 on each refresh
         isPageFetching.set(false)
         isSectionBatchFetching.set(false)
+        // Reset the saved scroll position so that if the composition is recreated
+        // (e.g. low-memory view destroy) it doesn't restore to a stale position.
         saveGridScrollPosition(index = 0, scrollOffset = 0)
         usedTags.clear()
         // seenMangaUrls is NOT cleared — it survives refreshes via persistent history
@@ -210,18 +251,27 @@ class SuggestionsPresenter(
             sheetIsLoading = false,
             sheetError = null,
             sheetSuppressed = false,
+            // Increment trigger so SuggestionsScreen scrolls the LazyGrid back to the top.
+            scrollToTopTrigger = it.scrollToTopTrigger + 1L,
         )}
         updateLoadingState()
+
+        val generation = feedGeneration.get()
+        val pageOffset = currentPageOffset
 
         presenterScope.launchIO {
             try {
                 if (preferences.suggestionsV2Enabled().get()) {
-                    refreshV2(
-                        generation = feedGeneration.get(),
-                        pageOffset = currentPageOffset,
-                    )
+                    val hasExistingContent = suggestionsRepository.count() > 0L
+                    if (!hardRefresh && hasExistingContent) {
+                        // Soft path: re-rank locally, then fill any stale sections from network.
+                        softRefreshV2(generation = generation, pageOffset = pageOffset)
+                    } else {
+                        // Hard path: wipe DB and do a full network fetch.
+                        refreshV2(generation = generation, pageOffset = pageOffset)
+                    }
                 } else {
-                    val suggestions = buildFreshSuggestions(currentPageOffset)
+                    val suggestions = buildFreshSuggestions(pageOffset)
                     suggestionsRepository.replaceAll(suggestions)
                     // Persist shown manga into the 30-day history
                     shownHistoryRepository.insertAll(
@@ -320,7 +370,10 @@ class SuggestionsPresenter(
     }
 
     fun setSortOrder(sortOrder: SuggestionSortOrder) {
-        if (_state.value.sortOrder == sortOrder) return
+        // Guard against a stale state check during in-flight network requests:
+        // compare against the committed var, not state.sortOrder, which may lag.
+        if (committedSortOrder == sortOrder) return
+        committedSortOrder = sortOrder
         preferences.suggestionsSortOrder().set(sortOrder)
         rebuildFeed(sortOrder = sortOrder)
     }
@@ -466,10 +519,13 @@ class SuggestionsPresenter(
                 sheetIsLoading = false,
                 sheetError = null,
                 sheetSuppressed = false,
+                // Note: scrollToTopTrigger is NOT incremented here because refresh() below
+                // will increment it. Incrementing twice would cause a double scroll-to-top.
             )}
             presenterScope.launchIO {
                 suggestionsRepository.deleteAll()
-                refresh()
+                // Sort change always requires a hard network fetch (different API endpoints).
+                refresh(hardRefresh = true)
             }
             return
         }
@@ -500,6 +556,7 @@ class SuggestionsPresenter(
             sheetIsLoading = false,
             sheetError = null,
             sheetSuppressed = false,
+            scrollToTopTrigger = it.scrollToTopTrigger + 1L,
         )}
         presenterScope.launchIO {
             suggestionsRepository.deleteAll()
@@ -579,6 +636,89 @@ class SuggestionsPresenter(
             )
         }
         return suggestions
+    }
+
+    /**
+     * **Soft refresh** — re-rank existing suggestions by updated affinity scores without
+     * a full network fetch. Called by [refresh] when the DB already has content.
+     *
+     * 1. Rebuild the interest profile from local DB (fast, offline).
+     * 2. Re-plan sections in new affinity order (e.g. Romance surpassed Isekai → it moves up).
+     * 3. Re-rank the existing stored suggestions using the new section order.
+     * 4. Persist the re-ordered list and update state so the UI reorders instantly.
+     * 5. In the background, fetch any sections whose cache has expired.
+     */
+    private suspend fun softRefreshV2(generation: Long, pageOffset: Int) {
+        val now = System.currentTimeMillis()
+        debugLog.add(LogType.REFRESH_MODE, "Soft refresh - re-ranking locally, fetching stale sections")
+
+        // Step 1: Rebuild profile from local DB (no network call).
+        interestProfileBuilder.buildProfile(now)
+        syncLegacyTagStateForV2(now)
+        val profiles = tagProfileRepository.getAllProfiles()
+
+        // Step 2: Re-plan sections in new affinity order.
+        val plannedSections = sectionPlanner.plan(
+            profiles = profiles,
+            sortOrder = _state.value.sortOrder,
+            now = now,
+        )
+        plannedSectionRepository.replaceAll(plannedSections)
+
+        // Step 3: Re-rank existing stored suggestions using new section order.
+        val existing = suggestionsRepository.getSuggestions()
+        if (existing.isNotEmpty()) {
+            // Build a map of sectionKey → list of existing candidates for that section.
+            val bySectionKey = existing.groupBy { suggestion ->
+                plannedSections.firstOrNull { it.displayReason == suggestion.reason }?.sectionKey
+                    ?: suggestion.reason.lowercase().trim()
+            }
+            val reRanked = plannedSections.flatMapIndexed { sectionIndex, section ->
+                val sectionSuggestions = bySectionKey[section.sectionKey].orEmpty()
+                sectionSuggestions.mapIndexed { itemIndex, suggestion ->
+                    suggestion.copy(
+                        displayRank = (sectionIndex * SECTION_DISPLAY_RANK_STRIDE) + itemIndex.toLong(),
+                    )
+                }
+            }
+            if (reRanked.isNotEmpty()) {
+                suggestionsRepository.replaceAll(reRanked)
+                debugLog.add(LogType.REFRESH_MODE, "Soft refresh: re-ranked ${reRanked.size} items across ${plannedSections.size} sections")
+            }
+        }
+
+        // Step 4: Update planned-section state so scroll and batch logic is correct.
+        val refreshId = preferences.suggestionsTotalRefreshCount().get().toLong()
+        currentV2RefreshId = refreshId
+
+        val staleSections = plannedSections.filter { !isSectionCacheFresh(it, now) }
+        _state.update { it.copy(
+            plannedSections = plannedSections,
+            nextBatchStartIndex = 0,
+            isFetchingBatch = false,
+            allSectionsLoaded = staleSections.isEmpty(),
+            hasReachedEnd = staleSections.isEmpty(),
+            endMessage = if (staleSections.isEmpty()) sectionEndMessage(plannedSections.size, plannedSections.size) else null,
+            emptyMessage = null,
+        )}
+
+        // Step 5: Kick off batch fetches for any stale sections.
+        if (staleSections.isNotEmpty() && generation == feedGeneration.get()) {
+            var inserted = loadNextSectionBatchInternal(generation = generation, pageOffset = pageOffset, refreshId = refreshId)
+            while (generation == feedGeneration.get() && inserted == 0 && !_state.value.allSectionsLoaded) {
+                inserted += loadNextSectionBatchInternal(generation = generation, pageOffset = pageOffset, refreshId = refreshId)
+            }
+        }
+
+        if (suggestionsRepository.count() == 0L) {
+            throw RefreshBlocked(
+                if (getManga.awaitAll().isEmpty()) {
+                    "Add some manga to your library to get personalized suggestions."
+                } else {
+                    "No latest updates or personalized matches came back from your active sources."
+                },
+            )
+        }
     }
 
     private suspend fun refreshV2(generation: Long, pageOffset: Int) {
@@ -708,11 +848,30 @@ class SuggestionsPresenter(
         try {
             val now = System.currentTimeMillis()
             val sectionsToFetch = batch.filterNot { section -> isSectionCacheFresh(section, now) }
+
+            // ── Pre-fetch batch-stable data ONCE ──────────────────────────────────────
+            // Fetching localManga + profiles from DB is expensive. Do it once per batch
+            // rather than once per section (was 2 full-table reads × batch size = 10 reads
+            // for a 5-section batch; now it's 2 reads total).
+            val rankingContext = suggestionRanker.buildRankingContext()
+
+            // Pre-fetch all section seen-keys in parallel instead of sequentially inside
+            // each appendSectionResult call.
+            val seenCutoff = now - SuggestionsConfig.SEEN_LOG_TTL_MS
+            val allSectionSeenKeys = suggestionSeenLogRepository.recentKeysForSections(
+                sectionKeys = sectionsToFetch.map { it.sectionKey },
+                cutoff = seenCutoff,
+            )
+            // ─────────────────────────────────────────────────────────────────────────
+
             candidateRetriever.retrieveProgressively(sectionsToFetch, pageOffset) { result ->
                 if (generation == feedGeneration.get()) {
                     insertedCount += appendSectionResult(
                         result = result,
                         refreshId = refreshId,
+                        rankingContext = rankingContext,
+                        sectionSeenKeys = allSectionSeenKeys,
+                        now = now,
                     )
                 }
             }
@@ -731,12 +890,38 @@ class SuggestionsPresenter(
                         endMessage = sectionEndMessage(nextIndex, current.plannedSections.size).takeIf { allLoaded },
                     )
                 }
+                // Speculatively start the next batch immediately so it's ready before
+                // the user scrolls to the bottom. The scroll threshold in ReportLoadMoreState
+                // is a safety-net fallback only.
+                if (!allLoaded) {
+                    speculativelyPrefetchNextBatch(generation = generation, pageOffset = pageOffset, refreshId = refreshId)
+                }
             } else {
                 updateLoadingState()
             }
         }
 
         return insertedCount
+    }
+
+    /**
+     * Fire-and-forget enqueue of the next section batch. This keeps the pipeline
+     * flowing so the next batch is usually ready by the time the user scrolls
+     * to the bottom of the current one.
+     *
+     * Uses [isSectionBatchFetching] as a guard so it's a no-op if a fetch is
+     * already in-flight (e.g. triggered by both speculative pre-fetch and the
+     * scroll threshold at the same time).
+     */
+    private fun speculativelyPrefetchNextBatch(generation: Long, pageOffset: Int, refreshId: Long) {
+        if (isSectionBatchFetching.get()) return
+        presenterScope.launchIO {
+            loadNextSectionBatchInternal(
+                generation = generation,
+                pageOffset = pageOffset,
+                refreshId = refreshId,
+            )
+        }
     }
 
     private fun isSectionCacheFresh(section: PlannedSection, now: Long): Boolean {
@@ -751,16 +936,13 @@ class SuggestionsPresenter(
     private suspend fun appendSectionResult(
         result: CandidateRetrievalResult,
         refreshId: Long,
+        rankingContext: RankingContext,
+        sectionSeenKeys: Map<String, Set<String>>,
+        now: Long,
     ): Int {
-        val now = System.currentTimeMillis()
-        val sectionSeenKeys = mapOf(
-            result.section.sectionKey to suggestionSeenLogRepository.recentKeysForSection(
-                sectionKey = result.section.sectionKey,
-                cutoff = now - SuggestionsConfig.SEEN_LOG_TTL_MS,
-            ),
-        )
-        val suggestions = suggestionRanker.rank(
+        val suggestions = suggestionRanker.rankWithContext(
             retrievalResults = listOf(result),
+            context = rankingContext,
             globalSeenKeys = seenMangaUrls.toSet(),
             sectionSeenKeys = sectionSeenKeys,
             sessionContext = sessionContext,
@@ -775,14 +957,17 @@ class SuggestionsPresenter(
         suggestionsRepository.insertSuggestions(suggestions)
         shownHistoryRepository.insertAll(suggestions.map { it.source to it.url })
         seenMangaUrls.addAll(suggestions.map { it.memoryKey() })
-        suggestions.forEach { suggestion ->
-            suggestionSeenLogRepository.insertSeen(
-                sectionKey = result.section.sectionKey,
-                mangaKey = suggestion.memoryKey(),
-                shownAt = now,
-                refreshId = refreshId,
-            )
-        }
+        // Batch insert all seen-log entries in one transaction instead of N individual writes.
+        suggestionSeenLogRepository.insertSeenBatch(
+            suggestions.map { suggestion ->
+                SeenEntry(
+                    sectionKey = result.section.sectionKey,
+                    mangaKey = suggestion.memoryKey(),
+                    shownAt = now,
+                    refreshId = refreshId,
+                )
+            },
+        )
         return suggestions.size
     }
 

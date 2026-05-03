@@ -59,11 +59,30 @@ fun SuggestionsScreen(
     onExpandSection: (String) -> Unit,
 ) {
     val state by presenter.state.collectAsState()
-    val gridState = remember {
+    val gridState = remember(presenter) {
         LazyGridState(
             firstVisibleItemIndex = presenter.gridFirstVisibleItemIndex,
             firstVisibleItemScrollOffset = presenter.gridFirstVisibleItemScrollOffset,
         )
+    }
+    // Scroll to top whenever a hard refresh or sort-order change fires.
+    // Using the trigger value as the key so this fires on every increment.
+    val scrollToTopTrigger = state.scrollToTopTrigger
+    LaunchedEffect(scrollToTopTrigger) {
+        // Only act on actual increments (skip the initial 0 value to avoid
+        // overriding the restored position on first composition).
+        if (scrollToTopTrigger > 0L) {
+            gridState.scrollToItem(0)
+        }
+    }
+    // On composition start (or when presenter changes due to view recreation after low-memory
+    // destroy), scroll to the last saved position if the user was scrolled down.
+    LaunchedEffect(presenter) {
+        val targetIndex = presenter.gridFirstVisibleItemIndex
+        val targetOffset = presenter.gridFirstVisibleItemScrollOffset
+        if (targetIndex > 0) {
+            gridState.scrollToItem(targetIndex, targetOffset)
+        }
     }
     val visibleSuggestions = state.selectedReason
         ?.let { reason -> state.suggestions.filterKeys { it == reason } }

@@ -84,7 +84,11 @@ class SuggestionsController(
 
         binding.swipeRefresh.setStyle()
         binding.swipeRefresh.setOnRefreshListener { presenter.refresh() }
-        binding.swipeRefresh.setOnChildScrollUpCallback { _, _ -> suggestionsCanScrollUp }
+        binding.swipeRefresh.setOnChildScrollUpCallback { _, _ ->
+            // When already refreshing, tell SwipeRefreshLayout the child can scroll up so it
+            // doesn't re-engage the pull gesture and visually "stop" the in-progress refresh.
+            suggestionsCanScrollUp || binding.swipeRefresh.isRefreshing
+        }
         binding.root.doOnApplyWindowInsetsCompat { _, insets, _ ->
             statusBarHeight = insets.getInsets(systemBars()).top
             updateSwipeRefreshOffset()

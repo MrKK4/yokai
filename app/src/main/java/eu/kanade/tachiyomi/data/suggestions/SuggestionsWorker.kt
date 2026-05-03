@@ -31,6 +31,8 @@ import yokai.domain.suggestions.SuggestionRanker
 import yokai.domain.suggestions.SuggestionSeenLogRepository
 import yokai.domain.suggestions.SuggestionsConfig
 import yokai.domain.suggestions.SuggestionsRepository
+import yokai.domain.suggestions.RankingContext
+import yokai.domain.suggestions.SeenEntry
 import yokai.domain.suggestions.TagCanonicalizer
 import yokai.domain.suggestions.TagProfileRepository
 import yokai.domain.suggestions.TagState
@@ -96,14 +98,16 @@ class SuggestionsWorker(
             .filter { it.displayReason in loadedReasons }
             .ifEmpty { SectionBatcher.nextBatch(plannedSections, 0) }
 
-        val sectionSeenKeys = sectionsToFetch.associate { section ->
-            section.sectionKey to suggestionSeenLogRepository.recentKeysForSection(
-                sectionKey = section.sectionKey,
-                cutoff = now - SuggestionsConfig.SEEN_LOG_TTL_MS,
-            )
-        }
-        val suggestions = suggestionRanker.rank(
+        // Pre-fetch ranking context (localManga + profiles) once, not per-section.
+        val rankingContext = suggestionRanker.buildRankingContext()
+        // Fetch all section seen-keys in parallel.
+        val sectionSeenKeys = suggestionSeenLogRepository.recentKeysForSections(
+            sectionKeys = sectionsToFetch.map { it.sectionKey },
+            cutoff = now - SuggestionsConfig.SEEN_LOG_TTL_MS,
+        )
+        val suggestions = suggestionRanker.rankWithContext(
             retrievalResults = candidateRetriever.retrieve(sectionsToFetch),
+            context = rankingContext,
             globalSeenKeys = shownMangaHistoryRepository.getAllKeys(),
             sectionSeenKeys = sectionSeenKeys,
             sessionContext = sessionContext,
@@ -115,14 +119,17 @@ class SuggestionsWorker(
         val sectionKeyByReason = sectionsToFetch.associate { it.displayReason to it.sectionKey }
         val refreshId = preferences.suggestionsTotalRefreshCount().get() + 1L
         preferences.suggestionsTotalRefreshCount().set(refreshId.toInt())
-        suggestions.forEach { suggestion ->
-            suggestionSeenLogRepository.insertSeen(
-                sectionKey = sectionKeyByReason[suggestion.reason] ?: suggestion.reason.lowercase().trim(),
-                mangaKey = "${suggestion.source}:${suggestion.url}",
-                shownAt = now,
-                refreshId = refreshId,
-            )
-        }
+        // Batch insert all seen entries in one transaction.
+        suggestionSeenLogRepository.insertSeenBatch(
+            suggestions.map { suggestion ->
+                SeenEntry(
+                    sectionKey = sectionKeyByReason[suggestion.reason] ?: suggestion.reason.lowercase().trim(),
+                    mangaKey = "${suggestion.source}:${suggestion.url}",
+                    shownAt = now,
+                    refreshId = refreshId,
+                )
+            },
+        )
         return Result.success()
     }
 

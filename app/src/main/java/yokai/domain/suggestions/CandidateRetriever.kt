@@ -270,7 +270,7 @@ class CandidateRetriever(
 
     private companion object {
         private const val MAX_ACTIVE_SOURCES = 10
-        private const val MAX_CONCURRENT_SOURCE_REQUESTS = 4
+        private const val MAX_CONCURRENT_SOURCE_REQUESTS = 8
         private val LATEST_SORT_KEYWORDS = setOf("latest", "recent", "update", "updated", "uploaded", "date", "new")
         private val POPULAR_SORT_KEYWORDS = setOf("popular", "views", "view", "follow", "follows", "rating", "score", "trend", "hot")
     }
