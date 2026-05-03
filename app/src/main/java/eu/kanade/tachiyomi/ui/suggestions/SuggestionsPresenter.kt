@@ -83,6 +83,20 @@ data class SuggestionsState(
     val scrollToTopTrigger: Long = 0L,
 )
 
+/**
+ * In-memory snapshot of the rendered state for a single sort order.
+ * Captured the moment the user switches away from a sort so switching back
+ * immediately shows the previous results without a network round-trip.
+ */
+private data class SortSnapshot(
+    val suggestions: Map<String, List<Manga>>,
+    val plannedSections: List<PlannedSection>,
+    val nextBatchStartIndex: Int,
+    val allSectionsLoaded: Boolean,
+    val hasReachedEnd: Boolean,
+    val endMessage: String?,
+)
+
 class SuggestionsPresenter(
     private val context: Context,
     private val suggestionsRepository: SuggestionsRepository = Injekt.get(),
@@ -118,6 +132,18 @@ class SuggestionsPresenter(
      * network request (v3 plan: "300 ms debounce sort changes").
      */
     private var sortDebounceJob: Job? = null
+    /**
+     * Per-sort snapshot cache. Populated the moment the user switches away from a sort
+     * so switching back immediately restores the previous results.
+     * Cleared on explicit refresh or non-sort rebuilds (filter/source/V2-mode changes).
+     */
+    private val sortSnapshotCache = mutableMapOf<SuggestionSortOrder, SortSnapshot>()
+    /**
+     * When non-null, the DB flow observer skips updates to avoid overwriting cached
+     * state while the user is viewing a snapshot-restored sort.
+     * Cleared by [refresh] and [rebuildFeed] (but NOT by the sort-change restore path).
+     */
+    @Volatile private var frozenForSort: SuggestionSortOrder? = null
     private val usedTags = linkedSetOf<String>()
     private val seenMangaUrls = linkedSetOf<String>()
     private var knownTags = emptyList<String>()
@@ -168,6 +194,10 @@ class SuggestionsPresenter(
 
         suggestionsRepository.getSuggestionsAsFlow()
             .onEach { suggestedList ->
+                // While showing a snapshot-restored sort, the DB may still hold results
+                // from the previous (in-flight) sort.  Skip the emission so the cached
+                // state is not overwritten until the user explicitly refreshes.
+                if (frozenForSort == _state.value.sortOrder) return@onEach
                 if (shouldKeepCurrentSuggestions(suggestedList)) return@onEach
                 warmSessionMemory(suggestedList)
                 val grouped = suggestedList.groupBy { it.reason }.mapValues { entry ->
@@ -232,6 +262,10 @@ class SuggestionsPresenter(
      *   there are no stored suggestions.
      */
     fun refresh(hardRefresh: Boolean = false) {
+        // User explicitly wants fresh data — discard all snapshots and unfreeze the
+        // DB flow observer so it can write new results to state as they arrive.
+        frozenForSort = null
+        sortSnapshotCache.clear()
         if (!isForegroundRefreshing.compareAndSet(false, true)) return
         feedGeneration.incrementAndGet()
         currentPageOffset = Random.nextInt(1, 8)   // randomize page 1–7 on each refresh
@@ -305,6 +339,9 @@ class SuggestionsPresenter(
     }
 
     fun loadNextPage() {
+        // While showing a snapshot, pagination is disabled — the cached content is
+        // complete for that sort and we don't want to mix it with live DB results.
+        if (frozenForSort != null) return
         if (preferences.suggestionsV2Enabled().get()) {
             loadNextSectionBatch()
             return
@@ -389,8 +426,56 @@ class SuggestionsPresenter(
         sortDebounceJob?.cancel()
         sortDebounceJob = presenterScope.launchIO {
             delay(300)
-            preferences.suggestionsSortOrder().set(sortOrder)
-            rebuildFeed(sortOrder = sortOrder)
+            // ── Snapshot current results before switching away ─────────────────
+            val currentState = _state.value
+            if (currentState.suggestions.isNotEmpty()) {
+                sortSnapshotCache[currentState.sortOrder] = SortSnapshot(
+                    suggestions        = currentState.suggestions,
+                    plannedSections    = currentState.plannedSections,
+                    nextBatchStartIndex = currentState.nextBatchStartIndex,
+                    allSectionsLoaded  = currentState.allSectionsLoaded,
+                    hasReachedEnd      = currentState.hasReachedEnd,
+                    endMessage         = currentState.endMessage,
+                )
+            }
+            // ── Restore from cache if we've loaded this sort before ────────────
+            val cached = sortSnapshotCache[sortOrder]
+            if (cached != null) {
+                // Cancel any in-flight requests from the previous rebuild so they
+                // don't write stale results to state or the DB.
+                feedGeneration.incrementAndGet()
+                isForegroundRefreshing.set(false)
+                isPageFetching.set(false)
+                isSectionBatchFetching.set(false)
+                // Freeze the DB flow observer so it doesn't overwrite cached content.
+                frozenForSort = sortOrder
+                preferences.suggestionsSortOrder().set(sortOrder)
+                saveGridScrollPosition(index = 0, scrollOffset = 0)
+                _state.update { it.copy(
+                    sortOrder          = sortOrder,
+                    suggestions        = cached.suggestions,
+                    selectedReason     = null,
+                    isLoading          = false,
+                    isFetching         = false,
+                    isFetchingBatch    = false,
+                    plannedSections    = cached.plannedSections,
+                    nextBatchStartIndex = cached.nextBatchStartIndex,
+                    allSectionsLoaded  = cached.allSectionsLoaded,
+                    hasReachedEnd      = cached.hasReachedEnd,
+                    endMessage         = cached.endMessage,
+                    emptyMessage       = null,
+                    sheetReason        = null,
+                    sheetResults       = emptyList(),
+                    sheetIsLoading     = false,
+                    sheetError         = null,
+                    sheetSuppressed    = false,
+                    scrollToTopTrigger = it.scrollToTopTrigger + 1L,
+                )}
+            } else {
+                // No cache for this sort — rebuild from network (existing path).
+                preferences.suggestionsSortOrder().set(sortOrder)
+                rebuildFeed(sortOrder = sortOrder)
+            }
         }
     }
 
@@ -510,6 +595,11 @@ class SuggestionsPresenter(
     }
 
     private fun rebuildFeed(sortOrder: SuggestionSortOrder) {
+        // A non-sort rebuild (filter/source/V2-toggle change) invalidates all snapshots
+        // because the result set will differ regardless of sort order.  Also unfreeze
+        // the DB flow observer so new results are written to state as they arrive.
+        frozenForSort = null
+        sortSnapshotCache.clear()
         if (preferences.suggestionsV2Enabled().get()) {
             feedGeneration.incrementAndGet()
             currentPageOffset = Random.nextInt(1, 8)
@@ -818,6 +908,9 @@ class SuggestionsPresenter(
     }
 
     private fun loadNextSectionBatch() {
+        // While showing a snapshot, do not load more — the cached state is complete
+        // for that sort and live DB results must not be mixed into it.
+        if (frozenForSort != null) return
         val generation = feedGeneration.get()
         val pageOffset = currentPageOffset
         val refreshId = currentV2RefreshId.takeIf { it > 0L }
