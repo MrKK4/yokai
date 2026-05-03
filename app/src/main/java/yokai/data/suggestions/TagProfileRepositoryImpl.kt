@@ -84,6 +84,25 @@ class TagProfileRepositoryImpl(
             .distinctBy { it.lowercase() }
     }
 
+    override suspend fun getExactTermForSource(canonicalTag: String, sourceId: Long): String? =
+        handler.awaitOneOrNull {
+            tag_aliasQueries.findRawTagsBySourceAndCanonical(canonicalTag, sourceId)
+        }
+
+    override suspend fun recordSourceVocabulary(rawTag: String, canonicalTag: String, sourceId: Long) {
+        val rawKey = rawTag.trim().lowercase()
+        if (rawKey.isBlank() || canonicalTag.isBlank()) return
+        handler.await {
+            tag_aliasQueries.insertOrIgnoreAlias(
+                rawTag = rawTag.trim(),
+                rawKey = rawKey,
+                canonicalTag = canonicalTag,
+                sourceId = sourceId,
+                sourceKey = sourceId,
+            )
+        }
+    }
+
     override suspend fun aliasOrProfileExists(key: String): Boolean {
         val aliasCount = handler.awaitOne { tag_aliasQueries.aliasExists(key) }
         if (aliasCount > 0) return true

@@ -36,3 +36,19 @@ FROM tag_alias;
 insertAlias:
 INSERT OR REPLACE INTO tag_alias(raw_tag, raw_key, canonical_tag, source_id, source_key)
 VALUES(:rawTag, :rawKey, :canonicalTag, :sourceId, :sourceKey);
+
+-- Returns the exact raw tag a specific source uses for a canonical tag.
+-- Used for text-search fallback so we send the source's own vocabulary.
+findRawTagsBySourceAndCanonical:
+SELECT raw_tag
+FROM tag_alias
+WHERE canonical_tag = :canonicalTag
+AND source_key = :sourceId
+ORDER BY raw_tag COLLATE NOCASE ASC
+LIMIT 1;
+
+-- Idempotent insert — never overwrites existing aliases (global or hand-crafted).
+-- Used by the self-learning vocabulary path inside CandidateRetriever.
+insertOrIgnoreAlias:
+INSERT OR IGNORE INTO tag_alias(raw_tag, raw_key, canonical_tag, source_id, source_key)
+VALUES(:rawTag, :rawKey, :canonicalTag, :sourceId, :sourceKey);

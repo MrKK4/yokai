@@ -135,9 +135,21 @@ class SuggestionRanker(
         }
 
         return withContext(Dispatchers.Default) {
+            val activeSourceCount = bestByTitle.values
+                .map { it.candidate.sourceId }
+                .distinct()
+                .size
+            // Adaptive cap: raise per-source limit when fewer sources are available so
+            // sections can still reach MIN_RESULTS_PER_SECTION (10) with a small source pool.
+            val effectivePerSourceCap = when (activeSourceCount) {
+                1    -> SuggestionsConfig.MAX_RESULTS_PER_SECTION // single source gets all slots
+                2    -> 5
+                3    -> 4
+                else -> SuggestionsConfig.MAX_PER_SOURCE_PER_SECTION // standard cap
+            }
             bestByTitle.values
                 .sortedByDescending { it.score }
-                .capScoredBySource(SuggestionsConfig.MAX_PER_SOURCE_PER_SECTION)
+                .capScoredBySource(effectivePerSourceCap)
                 .take(SuggestionsConfig.MAX_RESULTS_PER_SECTION)
                 .map { it.toSuggestedManga() }
         }

@@ -13,6 +13,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.random.Random
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -110,6 +112,12 @@ class SuggestionsPresenter(
     private val isSectionBatchFetching = AtomicBoolean(false)
     private val feedGeneration = AtomicLong(0L)
     private var isWorkerRefreshing = false
+    /**
+     * Debounce job for [setSortOrder]. Cancels any pending rebuild when the user
+     * changes sort mode again within 300 ms, so only the final selection fires a
+     * network request (v3 plan: "300 ms debounce sort changes").
+     */
+    private var sortDebounceJob: Job? = null
     private val usedTags = linkedSetOf<String>()
     private val seenMangaUrls = linkedSetOf<String>()
     private var knownTags = emptyList<String>()
@@ -373,9 +381,17 @@ class SuggestionsPresenter(
         // Guard against a stale state check during in-flight network requests:
         // compare against the committed var, not state.sortOrder, which may lag.
         if (committedSortOrder == sortOrder) return
+        // Commit immediately so any concurrent call within the debounce window
+        // sees the latest desired order and skips a redundant rebuild.
         committedSortOrder = sortOrder
-        preferences.suggestionsSortOrder().set(sortOrder)
-        rebuildFeed(sortOrder = sortOrder)
+        // Debounce: cancel the pending rebuild if the user taps again within 300 ms.
+        // Only the last selection within the window fires a network request.
+        sortDebounceJob?.cancel()
+        sortDebounceJob = presenterScope.launchIO {
+            delay(300)
+            preferences.suggestionsSortOrder().set(sortOrder)
+            rebuildFeed(sortOrder = sortOrder)
+        }
     }
 
     fun isSuggestionsV2Enabled(): Boolean =
@@ -940,7 +956,7 @@ class SuggestionsPresenter(
         sectionSeenKeys: Map<String, Set<String>>,
         now: Long,
     ): Int {
-        val suggestions = suggestionRanker.rankWithContext(
+        var suggestions = suggestionRanker.rankWithContext(
             retrievalResults = listOf(result),
             context = rankingContext,
             globalSeenKeys = seenMangaUrls.toSet(),
@@ -953,6 +969,39 @@ class SuggestionsPresenter(
             debugLog.add(LogType.SECTION_DROPPED, "Section '${result.section.sectionKey}' dropped - 0 results after filters")
             return 0
         }
+
+        // ── Seen-log widening (v3 plan §"Minimum Results Per Section") ──────────
+        // If the normal pass yielded fewer than the minimum, re-rank the same
+        // candidates with the per-section seen-log cleared so manga seen > 12 h
+        // ago in this section becomes eligible again. Never drop a section just
+        // because it's thin — accept whatever is available after the retry.
+        if (suggestions.size < SuggestionsConfig.MIN_RESULTS_PER_SECTION) {
+            debugLog.add(
+                LogType.SECTION_THIN,
+                "Section '${result.section.sectionKey}' returned only ${suggestions.size} results " +
+                    "after all sources (minimum is ${SuggestionsConfig.MIN_RESULTS_PER_SECTION}) — retrying with relaxed seen-log",
+            )
+            val relaxedSuggestions = suggestionRanker.rankWithContext(
+                retrievalResults = listOf(result),
+                context = rankingContext,
+                globalSeenKeys = seenMangaUrls.toSet(),
+                // Pass empty seen keys for this section so items seen > 12 h ago are allowed.
+                sectionSeenKeys = sectionSeenKeys - result.section.sectionKey,
+                sessionContext = sessionContext,
+            ).withSectionDisplayRanks(result.section)
+            if (relaxedSuggestions.size > suggestions.size) {
+                suggestions = relaxedSuggestions
+            }
+            // Log final thin count so it's visible even if relaxation helped.
+            if (suggestions.size < SuggestionsConfig.MIN_RESULTS_PER_SECTION) {
+                debugLog.add(
+                    LogType.SECTION_THIN,
+                    "Section '${result.section.sectionKey}' returned only ${suggestions.size} results " +
+                        "after all sources (minimum is ${SuggestionsConfig.MIN_RESULTS_PER_SECTION})",
+                )
+            }
+        }
+        // ─────────────────────────────────────────────────────────────────────────
 
         suggestionsRepository.insertSuggestions(suggestions)
         shownHistoryRepository.insertAll(suggestions.map { it.source to it.url })

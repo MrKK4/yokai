@@ -36,7 +36,26 @@ class CandidateRetriever(
     private val sourceManager: SourceManager,
     private val preferences: PreferencesHelper,
     private val debugLog: SuggestionsDebugLog,
+    private val tagCanonicalizer: TagCanonicalizer,
+    private val tagProfileRepository: TagProfileRepository,
 ) {
+    // ── FilterList cache ─────────────────────────────────────────────────────────
+    // Some extensions make a network call inside getFilterList() to build dynamic
+    // genre lists. Caching per sourceId avoids redundant requests across sections
+    // fetched in the same batch. Cache expires after FILTER_CACHE_TTL_MS (1 hour).
+    private val filterListCache = ConcurrentHashMap<Long, Pair<FilterList, Long>>()
+
+    private fun getCachedFilterList(source: CatalogueSource): FilterList {
+        val cached = filterListCache[source.id]
+        if (cached != null && System.currentTimeMillis() - cached.second < FILTER_CACHE_TTL_MS) {
+            return cached.first
+        }
+        val fresh = source.getFilterList()
+        filterListCache[source.id] = fresh to System.currentTimeMillis()
+        return fresh
+    }
+    // ─────────────────────────────────────────────────────────────────────────────
+
     suspend fun retrieve(
         sections: List<PlannedSection>,
         pageOffset: Int = 1,
@@ -117,17 +136,19 @@ class CandidateRetriever(
         val candidates = coroutineScope {
             when (section.type) {
                 SectionType.DISCOVERY ->
+                    // Discovery: one async per source — no tag search involved.
                     sources.mapIndexed { sourceIndex, source ->
                         async {
                             fetchDiscoverySource(section, source, sourceIndex, page, requestGate, countBySource)
                         }
                     }
                 else ->
-                    sources.flatMapIndexed { sourceIndex, source ->
-                        section.searchTerms.map { searchTerm ->
-                            async {
-                                fetchSearchSource(section, source, sourceIndex, page, searchTerm, requestGate, countBySource)
-                            }
+                    // Tag sections: ONE async per source (Phase C — de-spammed).
+                    // injectGenreFilter / fallback logic inside fetchSearchSource
+                    // resolves the single best query for this source; no flatMap over aliases.
+                    sources.mapIndexed { sourceIndex, source ->
+                        async {
+                            fetchSearchSource(section, source, sourceIndex, page, requestGate, countBySource)
                         }
                     }
             }.awaitAll().flatten()
@@ -156,25 +177,176 @@ class CandidateRetriever(
             }
         } ?: return emptyList()
 
-        return cappedCandidates(section, source.id, sourceIndex, null, pageResult.mangas, countBySource)
+        val candidates = cappedCandidates(section, source.id, sourceIndex, null, pageResult.mangas, countBySource)
+        learnVocabulary(candidates, source.id)
+        return candidates
     }
 
+    /**
+     * Fetch candidates for a tag section from a single source.
+     *
+     * Strategy (Phase B):
+     * 1. Try to inject the genre into the source's native filter checkboxes via
+     *    [injectGenreFilter]. If a match is found, call `getSearchManga(query="", filters)`.
+     *    This uses the source's exact internal genre ID — no vocabulary mismatch possible.
+     * 2. Fallback: look up the exact raw string this source has used before for the
+     *    canonical tag via [TagProfileRepository.getExactTermForSource].
+     * 3. Last resort: use the canonical tag itself as the query string.
+     *
+     * In all cases: exactly **one** network call per source per section (Phase C).
+     */
     private suspend fun fetchSearchSource(
         section: PlannedSection,
         source: CatalogueSource,
         sourceIndex: Int,
         page: Int,
-        searchTerm: String,
         requestGate: Semaphore,
         countBySource: ConcurrentHashMap<Long, AtomicInteger>,
     ): List<SuggestionCandidate> {
-        val pageResult = sourceResult {
-            requestGate.withPermit {
-                source.getSearchManga(page, searchTerm, source.searchFiltersFor(section.sortOrder))
+        val canonicalTag = section.canonicalTag
+
+        // ── Phase A: genre-filter injection ──────────────────────────────────────
+        val injectedFilters = canonicalTag?.let { tag ->
+            source.injectGenreFilter(tag, section.sortOrder)
+        }
+
+        val pageResult = if (injectedFilters != null) {
+            // SUCCESS: source has a native genre filter for this tag — empty query, filter checked.
+            debugLog.add(
+                LogType.SECTION_SELECTED,
+                "Source ${source.id} (${source.name}): genre filter injected for '$canonicalTag'",
+            )
+            sourceResult {
+                requestGate.withPermit {
+                    source.getSearchManga(page, query = "", injectedFilters)
+                }
+            }
+        } else {
+            // FALLBACK: no native genre checkbox — look up source-specific vocabulary.
+            val exactTerm = canonicalTag?.let {
+                tagProfileRepository.getExactTermForSource(it, source.id)
+            }
+            val query = exactTerm ?: canonicalTag ?: section.searchTerms.firstOrNull() ?: return emptyList()
+            if (exactTerm == null && canonicalTag != null) {
+                debugLog.add(
+                    LogType.SORT_FALLBACK,
+                    "Source ${source.id} (${source.name}): no genre filter for '$canonicalTag' — text search with '$query'",
+                )
+            }
+            sourceResult {
+                requestGate.withPermit {
+                    source.getSearchManga(page, query, source.searchFiltersFor(section.sortOrder))
+                }
             }
         } ?: return emptyList()
+        // ─────────────────────────────────────────────────────────────────────────
 
-        return cappedCandidates(section, source.id, sourceIndex, searchTerm, pageResult.mangas, countBySource)
+        val candidates = cappedCandidates(
+            section,
+            source.id,
+            sourceIndex,
+            searchTerm = injectedFilters?.let { "" } ?: (canonicalTag ?: section.searchTerms.firstOrNull()),
+            pageResult.mangas,
+            countBySource,
+        )
+
+        // ── Phase: vocabulary learning ────────────────────────────────────────────
+        // After a successful fetch, persist each (sourceId, rawGenreString → canonicalTag)
+        // so future fallback text-searches use the source's own vocabulary.
+        learnVocabulary(candidates, source.id)
+        // ─────────────────────────────────────────────────────────────────────────
+
+        return candidates
+    }
+
+    /**
+     * Record genre strings returned by [sourceId] into the alias table so future fallback
+     * text-searches can use the exact string this source understands.
+     * Fire-and-forget: any DB error is swallowed to never interrupt the fetch path.
+     */
+    private suspend fun learnVocabulary(candidates: List<SuggestionCandidate>, sourceId: Long) {
+        if (candidates.isEmpty()) return
+        try {
+            candidates.forEach { candidate ->
+                candidate.manga.getGenres()?.forEach { rawTag ->
+                    val canonical = tagCanonicalizer.canonicalize(rawTag, sourceId).canonicalKey
+                    if (canonical.isNotBlank()) {
+                        tagProfileRepository.recordSourceVocabulary(
+                            rawTag = rawTag,
+                            canonicalTag = canonical,
+                            sourceId = sourceId,
+                        )
+                    }
+                }
+            }
+        } catch (_: Exception) {
+            // Vocabulary learning is best-effort; never fail the fetch.
+        }
+    }
+
+    /**
+     * Phase A: attempt to programmatically "check the box" for [canonicalTag] in the
+     * source's native filter list. Returns the modified [FilterList] if a match was
+     * found, or `null` if this source doesn't expose a genre filter for this tag.
+     *
+     * Handles all three filter types used by Tachiyomi/Yokai extensions:
+     * - `Filter.CheckBox` — binary include/exclude checkbox
+     * - `Filter.TriState` — include / exclude / ignore (most common for mature extensions)
+     * - `Filter.Select`   — dropdown selector (less common; matches on option name)
+     */
+    private fun CatalogueSource.injectGenreFilter(
+        canonicalTag: String,
+        sortOrder: SuggestionSortOrder,
+    ): FilterList? {
+        val filters = getCachedFilterList(this)
+        var filterInjected = false
+
+        // Apply sort order first (existing behaviour).
+        val sortFilter = filters.filterIsInstance<Filter.Sort>().firstOrNull()
+        if (sortFilter != null) {
+            val sortIndex = sortFilter.values.indexOfFirst { it.matchesSortOrder(sortOrder) }
+            if (sortIndex >= 0) {
+                sortFilter.state = Filter.Sort.Selection(index = sortIndex, ascending = false)
+            }
+        }
+
+        // Scan for genre filters and check the matching box.
+        filters.forEach { filter ->
+            when (filter) {
+                is Filter.Group<*> -> {
+                    filter.state.forEach { item ->
+                        val matchedTag = when (item) {
+                            is Filter.CheckBox -> {
+                                if (tagCanonicalizer.normalizeToLookupKey(item.name) == canonicalTag) {
+                                    item.state = true
+                                    true
+                                } else false
+                            }
+                            is Filter.TriState -> {
+                                if (tagCanonicalizer.normalizeToLookupKey(item.name) == canonicalTag) {
+                                    item.state = Filter.TriState.STATE_INCLUDE
+                                    true
+                                } else false
+                            }
+                            else -> false
+                        }
+                        if (matchedTag) filterInjected = true
+                    }
+                }
+                is Filter.Select<*> -> {
+                    val matchIndex = filter.values.indexOfFirst { value ->
+                        tagCanonicalizer.normalizeToLookupKey(value.toString()) == canonicalTag
+                    }
+                    if (matchIndex >= 0) {
+                        filter.state = matchIndex
+                        filterInjected = true
+                    }
+                }
+                else -> { /* Sort and Header — already handled above */ }
+            }
+        }
+
+        return if (filterInjected) filters else null
     }
 
     private fun cappedCandidates(
@@ -239,8 +411,9 @@ class CandidateRetriever(
             .take(MAX_ACTIVE_SOURCES)
     }
 
+    /** Sort-filter helper reused in the text-search fallback path. */
     private fun CatalogueSource.searchFiltersFor(sortOrder: SuggestionSortOrder): FilterList {
-        val filters = getFilterList()
+        val filters = getCachedFilterList(this)
         val sortFilter = filters.filterIsInstance<Filter.Sort>().firstOrNull() ?: return filters
         val sortIndex = sortFilter.values.indexOfFirst { value -> value.matchesSortOrder(sortOrder) }
         if (sortIndex >= 0) {
@@ -271,6 +444,8 @@ class CandidateRetriever(
     private companion object {
         private const val MAX_ACTIVE_SOURCES = 10
         private const val MAX_CONCURRENT_SOURCE_REQUESTS = 8
+        /** FilterList cache TTL — 1 hour. Prevents repeated network calls for dynamic filter lists. */
+        private const val FILTER_CACHE_TTL_MS = 60 * 60 * 1000L
         private val LATEST_SORT_KEYWORDS = setOf("latest", "recent", "update", "updated", "uploaded", "date", "new")
         private val POPULAR_SORT_KEYWORDS = setOf("popular", "views", "view", "follow", "follows", "rating", "score", "trend", "hot")
     }

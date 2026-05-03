@@ -10,6 +10,18 @@ interface TagProfileRepository {
 
     suspend fun findAlias(rawKey: String, sourceId: Long? = null): TagAlias?
     suspend fun getSearchTerms(canonicalTag: String): List<String>
+    /**
+     * Returns the exact raw string that [sourceId] uses for [canonicalTag], or `null` if
+     * no source-specific alias has been recorded yet. Used by the text-search fallback
+     * so we send the source's own vocabulary instead of a generic canonical key.
+     */
+    suspend fun getExactTermForSource(canonicalTag: String, sourceId: Long): String?
+    /**
+     * Persists a (sourceId, rawTag → canonicalTag) alias learned from a live source
+     * result so future fetches from the same source can use the exact string the source
+     * understands. No-op if the mapping already exists.
+     */
+    suspend fun recordSourceVocabulary(rawTag: String, canonicalTag: String, sourceId: Long)
     suspend fun aliasOrProfileExists(key: String): Boolean
     suspend fun aliasCount(): Long
     suspend fun seedAliases(aliases: List<TagAlias>)

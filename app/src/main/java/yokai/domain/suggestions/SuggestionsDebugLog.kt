@@ -14,6 +14,7 @@ data class SuggestionsLogEntry(
 enum class LogType {
     SECTION_SELECTED,
     SECTION_DROPPED,
+    SECTION_THIN,
     ITEM_FILTERED,
     SORT_FALLBACK,
     PROFILE_UPDATE,

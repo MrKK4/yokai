@@ -24,6 +24,10 @@ object SuggestionsConfig {
 
     const val MAX_RESULTS_PER_SECTION = 12
     const val MAX_PER_SOURCE_PER_SECTION = 4
+    /** Minimum acceptable results per section. If a section yields fewer than this
+     *  after all sources + dedup + filters, it is logged as SECTION_THIN and the
+     *  seen-log filter is relaxed for a second ranking pass. */
+    const val MIN_RESULTS_PER_SECTION = 10
     // ──────────────────────────────────────────────────────────────────────────
 
     const val HARD_REFRESH_NOVELTY_QUOTA = 0.70

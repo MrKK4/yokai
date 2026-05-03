@@ -73,7 +73,7 @@ fun domainModule() = module {
     single { TagCanonicalizer(get()) }
     factory { InterestProfileBuilder(get(), get(), get(), get(), get(), get()) }
     factory { SectionPlanner(get(), get()) }
-    factory { CandidateRetriever(get(), get(), get()) }
+    factory { CandidateRetriever(get(), get(), get(), get(), get()) }
     factory { SuggestionRanker(get(), get(), get(), get()) }
 
     single<CategoryRepository> { CategoryRepositoryImpl(get()) }
