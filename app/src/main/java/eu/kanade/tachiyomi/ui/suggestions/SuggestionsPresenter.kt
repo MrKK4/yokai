@@ -300,6 +300,14 @@ class SuggestionsPresenter(
         rebuildFeed(sortOrder = sortOrder)
     }
 
+    fun isSuggestionsV2Enabled(): Boolean =
+        preferences.suggestionsV2Enabled().get()
+
+    fun toggleSuggestionsV2Enabled() {
+        preferences.suggestionsV2Enabled().set(!preferences.suggestionsV2Enabled().get())
+        rebuildFeed(sortOrder = _state.value.sortOrder)
+    }
+
     fun showTagFilterSheet() {
         blacklistChangedInSheet = false
         syncTagFilterState(preferences.suggestionsTagsBlacklist().get())

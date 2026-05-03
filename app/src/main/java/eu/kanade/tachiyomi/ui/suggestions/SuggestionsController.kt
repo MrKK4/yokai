@@ -186,6 +186,7 @@ class SuggestionsController(
 
     private fun showSortSheet() {
         val activity = activity ?: return
+        val v2Enabled = presenter.isSuggestionsV2Enabled()
         val selectedId = when (presenter.state.value.sortOrder) {
             SuggestionSortOrder.Popular -> SORT_POPULAR
             SuggestionSortOrder.Latest -> SORT_LATEST
@@ -213,6 +214,15 @@ class SuggestionsController(
                 drawable = R.drawable.ic_label_outline_24dp,
                 text = "Exclude tags",
             ),
+            MaterialMenuSheet.MenuSheetItem(
+                id = SORT_SUGGESTIONS_V2,
+                drawable = R.drawable.ic_outline_settings_24dp,
+                text = if (v2Enabled) {
+                    "Redesigned suggestions: On"
+                } else {
+                    "Redesigned suggestions: Off"
+                },
+            ),
         )
 
         MaterialMenuSheet(
@@ -224,6 +234,7 @@ class SuggestionsController(
             when (itemId) {
                 SORT_FILTER -> binding.root.post { showFilterSheet() }
                 SORT_TAG_FILTER -> binding.root.post { presenter.showTagFilterSheet() }
+                SORT_SUGGESTIONS_V2 -> presenter.toggleSuggestionsV2Enabled()
                 else -> presenter.setSortOrder(
                     when (itemId) {
                         SORT_LATEST -> SuggestionSortOrder.Latest
@@ -342,5 +353,6 @@ class SuggestionsController(
         const val SORT_LATEST = 2
         const val SORT_FILTER = 3
         const val SORT_TAG_FILTER = 4
+        const val SORT_SUGGESTIONS_V2 = 5
     }
 }
