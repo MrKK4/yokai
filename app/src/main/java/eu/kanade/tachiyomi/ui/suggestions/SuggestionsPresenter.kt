@@ -26,10 +26,24 @@ import yokai.domain.manga.interactor.UpdateManga
 import yokai.domain.manga.models.MangaUpdate
 import yokai.domain.suggestions.FeedAggregator
 import yokai.domain.suggestions.GetUserSuggestionQueriesUseCase
+import yokai.domain.suggestions.CandidateRetriever
+import yokai.domain.suggestions.InterestProfileBuilder
+import yokai.domain.suggestions.TagCanonicalizer
+import yokai.domain.suggestions.TagProfileRepository
+import yokai.domain.suggestions.TagState
+import yokai.domain.suggestions.PlannedSectionRepository
+import yokai.domain.suggestions.SectionPlanner
+import yokai.domain.suggestions.SessionContext
 import yokai.domain.suggestions.ShownMangaHistoryRepository
+import yokai.domain.suggestions.SuggestionRanker
+import yokai.domain.suggestions.SuggestionSeenLogRepository
 import yokai.domain.suggestions.SuggestedManga
 import yokai.domain.suggestions.SuggestionSortOrder
 import yokai.domain.suggestions.SuggestionsRepository
+import yokai.domain.suggestions.SuggestionsConfig
+import yokai.domain.suggestions.SuggestionsDebugLog
+import yokai.domain.suggestions.LogType
+import yokai.domain.source.browse.filter.SavedSearchRepository
 
 data class SuggestionsState(
     val suggestions: Map<String, List<Manga>> = emptyMap(),
@@ -58,6 +72,17 @@ class SuggestionsPresenter(
     private val getManga: GetManga = Injekt.get(),
     private val insertManga: InsertManga = Injekt.get(),
     private val updateManga: UpdateManga = Injekt.get(),
+    private val interestProfileBuilder: InterestProfileBuilder = Injekt.get(),
+    private val sectionPlanner: SectionPlanner = Injekt.get(),
+    private val plannedSectionRepository: PlannedSectionRepository = Injekt.get(),
+    private val candidateRetriever: CandidateRetriever = Injekt.get(),
+    private val suggestionRanker: SuggestionRanker = Injekt.get(),
+    private val suggestionSeenLogRepository: SuggestionSeenLogRepository = Injekt.get(),
+    private val savedSearchRepository: SavedSearchRepository = Injekt.get(),
+    private val sessionContext: SessionContext = Injekt.get(),
+    private val debugLog: SuggestionsDebugLog = Injekt.get(),
+    private val tagCanonicalizer: TagCanonicalizer = Injekt.get(),
+    private val tagProfileRepository: TagProfileRepository = Injekt.get(),
 ) : BaseCoroutinePresenter<SuggestionsController>() {
 
     private val _state = MutableStateFlow(
@@ -197,6 +222,10 @@ class SuggestionsPresenter(
     }
 
     fun loadNextPage() {
+        if (preferences.suggestionsV2Enabled().get()) {
+            _state.update { it.copy(hasReachedEnd = true, endMessage = null, isFetching = false) }
+            return
+        }
         loadNextPage(includeSourceSection = false)
     }
 
@@ -379,6 +408,34 @@ class SuggestionsPresenter(
     }
 
     private fun rebuildFeed(sortOrder: SuggestionSortOrder) {
+        if (preferences.suggestionsV2Enabled().get()) {
+            feedGeneration.incrementAndGet()
+            currentPageOffset = Random.nextInt(1, 8)
+            saveGridScrollPosition(index = 0, scrollOffset = 0)
+            isForegroundRefreshing.set(false)
+            isPageFetching.set(false)
+            _state.update { it.copy(
+                suggestions = emptyMap(),
+                selectedReason = null,
+                isLoading = false,
+                isFetching = false,
+                hasReachedEnd = false,
+                endMessage = null,
+                emptyMessage = null,
+                sortOrder = sortOrder,
+                sheetReason = null,
+                sheetResults = emptyList(),
+                sheetIsLoading = false,
+                sheetError = null,
+                sheetSuppressed = false,
+            )}
+            presenterScope.launchIO {
+                suggestionsRepository.deleteAll()
+                refresh()
+            }
+            return
+        }
+
         feedGeneration.incrementAndGet()
         currentPageOffset = Random.nextInt(1, 8)   // re-roll page offset on sort/filter rebuild
         saveGridScrollPosition(index = 0, scrollOffset = 0)
@@ -434,6 +491,10 @@ class SuggestionsPresenter(
     }
 
     private suspend fun buildFreshSuggestions(pageOffset: Int = 1): List<SuggestedManga> {
+        if (preferences.suggestionsV2Enabled().get()) {
+            return buildFreshSuggestionsV2(pageOffset)
+        }
+
         // Algorithm Issue 1: detect cold-start (no library) before fetching
         val librarySize = getManga.awaitAll().size
         val suggestionQueries = getSuggestionQueries.execute()
@@ -479,6 +540,88 @@ class SuggestionsPresenter(
             )
         }
         return suggestions
+    }
+
+    private suspend fun buildFreshSuggestionsV2(pageOffset: Int): List<SuggestedManga> {
+        val now = System.currentTimeMillis()
+        debugLog.add(LogType.REFRESH_MODE, "Hard refresh - rebuilding profile, resetting seen log")
+        suggestionSeenLogRepository.deleteOlderThan(now - SuggestionsConfig.SEEN_LOG_TTL_MS)
+
+        interestProfileBuilder.buildProfile(now)
+        syncLegacyTagStateForV2(now)
+        val profiles = tagProfileRepository.getAllProfiles()
+        val savedSearches = savedSearchRepository.findAll()
+            .mapNotNull { it.query?.trim()?.takeIf { query -> query.length in 2..64 } }
+
+        val plannedSections = sectionPlanner.plan(
+            profiles = profiles,
+            sortOrder = _state.value.sortOrder,
+            savedSearches = savedSearches,
+            now = now,
+        )
+        plannedSectionRepository.replaceAll(plannedSections)
+
+        val sectionSeenKeys = plannedSections.associate { section ->
+            section.sectionKey to suggestionSeenLogRepository.recentKeysForSection(
+                sectionKey = section.sectionKey,
+                cutoff = now - SuggestionsConfig.SEEN_LOG_TTL_MS,
+            )
+        }
+
+        val retrievalResults = candidateRetriever.retrieve(plannedSections, pageOffset)
+        val suggestions = suggestionRanker.rank(
+            retrievalResults = retrievalResults,
+            globalSeenKeys = seenMangaUrls.toSet(),
+            sectionSeenKeys = sectionSeenKeys,
+            sessionContext = sessionContext,
+        ).withDisplayRanks(startRank = 0L)
+
+        val totalRefreshCount = preferences.suggestionsTotalRefreshCount()
+        val refreshId = totalRefreshCount.get() + 1L
+        totalRefreshCount.set(refreshId.toInt())
+        preferences.suggestionsLastHardRefreshAt().set(now)
+        seenMangaUrls.addAll(suggestions.map { it.memoryKey() })
+        val sectionKeyByReason = plannedSections.associate { it.displayReason to it.sectionKey }
+        suggestions.forEach { suggestion ->
+            suggestionSeenLogRepository.insertSeen(
+                sectionKey = sectionKeyByReason[suggestion.reason] ?: suggestion.reason.normalizedQuery(),
+                mangaKey = suggestion.memoryKey(),
+                shownAt = now,
+                refreshId = refreshId,
+            )
+        }
+
+        _state.update { it.copy(
+            hasReachedEnd = true,
+            endMessage = null,
+        )}
+
+        if (suggestions.isEmpty()) {
+            throw RefreshBlocked(
+                if (getManga.awaitAll().isEmpty()) {
+                    "Add some manga to your library to get personalized suggestions."
+                } else {
+                    "No latest updates or personalized matches came back from your active sources."
+                },
+            )
+        }
+
+        return suggestions
+    }
+
+    private suspend fun syncLegacyTagStateForV2(now: Long) {
+        preferences.suggestionsPinnedTags().get().forEach { rawTag ->
+            val canonicalTag = tagCanonicalizer.canonicalize(rawTag).canonicalKey
+            if (canonicalTag.isNotBlank()) {
+                tagProfileRepository.setTagState(canonicalTag, TagState.PINNED, now)
+            }
+        }
+        preferences.suggestionsTagsBlacklist().get().forEach { rawTag ->
+            val canonicalTag = tagCanonicalizer.canonicalize(rawTag).canonicalKey
+            if (canonicalTag.isNotBlank()) {
+                tagProfileRepository.setTagState(canonicalTag, TagState.BLACKLISTED, now)
+            }
+        }
     }
 
     private fun updateLoadingState() {

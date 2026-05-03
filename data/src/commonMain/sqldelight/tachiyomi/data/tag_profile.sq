@@ -1,0 +1,91 @@
+CREATE TABLE tag_profile(
+    canonical_tag TEXT NOT NULL PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    long_term_count REAL NOT NULL DEFAULT 0.0,
+    recent_count REAL NOT NULL DEFAULT 0.0,
+    velocity REAL NOT NULL DEFAULT 0.0,
+    current_week_count REAL NOT NULL DEFAULT 0.0,
+    previous_week_count REAL NOT NULL DEFAULT 0.0,
+    last_seen_at INTEGER NOT NULL DEFAULT 0,
+    state TEXT NOT NULL DEFAULT 'MANAGED',
+    pinned_at INTEGER,
+    cooldown_until INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX tag_profile_state_index ON tag_profile(state);
+CREATE INDEX tag_profile_affinity_index ON tag_profile(recent_count, long_term_count);
+CREATE INDEX tag_profile_cooldown_until_index ON tag_profile(cooldown_until);
+
+findAll:
+SELECT *
+FROM tag_profile
+ORDER BY recent_count DESC, long_term_count DESC, canonical_tag ASC;
+
+findNonBlacklisted:
+SELECT *
+FROM tag_profile
+WHERE state != 'BLACKLISTED'
+ORDER BY recent_count DESC, long_term_count DESC, canonical_tag ASC;
+
+findByCanonicalTag:
+SELECT *
+FROM tag_profile
+WHERE canonical_tag = :canonicalTag;
+
+profileExists:
+SELECT COUNT(*)
+FROM tag_profile
+WHERE canonical_tag = :canonicalTag;
+
+upsertProfile:
+INSERT INTO tag_profile(
+    canonical_tag,
+    display_name,
+    long_term_count,
+    recent_count,
+    velocity,
+    current_week_count,
+    previous_week_count,
+    last_seen_at,
+    updated_at
+)
+VALUES (
+    :canonicalTag,
+    :displayName,
+    :longTermCount,
+    :recentCount,
+    :velocity,
+    :currentWeekCount,
+    :previousWeekCount,
+    :lastSeenAt,
+    :updatedAt
+)
+ON CONFLICT(canonical_tag)
+DO UPDATE SET
+    display_name = excluded.display_name,
+    long_term_count = excluded.long_term_count,
+    recent_count = excluded.recent_count,
+    velocity = excluded.velocity,
+    current_week_count = excluded.current_week_count,
+    previous_week_count = excluded.previous_week_count,
+    last_seen_at = excluded.last_seen_at,
+    updated_at = excluded.updated_at;
+
+updateState:
+UPDATE tag_profile
+SET
+    state = :state,
+    pinned_at = :pinnedAt,
+    updated_at = :updatedAt
+WHERE canonical_tag = :canonicalTag;
+
+updateCooldown:
+UPDATE tag_profile
+SET
+    cooldown_until = :cooldownUntil,
+    updated_at = :updatedAt
+WHERE canonical_tag = :canonicalTag;
+
+deleteAllProfiles:
+DELETE FROM tag_profile;

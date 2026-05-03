@@ -51,6 +51,13 @@ import yokai.domain.source.browse.filter.interactor.InsertSavedSearch
 import yokai.domain.suggestions.FeedAggregator
 import yokai.domain.suggestions.GetUserAffinityTagsUseCase
 import yokai.domain.suggestions.GetUserSuggestionQueriesUseCase
+import yokai.domain.suggestions.CandidateRetriever
+import yokai.domain.suggestions.InterestProfileBuilder
+import yokai.domain.suggestions.SectionPlanner
+import yokai.domain.suggestions.SessionContext
+import yokai.domain.suggestions.SuggestionRanker
+import yokai.domain.suggestions.SuggestionsDebugLog
+import yokai.domain.suggestions.TagCanonicalizer
 import yokai.domain.track.TrackRepository
 import yokai.domain.track.interactor.DeleteTrack
 import yokai.domain.track.interactor.GetTrack
@@ -61,6 +68,13 @@ fun domainModule() = module {
     factory { GetUserAffinityTagsUseCase(get(), get(), get(), get()) }
     factory { GetUserSuggestionQueriesUseCase(get(), get()) }
     factory { FeedAggregator(get(), get(), get()) }
+    single { SuggestionsDebugLog() }
+    single { SessionContext() }
+    single { TagCanonicalizer(get()) }
+    factory { InterestProfileBuilder(get(), get(), get(), get(), get(), get()) }
+    factory { SectionPlanner(get(), get()) }
+    factory { CandidateRetriever(get(), get(), get()) }
+    factory { SuggestionRanker(get(), get(), get(), get()) }
 
     single<CategoryRepository> { CategoryRepositoryImpl(get()) }
     factory { DeleteCategories(get()) }

@@ -1,0 +1,38 @@
+CREATE TABLE tag_alias(
+    raw_tag TEXT NOT NULL,
+    raw_key TEXT NOT NULL,
+    canonical_tag TEXT NOT NULL,
+    source_id INTEGER,
+    source_key INTEGER NOT NULL DEFAULT -1,
+    PRIMARY KEY(raw_key, source_key)
+);
+
+CREATE INDEX tag_alias_canonical_tag_index ON tag_alias(canonical_tag);
+
+findByRawKeyAndSource:
+SELECT *
+FROM tag_alias
+WHERE raw_key = :rawKey
+AND source_key IN (:sourceKey, -1)
+ORDER BY source_key DESC
+LIMIT 1;
+
+findRawTagsForCanonical:
+SELECT raw_tag
+FROM tag_alias
+WHERE canonical_tag = :canonicalTag
+ORDER BY source_key DESC, raw_tag COLLATE NOCASE ASC;
+
+aliasExists:
+SELECT COUNT(*)
+FROM tag_alias
+WHERE raw_key = :rawKey
+OR canonical_tag = :rawKey;
+
+countAliases:
+SELECT COUNT(*)
+FROM tag_alias;
+
+insertAlias:
+INSERT OR REPLACE INTO tag_alias(raw_tag, raw_key, canonical_tag, source_id, source_key)
+VALUES(:rawTag, :rawKey, :canonicalTag, :sourceId, :sourceKey);

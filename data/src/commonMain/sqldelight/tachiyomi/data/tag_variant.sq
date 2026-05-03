@@ -1,0 +1,24 @@
+CREATE TABLE tag_variant(
+    canonical_tag TEXT NOT NULL,
+    raw_tag TEXT NOT NULL,
+    seen_count INTEGER NOT NULL DEFAULT 0,
+    last_seen_at INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(canonical_tag, raw_tag)
+);
+
+CREATE INDEX tag_variant_best_display_index ON tag_variant(canonical_tag, seen_count, last_seen_at);
+
+incrementVariant:
+INSERT INTO tag_variant(canonical_tag, raw_tag, seen_count, last_seen_at)
+VALUES(:canonicalTag, :rawTag, 1, :lastSeenAt)
+ON CONFLICT(canonical_tag, raw_tag)
+DO UPDATE SET
+    seen_count = seen_count + 1,
+    last_seen_at = excluded.last_seen_at;
+
+findBestDisplayName:
+SELECT raw_tag
+FROM tag_variant
+WHERE canonical_tag = :canonicalTag
+ORDER BY seen_count DESC, last_seen_at DESC, raw_tag COLLATE NOCASE ASC
+LIMIT 1;

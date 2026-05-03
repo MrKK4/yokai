@@ -1,0 +1,65 @@
+CREATE TABLE tag_profile(
+    canonical_tag TEXT NOT NULL PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    long_term_count REAL NOT NULL DEFAULT 0.0,
+    recent_count REAL NOT NULL DEFAULT 0.0,
+    velocity REAL NOT NULL DEFAULT 0.0,
+    current_week_count REAL NOT NULL DEFAULT 0.0,
+    previous_week_count REAL NOT NULL DEFAULT 0.0,
+    last_seen_at INTEGER NOT NULL DEFAULT 0,
+    state TEXT NOT NULL DEFAULT 'MANAGED',
+    pinned_at INTEGER,
+    cooldown_until INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX tag_profile_state_index ON tag_profile(state);
+CREATE INDEX tag_profile_affinity_index ON tag_profile(recent_count, long_term_count);
+CREATE INDEX tag_profile_cooldown_until_index ON tag_profile(cooldown_until);
+
+CREATE TABLE tag_alias(
+    raw_tag TEXT NOT NULL,
+    raw_key TEXT NOT NULL,
+    canonical_tag TEXT NOT NULL,
+    source_id INTEGER,
+    source_key INTEGER NOT NULL DEFAULT -1,
+    PRIMARY KEY(raw_key, source_key)
+);
+
+CREATE INDEX tag_alias_canonical_tag_index ON tag_alias(canonical_tag);
+
+CREATE TABLE tag_variant(
+    canonical_tag TEXT NOT NULL,
+    raw_tag TEXT NOT NULL,
+    seen_count INTEGER NOT NULL DEFAULT 0,
+    last_seen_at INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(canonical_tag, raw_tag)
+);
+
+CREATE INDEX tag_variant_best_display_index ON tag_variant(canonical_tag, seen_count, last_seen_at);
+
+CREATE TABLE suggestion_seen_log(
+    section_key TEXT NOT NULL,
+    manga_key TEXT NOT NULL,
+    shown_at INTEGER NOT NULL DEFAULT 0,
+    refresh_id INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(section_key, manga_key)
+);
+
+CREATE INDEX suggestion_seen_log_shown_at_index ON suggestion_seen_log(shown_at);
+CREATE INDEX suggestion_seen_log_refresh_id_index ON suggestion_seen_log(refresh_id);
+
+CREATE TABLE suggestion_planned_section(
+    section_key TEXT NOT NULL PRIMARY KEY,
+    section_rank INTEGER NOT NULL,
+    section_type TEXT NOT NULL,
+    canonical_tag TEXT,
+    display_reason TEXT NOT NULL,
+    search_terms TEXT NOT NULL,
+    sort_order TEXT NOT NULL,
+    sort_fallback INTEGER NOT NULL DEFAULT 0,
+    planned_at INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX suggestion_planned_section_rank_index ON suggestion_planned_section(section_rank);
+CREATE INDEX suggestion_planned_section_planned_at_index ON suggestion_planned_section(planned_at);

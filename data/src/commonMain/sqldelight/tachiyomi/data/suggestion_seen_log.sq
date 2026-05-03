@@ -1,0 +1,39 @@
+CREATE TABLE suggestion_seen_log(
+    section_key TEXT NOT NULL,
+    manga_key TEXT NOT NULL,
+    shown_at INTEGER NOT NULL DEFAULT 0,
+    refresh_id INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(section_key, manga_key)
+);
+
+CREATE INDEX suggestion_seen_log_shown_at_index ON suggestion_seen_log(shown_at);
+CREATE INDEX suggestion_seen_log_refresh_id_index ON suggestion_seen_log(refresh_id);
+
+insertSeen:
+INSERT OR REPLACE INTO suggestion_seen_log(section_key, manga_key, shown_at, refresh_id)
+VALUES(:sectionKey, :mangaKey, :shownAt, :refreshId);
+
+deleteOlderThan:
+DELETE FROM suggestion_seen_log
+WHERE shown_at < :cutoff;
+
+findRecentKeysForSection:
+SELECT manga_key
+FROM suggestion_seen_log
+WHERE section_key = :sectionKey
+AND shown_at >= :cutoff;
+
+findKeysSinceRefresh:
+SELECT manga_key
+FROM suggestion_seen_log
+WHERE refresh_id >= :minimumRefreshId;
+
+findShownAt:
+SELECT shown_at
+FROM suggestion_seen_log
+WHERE section_key = :sectionKey
+AND manga_key = :mangaKey;
+
+count:
+SELECT COUNT(*)
+FROM suggestion_seen_log;

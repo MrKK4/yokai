@@ -36,12 +36,18 @@ import uy.kohesive.injekt.api.get
 import yokai.data.AndroidDatabaseHandler
 import yokai.data.Database
 import yokai.data.DatabaseHandler
+import yokai.data.suggestions.PlannedSectionRepositoryImpl
 import yokai.data.suggestions.ShownMangaHistoryRepositoryImpl
+import yokai.data.suggestions.SuggestionSeenLogRepositoryImpl
 import yokai.data.suggestions.SuggestionsRepositoryImpl
+import yokai.data.suggestions.TagProfileRepositoryImpl
 import yokai.domain.SplashState
 import yokai.domain.storage.StorageManager
+import yokai.domain.suggestions.PlannedSectionRepository
 import yokai.domain.suggestions.ShownMangaHistoryRepository
+import yokai.domain.suggestions.SuggestionSeenLogRepository
 import yokai.domain.suggestions.SuggestionsRepository
+import yokai.domain.suggestions.TagProfileRepository
 
 fun appModule(app: Application) = module {
     single { app }
@@ -49,6 +55,9 @@ fun appModule(app: Application) = module {
 
     single<SuggestionsRepository> { SuggestionsRepositoryImpl(get()) }
     single<ShownMangaHistoryRepository> { ShownMangaHistoryRepositoryImpl(get()) }
+    single<TagProfileRepository> { TagProfileRepositoryImpl(get()) }
+    single<SuggestionSeenLogRepository> { SuggestionSeenLogRepositoryImpl(get()) }
+    single<PlannedSectionRepository> { PlannedSectionRepositoryImpl(get()) }
 
     single<SqlDriver> {
         AndroidSqliteDriver(

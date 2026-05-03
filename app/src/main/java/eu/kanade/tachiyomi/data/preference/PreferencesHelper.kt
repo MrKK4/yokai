@@ -207,7 +207,21 @@ class PreferencesHelper(val context: Context, val preferenceStore: PreferenceSto
 
     fun suggestionsTagsBlacklist() = preferenceStore.getStringSet("suggestions_tags_blacklist", emptySet())
 
+    fun suggestionsPinnedTags() = preferenceStore.getStringSet("suggestions_pinned_tags", emptySet())
+
     fun suggestionsSortOrder() = preferenceStore.getEnum("suggestions_sort_order", SuggestionSortOrder.Popular)
+
+    fun suggestionsLastHardRefreshAt() = preferenceStore.getLong("suggestions_last_hard_refresh_at", 0L)
+
+    fun suggestionsV2Enabled() = preferenceStore.getBoolean("suggestions_v2_enabled", false)
+
+    fun suggestionsTotalRefreshCount() = preferenceStore.getInt("suggestions_total_refresh_count", 0)
+
+    fun suggestionsEmptySectionCount() = preferenceStore.getInt("suggestions_empty_section_count", 0)
+
+    fun suggestionsSourceCapHitCount() = preferenceStore.getInt("suggestions_source_cap_hit_count", 0)
+
+    fun suggestionsSortFallbackCount() = preferenceStore.getInt("suggestions_sort_fallback_count", 0)
 
     fun usedSuggestionTags() = preferenceStore.getStringSet("used_suggestion_tags", emptySet())
 

@@ -1,0 +1,48 @@
+import kotlin.Boolean;
+
+CREATE TABLE suggestion_planned_section(
+    section_key TEXT NOT NULL PRIMARY KEY,
+    section_rank INTEGER NOT NULL,
+    section_type TEXT NOT NULL,
+    canonical_tag TEXT,
+    display_reason TEXT NOT NULL,
+    search_terms TEXT NOT NULL,
+    sort_order TEXT NOT NULL,
+    sort_fallback INTEGER AS Boolean NOT NULL DEFAULT 0,
+    planned_at INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX suggestion_planned_section_rank_index ON suggestion_planned_section(section_rank);
+CREATE INDEX suggestion_planned_section_planned_at_index ON suggestion_planned_section(planned_at);
+
+findAll:
+SELECT *
+FROM suggestion_planned_section
+ORDER BY section_rank ASC;
+
+replaceSection:
+INSERT OR REPLACE INTO suggestion_planned_section(
+    section_key,
+    section_rank,
+    section_type,
+    canonical_tag,
+    display_reason,
+    search_terms,
+    sort_order,
+    sort_fallback,
+    planned_at
+)
+VALUES(
+    :sectionKey,
+    :sectionRank,
+    :sectionType,
+    :canonicalTag,
+    :displayReason,
+    :searchTerms,
+    :sortOrder,
+    :sortFallback,
+    :plannedAt
+);
+
+deleteAll:
+DELETE FROM suggestion_planned_section;
