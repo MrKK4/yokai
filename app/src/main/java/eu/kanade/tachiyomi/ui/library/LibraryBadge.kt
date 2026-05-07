@@ -82,21 +82,7 @@ class LibraryBadge @JvmOverloads constructor(context: Context, attrs: AttributeS
         with(binding.langImage) {
             isVisible = !lang.isNullOrBlank()
             if (!lang.isNullOrBlank()) {
-                val flagId = resources.getIdentifier(
-                    "ic_flag_${lang.replace("-", "_")}",
-                    "drawable",
-                    context.packageName,
-                ).takeIf { it != 0 } ?: (
-                    if (lang.contains("-")) {
-                        resources.getIdentifier(
-                            "ic_flag_${lang.split("-").first()}",
-                            "drawable",
-                            context.packageName,
-                        ).takeIf { it != 0 }
-                    } else {
-                        null
-                    }
-                    )
+                val flagId = eu.kanade.tachiyomi.util.system.LocaleHelper.getFlagResId(context, lang!!)
                 if (flagId != null) {
                     setImageResource(flagId)
                 } else {
