@@ -1,0 +1,3 @@
+## 2024-05-18 - Missing key in UnifiedSearchScreen lazy lists
+**Learning:** Found multiple usages of `items` in Jetpack Compose's `LazyColumn`/`LazyRow` in `UnifiedSearchScreen` that do not provide `key` parameters. This causes unnecessary recompositions when the list contents change or the list is scrolled, significantly degrading performance, especially in search results where items might frequently change or stream in.
+**Action:** Always provide stable `key`s for `items` in Jetpack Compose's lazy lists whenever possible, preferably derived from unique identifiers like database IDs or URLs, to help Compose track items and minimize recompositions.

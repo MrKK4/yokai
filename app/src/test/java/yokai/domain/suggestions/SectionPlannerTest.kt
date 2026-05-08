@@ -87,9 +87,9 @@ class SectionPlannerTest {
             )
         }
 
-        assertEquals(listOf("tag:0", "tag:1", "tag:2", "tag:3", "tag:4"), SectionBatcher.nextBatch(planned, 0).map { it.sectionKey })
-        assertEquals(listOf("tag:10", "tag:11"), SectionBatcher.nextBatch(planned, 10).map { it.sectionKey })
-        assertTrue(SectionBatcher.nextBatch(planned, 12).isEmpty())
+        assertEquals(listOf("tag:0", "tag:1", "tag:2", "tag:3", "tag:4"), SectionBatcher.nextBatch(planned, 0, batchSize = 5).map { it.sectionKey })
+        assertEquals(listOf("tag:10", "tag:11"), SectionBatcher.nextBatch(planned, 10, batchSize = 5).map { it.sectionKey })
+        assertTrue(SectionBatcher.nextBatch(planned, 12, batchSize = 5).isEmpty())
     }
 
     @Test
@@ -100,6 +100,7 @@ class SectionPlannerTest {
                 loadedSectionCount = 5,
                 isFetchingBatch = false,
                 allSectionsLoaded = false,
+                threshold = 2,
             ),
         )
         assertTrue(
@@ -108,6 +109,7 @@ class SectionPlannerTest {
                 loadedSectionCount = 5,
                 isFetchingBatch = false,
                 allSectionsLoaded = false,
+                threshold = 2,
             ),
         )
         assertFalse(
@@ -116,6 +118,7 @@ class SectionPlannerTest {
                 loadedSectionCount = 5,
                 isFetchingBatch = true,
                 allSectionsLoaded = false,
+                threshold = 2,
             ),
         )
     }
@@ -203,4 +206,8 @@ internal class FakeTagProfileRepository : TagProfileRepository {
             .maxWithOrNull(compareBy<Map.Entry<Pair<String, String>, Int>> { it.value }.thenBy { it.key.second })
             ?.key
             ?.second
+
+    override suspend fun getExactTermForSource(canonicalTag: String, sourceId: Long): String? = null
+
+    override suspend fun recordSourceVocabulary(rawTag: String, canonicalTag: String, sourceId: Long) {}
 }

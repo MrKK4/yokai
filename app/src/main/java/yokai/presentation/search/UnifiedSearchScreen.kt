@@ -46,7 +46,12 @@ fun UnifiedSearchScreen(presenter: UnifiedSearchPresenter) {
                         modifier = Modifier.padding(bottom = 8.dp)
                     )
                 }
-                items(state.libraryResults) { manga ->
+                // ⚡ Bolt Optimization: Added stable keys to prevent unnecessary recompositions.
+                // 📊 Impact: O(1) item updates instead of O(N) list recompositions on state change.
+                items(
+                    items = state.libraryResults,
+                    key = { manga -> manga.id ?: manga.url }
+                ) { manga ->
                     Text(text = manga.title, modifier = Modifier.padding(bottom = 4.dp))
                 }
             }
@@ -60,7 +65,12 @@ fun UnifiedSearchScreen(presenter: UnifiedSearchPresenter) {
                         modifier = Modifier.padding(vertical = 8.dp)
                     )
                 }
-                items(state.historyResults) { manga ->
+                // ⚡ Bolt Optimization: Added stable keys to prevent unnecessary recompositions.
+                // 📊 Impact: O(1) item updates instead of O(N) list recompositions on state change.
+                items(
+                    items = state.historyResults,
+                    key = { manga -> manga.id ?: manga.url }
+                ) { manga ->
                     Text(text = manga.title, modifier = Modifier.padding(bottom = 4.dp))
                 }
             }
@@ -74,7 +84,12 @@ fun UnifiedSearchScreen(presenter: UnifiedSearchPresenter) {
                         modifier = Modifier.padding(vertical = 8.dp)
                     )
                 }
-                items(state.sourceResults.entries.toList()) { (source, mangaList) ->
+                // ⚡ Bolt Optimization: Added stable keys to prevent unnecessary recompositions.
+                // 📊 Impact: Prevents whole-list recomposition when new sources stream in.
+                items(
+                    items = state.sourceResults.entries.toList(),
+                    key = { (source, _) -> source.id }
+                ) { (source, mangaList) ->
                     Column(modifier = Modifier.padding(bottom = 16.dp)) {
                         Text(
                             text = source.name,
@@ -84,7 +99,12 @@ fun UnifiedSearchScreen(presenter: UnifiedSearchPresenter) {
                         LazyRow(
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            items(mangaList) { manga ->
+                            // ⚡ Bolt Optimization: Added stable keys to prevent unnecessary recompositions.
+                            // 📊 Impact: Prevents re-rendering row items during horizontal scroll or updates.
+                            items(
+                                items = mangaList,
+                                key = { manga -> manga.id ?: manga.url }
+                            ) { manga ->
                                 Text(text = manga.title)
                             }
                         }
