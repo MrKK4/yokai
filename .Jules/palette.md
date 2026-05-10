@@ -1,0 +1,4 @@
+## 2026-05-10 - Accessible IconButtons in Jetpack Compose\n**Learning:** Null content descriptions on  elements within s make them invisible/unfriendly to screen readers. Jetpack Compose requires explicit  via string resources.\n**Action:** Always provide localized string resources (using  and ) for  in interactive, icon-only components.
+## 2024-05-18 - Accessible IconButtons in Jetpack Compose
+**Learning:** Null content descriptions on `Icon` elements within `IconButton`s make them invisible/unfriendly to screen readers. Jetpack Compose requires explicit `contentDescription` via string resources.
+**Action:** Always provide localized string resources (using `dev.icerock.moko.resources.compose.stringResource` and `yokai.i18n.MR`) for `contentDescription` in interactive, icon-only components.
