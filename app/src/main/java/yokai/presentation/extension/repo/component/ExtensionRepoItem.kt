@@ -34,6 +34,8 @@ import eu.kanade.tachiyomi.util.compose.textHint
 import yokai.domain.extension.repo.model.ExtensionRepo
 import yokai.presentation.component.Gap
 import yokai.presentation.theme.Size
+import dev.icerock.moko.resources.compose.stringResource
+import yokai.i18n.MR
 
 // TODO: Redesign
 // - Edit
@@ -77,7 +79,7 @@ fun ExtensionRepoItem(
         IconButton(onClick = { onDeleteClick(extensionRepo.baseUrl) }) {
             Icon(
                 imageVector = Icons.Filled.Delete,
-                contentDescription = null,
+                contentDescription = stringResource(MR.strings.delete),
                 tint = MaterialTheme.colorScheme.onBackground,
             )
         }
@@ -115,7 +117,7 @@ fun ExtensionRepoInput(
         Icon(
             modifier = Modifier.padding(horizontal = 8.dp),
             imageVector = Icons.Filled.Add,
-            contentDescription = null,
+            contentDescription = stringResource(MR.strings.action_add_repo),
             tint = MaterialTheme.colorScheme.onBackground,
         )
         TextField(
@@ -141,7 +143,7 @@ fun ExtensionRepoInput(
             if (!isLoading)
                 Icon(
                     imageVector = Icons.Filled.Check,
-                    contentDescription = null,
+                    contentDescription = stringResource(MR.strings.action_add_repo),
                     tint = MaterialTheme.colorScheme.secondary,
                 )
             else
