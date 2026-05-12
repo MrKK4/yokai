@@ -1,0 +1,3 @@
+## 2024-05-24 - [Kotlin Collection Laziness]
+**Learning:** In Kotlin, chained operations (`.map`, `.filter`) on standard collections evaluate eagerly, allocating intermediate lists. For large data sets like full library mangas, this can cause significant memory pressure and slowness, especially when you only need a subset of results (e.g., using `.take(10)`).
+**Action:** Always use `.asSequence()` before chaining collection operations on large datasets when only a small subset of the result is needed or when the operations are heavy. This enforces lazy evaluation, avoiding unnecessary allocations and allowing short-circuit execution.
