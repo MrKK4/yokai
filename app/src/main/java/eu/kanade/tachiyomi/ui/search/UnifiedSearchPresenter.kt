@@ -50,16 +50,16 @@ class UnifiedSearchPresenter(
                 // 1. Library Results
                 val libraryJob = async {
                     val allLibraryManga = mangaRepository.getLibraryManga()
-                    allLibraryManga.map { it.manga }.filter { 
+                    allLibraryManga.asSequence().map { it.manga }.filter {
                         it.title.contains(searchQuery, ignoreCase = true) 
-                    }.take(10) // Limit to top 10
+                    }.take(10).toList() // Limit to top 10
                 }
 
                 // 2. History Results
                 val historyJob = async {
-                    historyRepository.getRecentsUngrouped(false, searchQuery).map {
+                    historyRepository.getRecentsUngrouped(false, searchQuery).asSequence().map {
                         it.manga
-                    }.take(10)
+                    }.take(10).toList()
                 }
 
                 // 3. Remote Sources (Pinned only for performance/spam reduction)
