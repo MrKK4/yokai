@@ -22,7 +22,9 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.window.DialogProperties
+import dev.icerock.moko.resources.compose.stringResource as mokoStringResource
 import kotlinx.coroutines.launch
+import yokai.i18n.MR
 import android.R as AR
 
 
@@ -61,7 +63,10 @@ fun EditTextPreferenceWidget(
                             Icon(imageVector = Icons.Filled.Error, contentDescription = null)
                         } else {
                             IconButton(onClick = { textFieldValue = TextFieldValue("") }) {
-                                Icon(imageVector = Icons.Filled.Cancel, contentDescription = null)
+                                Icon(
+                                    imageVector = Icons.Filled.Cancel,
+                                    contentDescription = mokoStringResource(MR.strings.clear),
+                                )
                             }
                         }
                     },
