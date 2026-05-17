@@ -2,6 +2,7 @@ package eu.kanade.tachiyomi.ui.download
 
 import android.annotation.SuppressLint
 import android.view.View
+import androidx.core.view.isVisible
 import androidx.recyclerview.widget.ItemTouchHelper
 import eu.davidea.flexibleadapter.FlexibleAdapter
 import eu.davidea.viewholders.ExpandableViewHolder
@@ -14,7 +15,13 @@ class DownloadHeaderHolder(view: View, adapter: FlexibleAdapter<*>) : Expandable
     @SuppressLint("SetTextI18n")
     fun bind(item: DownloadHeaderItem) {
         setDragHandleView(binding.reorder)
-        binding.title.text = "${item.name} (${item.size})"
+        binding.title.text = item.name
+        binding.subtitle.text = if (item.subtitle.isBlank()) {
+            "${item.size} chapters"
+        } else {
+            "${item.subtitle} • ${item.size} chapters"
+        }
+        binding.subtitle.isVisible = true
     }
 
     override fun onActionStateChanged(position: Int, actionState: Int) {

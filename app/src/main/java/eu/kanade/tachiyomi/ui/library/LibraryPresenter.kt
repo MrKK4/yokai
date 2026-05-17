@@ -506,6 +506,16 @@ class LibraryPresenter(
         if (sources.isNotEmpty()) {
             if (item.manga.manga.source !in sources) return false
         }
+        val filterDownloaded = customFilters.filterDownloaded
+        if (filterDownloaded != 0) {
+            val isDownloaded = when {
+                item.manga.manga.isLocal() -> true
+                item.downloadCount != -1 -> item.downloadCount > 0
+                else -> downloadManager.getDownloadCount(item.manga.manga) > 0
+            }
+            if (filterDownloaded == 1 && !isDownloaded) return false
+            if (filterDownloaded == 2 && isDownloaded) return false
+        }
         val trackingScore = customFilters.filterTrackingScore
         if (trackingScore > 0 || trackingScore == -1) {
             val tracks = getTrack.awaitAllByMangaId(item.manga.manga.id!!)
@@ -613,6 +623,14 @@ class LibraryPresenter(
      * @param itemList the map of manga.
      */
     private fun setDownloadCount(itemList: List<LibraryItem>) {
+        for (item in itemList) {
+            if (item !is LibraryMangaItem) continue
+            item.isDownloadsMode = false
+            item.downloadedChapterCount = 0
+            item.activeDownloadCount = 0
+            item.downloadSubtitle = null
+        }
+
         if (!preferences.downloadBadge().get()) {
             // Unset download count if the preference is not enabled.
             for (item in itemList) {
@@ -626,6 +644,22 @@ class LibraryPresenter(
             if (item !is LibraryMangaItem) continue
             item.downloadCount = downloadManager.getDownloadCount(item.manga.manga)
         }
+    }
+
+    fun downloadedItemsFrom(items: List<LibraryItem>): List<LibraryItem> {
+        return items
+            .filterIsInstance<LibraryMangaItem>()
+            .mapNotNull { item ->
+                val count = downloadManager.getDownloadCount(item.manga.manga)
+                if (count <= 0) return@mapNotNull null
+                item.apply {
+                    isDownloadsMode = true
+                    downloadedChapterCount = count
+                    downloadCount = count
+                    downloadSubtitle = sourceManager.getOrStub(item.manga.manga.source).name
+                }
+            }
+            .sortedBy { it.manga.manga.title.lowercase() }
     }
 
     private fun setUnreadBadge(itemList: List<LibraryItem>) {

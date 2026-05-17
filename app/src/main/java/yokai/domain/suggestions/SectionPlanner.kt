@@ -16,6 +16,10 @@ class SectionPlanner(
             .filterNot { it.isBlacklisted }
             .sortedByDescending { it.affinity }
 
+        if (visibleProfiles.none { it.affinity > 0.0 }) {
+            return listOf(discoverySection(sortOrder, now, coldStart = true))
+        }
+
         val pinned = visibleProfiles
             .filter { it.isPinned }
             .sortedWith(compareBy<TagProfile> { it.pinnedAt ?: Long.MAX_VALUE }.thenBy { it.canonicalTag })
@@ -38,13 +42,17 @@ class SectionPlanner(
         return sections.mapIndexed { index, section -> section.copy(rank = index.toLong()) }
     }
 
-    private fun discoverySection(sortOrder: SuggestionSortOrder, now: Long): PlannedSection {
+    private fun discoverySection(
+        sortOrder: SuggestionSortOrder,
+        now: Long,
+        coldStart: Boolean = false,
+    ): PlannedSection {
         val reason = when (sortOrder) {
             SuggestionSortOrder.Latest -> "Latest from your sources"
             SuggestionSortOrder.Popular -> "Popular from your sources"
         }
         return PlannedSection(
-            sectionKey = "discovery",
+            sectionKey = if (coldStart) COLD_START_DISCOVERY_SECTION_KEY else "discovery",
             type = SectionType.DISCOVERY,
             canonicalTag = null,
             displayReason = reason,

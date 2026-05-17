@@ -213,7 +213,7 @@ class PreferencesHelper(val context: Context, val preferenceStore: PreferenceSto
 
     fun suggestionsLastHardRefreshAt() = preferenceStore.getLong("suggestions_last_hard_refresh_at", 0L)
 
-    fun suggestionsV2Enabled() = preferenceStore.getBoolean("suggestions_v2_enabled", false)
+    fun suggestionsV2Enabled() = preferenceStore.getBoolean("suggestions_v2_enabled", true)
 
     fun suggestionsTotalRefreshCount() = preferenceStore.getInt("suggestions_total_refresh_count", 0)
 

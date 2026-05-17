@@ -12,6 +12,14 @@ object SectionBatcher {
         return plannedSections.drop(startIndex).take(batchSize)
     }
 
+    fun contiguousLoadedPrefixSize(
+        plannedSections: List<PlannedSection>,
+        loadedReasons: Set<String>,
+    ): Int {
+        val firstMissingIndex = plannedSections.indexOfFirst { it.displayReason !in loadedReasons }
+        return if (firstMissingIndex == -1) plannedSections.size else firstMissingIndex
+    }
+
     fun shouldLoadMore(
         lastVisibleSectionIndex: Int,
         loadedSectionCount: Int,

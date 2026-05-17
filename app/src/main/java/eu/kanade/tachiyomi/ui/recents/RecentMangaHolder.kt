@@ -63,6 +63,24 @@ class RecentMangaHolder(
         binding.subtitle.text = ""
         binding.subtitle.isVisible = false
 
+        if (adapter.uniformCovers) {
+            binding.constraintLayout.layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            )
+            binding.coverThumbnail.maxHeight = Int.MAX_VALUE
+            binding.coverThumbnail.minimumHeight = 0
+            binding.constraintLayout.minHeight = 0
+            binding.coverThumbnail.scaleType = android.widget.ImageView.ScaleType.CENTER_CROP
+            binding.coverThumbnail.adjustViewBounds = false
+            binding.coverThumbnail.updateLayoutParams<ConstraintLayout.LayoutParams> {
+                height = ConstraintLayout.LayoutParams.MATCH_CONSTRAINT
+                dimensionRatio = "2:3"
+            }
+        } else {
+            setFreeformCoverRatio(item.mch.manga, adapter.recyclerView as? AutofitRecyclerView)
+        }
+
         binding.coverThumbnail.dispose()
         setCover(item.mch.manga)
     }
@@ -75,12 +93,12 @@ class RecentMangaHolder(
         if ((adapter.recyclerView.context as? Activity)?.isDestroyed == true) return
         binding.coverThumbnail.loadManga(manga) {
             val hasRatio = binding.coverThumbnail.layoutParams.height != ViewGroup.LayoutParams.WRAP_CONTENT
-            if (!hasRatio) {
+            if (!adapter.uniformCovers && !hasRatio) {
                 scale(Scale.FIT)
             }
             listener(
                 onSuccess = { _, _ ->
-                    if (!hasRatio && MangaCoverMetadata.getRatio(manga) != null) {
+                    if (!adapter.uniformCovers && !hasRatio && MangaCoverMetadata.getRatio(manga) != null) {
                         setFreeformCoverRatio(manga)
                     }
                 },

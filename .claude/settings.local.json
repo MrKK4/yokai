@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./gradlew :app:testStandardDebugUnitTest --tests \"yokai.domain.suggestions.TagCanonicalizerTest\" --stacktrace)",
+      "Bash(./gradlew assembleDebug)"
+    ]
+  }
+}

@@ -90,12 +90,19 @@ class LibraryListHolder(
                 ).joinToString(", ")
             }
 
-        binding.subtitle.text = authorArtist.highlightText(item.filter, color)
+        val subtitleText = if (item.isDownloadsMode) {
+            val source = item.downloadSubtitle.orEmpty()
+            val count = item.downloadedChapterCount
+            if (source.isBlank()) "$count downloaded" else "$source • $count downloaded"
+        } else {
+            authorArtist
+        }
+        binding.subtitle.text = subtitleText.highlightText(item.filter, color)
         binding.title.maxLines = 2
         binding.title.post {
             val hasAuthorInFilter =
                 item.filter.isNotBlank() && authorArtist.contains(item.filter, true)
-            binding.subtitle.isVisible = binding.title.lineCount <= 1 || hasAuthorInFilter
+            binding.subtitle.isVisible = if (item.isDownloadsMode) subtitleText.isNotBlank() else binding.title.lineCount <= 1 || hasAuthorInFilter
             binding.title.maxLines = if (hasAuthorInFilter) 1 else 2
         }
 

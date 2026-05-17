@@ -5,7 +5,9 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -15,6 +17,7 @@ import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -23,6 +26,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -36,19 +40,23 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import dev.icerock.moko.resources.compose.stringResource
+import yokai.i18n.MR
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SuggestionsFilterSheet(
     availableTags: List<String>,
     blacklistedTags: Set<String>,
-    onTagToggled: (tag: String, isBlacklisted: Boolean) -> Unit,
+    onApply: (Set<String>) -> Unit,
     onDismissRequest: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var searchQuery by rememberSaveable { mutableStateOf("") }
-    val normalizedBlacklist = remember(blacklistedTags) {
-        blacklistedTags
+    // Track pending blacklist changes locally — only commit on Apply
+    var pendingBlacklist by remember(blacklistedTags) { mutableStateOf(blacklistedTags) }
+    val normalizedPending = remember(pendingBlacklist) {
+        pendingBlacklist
             .map { it.normalizedTagKey() }
             .filter { it.isNotBlank() }
             .toSet()
@@ -72,7 +80,7 @@ fun SuggestionsFilterSheet(
                 .navigationBarsPadding(),
         ) {
             Text(
-                text = "Exclude Tags from Suggestions",
+                text = stringResource(MR.strings.suggestions_exclude_tags),
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
@@ -87,7 +95,7 @@ fun SuggestionsFilterSheet(
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        text = "No tags found yet.",
+                        text = stringResource(MR.strings.no_results_found),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -99,7 +107,7 @@ fun SuggestionsFilterSheet(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 24.dp, vertical = 8.dp),
-                    placeholder = { Text(text = "Search tags") },
+                    placeholder = { Text(text = stringResource(MR.strings.search)) },
                     leadingIcon = {
                         Icon(
                             imageVector = Icons.Outlined.Search,
@@ -111,7 +119,7 @@ fun SuggestionsFilterSheet(
                             IconButton(onClick = { searchQuery = "" }) {
                                 Icon(
                                     imageVector = Icons.Outlined.Close,
-                                    contentDescription = "Clear tag search",
+                                    contentDescription = stringResource(MR.strings.close),
                                 )
                             }
                         }
@@ -137,23 +145,53 @@ fun SuggestionsFilterSheet(
                     LazyColumn(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(max = 500.dp),
-                        contentPadding = PaddingValues(bottom = 16.dp),
+                            .heightIn(max = 400.dp),
+                        contentPadding = PaddingValues(bottom = 8.dp),
                         verticalArrangement = Arrangement.spacedBy(2.dp),
                     ) {
                         items(
                             items = filteredTags,
                             key = { tag -> tag.normalizedTagKey() },
                         ) { tag ->
-                            val isBlacklisted = tag.normalizedTagKey() in normalizedBlacklist
+                            val isBlacklisted = tag.normalizedTagKey() in normalizedPending
                             TagExclusionRow(
                                 tag = tag,
                                 isBlacklisted = isBlacklisted,
-                                onCheckedChange = { checked -> onTagToggled(tag, checked) },
+                                onCheckedChange = { checked ->
+                                    pendingBlacklist = if (checked) {
+                                        pendingBlacklist + tag
+                                    } else {
+                                        pendingBlacklist.filterNot {
+                                            it.normalizedTagKey() == tag.normalizedTagKey()
+                                        }.toSet()
+                                    }
+                                },
                             )
                         }
                     }
                 }
+
+                // Apply / Cancel buttons
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    TextButton(
+                        onClick = onDismissRequest,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(text = stringResource(MR.strings.cancel))
+                    }
+                    Button(
+                        onClick = { onApply(pendingBlacklist) },
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(text = stringResource(MR.strings.apply))
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
             }
         }
     }

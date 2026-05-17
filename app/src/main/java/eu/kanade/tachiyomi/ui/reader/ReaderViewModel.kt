@@ -67,7 +67,6 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
@@ -157,10 +156,6 @@ class ReaderViewModel(
     private var finished = false
     private var chapterToDownload: Download? = null
 
-    private val unfilteredChapterList by lazy {
-        val manga = manga!!
-        runBlocking { getChapter.awaitAll(manga, filterScanlators = false) }
-    }
 
     private lateinit var chapterList: List<ReaderChapter>
 
@@ -660,6 +655,7 @@ class ReaderViewModel(
             .contains(LibraryPreferences.MARK_DUPLICATE_READ_CHAPTER_READ_EXISTING)
         if (!markDuplicateAsRead) return
 
+        val unfilteredChapterList = getChapter.awaitAll(manga!!, filterScanlators = false)
         val duplicateUnreadChapters = unfilteredChapterList
             .mapNotNull { chapter ->
                 if (

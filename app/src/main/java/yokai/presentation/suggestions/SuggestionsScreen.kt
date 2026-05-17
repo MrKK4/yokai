@@ -23,6 +23,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -31,7 +32,6 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -45,12 +45,14 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import dev.icerock.moko.resources.compose.stringResource
 import eu.kanade.tachiyomi.domain.manga.models.Manga
 import eu.kanade.tachiyomi.ui.suggestions.SuggestionsPresenter
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
 import yokai.domain.manga.models.cover
 import yokai.domain.suggestions.SectionBatcher
+import yokai.i18n.MR
 
 @Composable
 fun SuggestionsScreen(
@@ -66,23 +68,6 @@ fun SuggestionsScreen(
             firstVisibleItemIndex = presenter.gridFirstVisibleItemIndex,
             firstVisibleItemScrollOffset = presenter.gridFirstVisibleItemScrollOffset,
         )
-    }
-    // Scroll to top whenever a hard refresh or sort-order change fires.
-    // Track the previously-seen trigger so the effect only fires on actual increments
-    // and never overrides the restored scroll position on tab re-entry.
-    val scrollToTopTrigger = state.scrollToTopTrigger
-    var seenTrigger by remember { mutableLongStateOf(-1L) }
-    LaunchedEffect(scrollToTopTrigger) {
-        if (seenTrigger == -1L) {
-            // First composition — record the current value without scrolling so we
-            // don't race against the position-restore effect below.
-            seenTrigger = scrollToTopTrigger
-            return@LaunchedEffect
-        }
-        if (scrollToTopTrigger != seenTrigger) {
-            seenTrigger = scrollToTopTrigger
-            gridState.scrollToItem(0)
-        }
     }
     // On composition start (or when presenter changes due to view recreation after low-memory
     // destroy), scroll to the last saved position if the user was scrolled down.
@@ -142,6 +127,14 @@ fun SuggestionsScreen(
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
+                    if (state.isLoading && !state.isForegroundRefresh) {
+                        item(
+                            key = "refreshing",
+                            span = { GridItemSpan(maxLineSpan) },
+                        ) {
+                            RefreshingFooter()
+                        }
+                    }
                     visibleSuggestions.forEach { (reason, mangaList) ->
                         item(
                             key = "header:$reason",
@@ -191,7 +184,7 @@ fun SuggestionsScreen(
                 SuggestionsFilterSheet(
                     availableTags = state.availableTags,
                     blacklistedTags = state.blacklistedTags,
-                    onTagToggled = presenter::setTagBlacklisted,
+                    onApply = presenter::applyTagBlacklist,
                     onDismissRequest = presenter::dismissTagFilterSheet,
                 )
             }
@@ -204,6 +197,7 @@ fun SuggestionsScreen(
                     isLoading = state.sheetIsLoading,
                     error = state.sheetError,
                     onMangaClick = onMangaClick,
+                    onRetry = { presenter.expandSection(sheetReason) },
                     onDismiss = presenter::dismissExpandSheet,
                 )
             }
@@ -304,6 +298,18 @@ private fun EmptySuggestions(
     modifier: Modifier = Modifier,
 ) {
     val isRefreshing = isLoading || isFetching
+    val title = when {
+        isRefreshing -> stringResource(MR.strings.suggestions_refreshing)
+        emptyMessage != null -> emptyMessage
+        hasSuggestions -> stringResource(MR.strings.suggestions_no_matching)
+        else -> stringResource(MR.strings.suggestions_none_found)
+    }
+    val subtitle = when {
+        isRefreshing -> stringResource(MR.strings.suggestions_searching_sources)
+        hasSuggestions -> stringResource(MR.strings.suggestions_try_another_filter)
+        emptyMessage != null -> null
+        else -> stringResource(MR.strings.suggestions_read_to_build)
+    }
     Column(
         modifier = modifier.padding(horizontal = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -313,25 +319,37 @@ private fun EmptySuggestions(
             CircularProgressIndicator(modifier = Modifier.padding(bottom = 20.dp))
         }
         Text(
-            text = when {
-                isRefreshing -> "Refreshing suggestions."
-                hasSuggestions -> "No matching suggestions."
-                else -> "No suggestions found."
-            },
+            text = title,
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.Bold,
             textAlign = TextAlign.Center,
         )
+        if (subtitle != null) {
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(top = 8.dp),
+                textAlign = TextAlign.Center,
+            )
+        }
+    }
+}
+
+@Composable
+private fun RefreshingFooter() {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
         Text(
-            text = when {
-                isRefreshing -> "Searching your active sources now."
-                hasSuggestions -> "Try another suggestion filter."
-                emptyMessage != null -> emptyMessage
-                else -> "Read or favorite some manga in your library to build personalized suggestions."
-            },
-            style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.padding(top = 8.dp),
+            text = stringResource(MR.strings.suggestions_searching_sources),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
+            modifier = Modifier.padding(top = 8.dp),
         )
     }
 }
@@ -386,7 +404,7 @@ private fun SuggestionHeader(
             IconButton(onClick = { onExpand?.invoke() }) {
                 Icon(
                     imageVector = Icons.Outlined.ExpandMore,
-                    contentDescription = "Expand $reason",
+                    contentDescription = stringResource(MR.strings.suggestions_expand_content_description, reason),
                     tint = MaterialTheme.colorScheme.primary,
                 )
             }

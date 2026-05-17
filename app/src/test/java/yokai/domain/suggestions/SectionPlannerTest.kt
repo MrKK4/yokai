@@ -54,6 +54,57 @@ class SectionPlannerTest {
     }
 
     @Test
+    fun `plan uses latest discovery only when there are no interest profiles`() = runBlocking {
+        val repository = FakeTagProfileRepository()
+        val planner = SectionPlanner(repository, SuggestionsDebugLog())
+
+        val sections = planner.plan(
+            profiles = emptyList(),
+            sortOrder = SuggestionSortOrder.Latest,
+            now = 10_000L,
+        )
+
+        assertEquals(1, sections.size)
+        assertEquals(SectionType.DISCOVERY, sections.single().type)
+        assertEquals(COLD_START_DISCOVERY_SECTION_KEY, sections.single().sectionKey)
+        assertEquals("Latest from your sources", sections.single().displayReason)
+    }
+
+    @Test
+    fun `plan uses popular discovery only when there are no interest profiles`() = runBlocking {
+        val repository = FakeTagProfileRepository()
+        val planner = SectionPlanner(repository, SuggestionsDebugLog())
+
+        val sections = planner.plan(
+            profiles = emptyList(),
+            sortOrder = SuggestionSortOrder.Popular,
+            now = 10_000L,
+        )
+
+        assertEquals(1, sections.size)
+        assertEquals(SectionType.DISCOVERY, sections.single().type)
+        assertEquals(COLD_START_DISCOVERY_SECTION_KEY, sections.single().sectionKey)
+        assertEquals("Popular from your sources", sections.single().displayReason)
+    }
+
+    @Test
+    fun `plan stays in discovery when profiles have no affinity`() = runBlocking {
+        val repository = FakeTagProfileRepository()
+        val planner = SectionPlanner(repository, SuggestionsDebugLog())
+
+        val sections = planner.plan(
+            profiles = listOf(
+                profile("action", recent = 0.0, state = TagState.PINNED, pinnedAt = 1L),
+                profile("romance", recent = 0.0),
+            ),
+            sortOrder = SuggestionSortOrder.Popular,
+            now = 10_000L,
+        )
+
+        assertEquals(listOf(COLD_START_DISCOVERY_SECTION_KEY), sections.map { it.sectionKey })
+    }
+
+    @Test
     fun `managed reason strings use affinity tiers`() = runBlocking {
         val repository = FakeTagProfileRepository()
         val planner = SectionPlanner(repository, SuggestionsDebugLog())
@@ -74,7 +125,7 @@ class SectionPlannerTest {
     }
 
     @Test
-    fun `section batcher returns five sections from start index`() {
+    fun `section batcher returns configured sections from start index`() {
         val planned = (0 until 12).map { index ->
             PlannedSection(
                 sectionKey = "tag:$index",
@@ -87,16 +138,53 @@ class SectionPlannerTest {
             )
         }
 
-        assertEquals(listOf("tag:0", "tag:1", "tag:2", "tag:3", "tag:4"), SectionBatcher.nextBatch(planned, 0).map { it.sectionKey })
+        assertEquals(listOf("tag:0", "tag:1"), SectionBatcher.nextBatch(planned, 0).map { it.sectionKey })
         assertEquals(listOf("tag:10", "tag:11"), SectionBatcher.nextBatch(planned, 10).map { it.sectionKey })
         assertTrue(SectionBatcher.nextBatch(planned, 12).isEmpty())
     }
 
     @Test
-    fun `section batcher threshold triggers within two loaded sections from end`() {
+    fun `section batcher tracks the contiguous loaded prefix`() {
+        val planned = (0 until 5).map { index ->
+            PlannedSection(
+                sectionKey = "tag:$index",
+                type = SectionType.MANAGED_TAG,
+                canonicalTag = "$index",
+                displayReason = "Because you read $index",
+                searchTerms = listOf("$index"),
+                sortOrder = SuggestionSortOrder.Popular,
+                rank = index.toLong(),
+            )
+        }
+
+        assertEquals(
+            2,
+            SectionBatcher.contiguousLoadedPrefixSize(
+                plannedSections = planned,
+                loadedReasons = setOf("Because you read 0", "Because you read 1", "Because you read 3"),
+            ),
+        )
+        assertEquals(
+            0,
+            SectionBatcher.contiguousLoadedPrefixSize(
+                plannedSections = planned,
+                loadedReasons = setOf("Because you read 1"),
+            ),
+        )
+        assertEquals(
+            planned.size,
+            SectionBatcher.contiguousLoadedPrefixSize(
+                plannedSections = planned,
+                loadedReasons = planned.map { it.displayReason }.toSet(),
+            ),
+        )
+    }
+
+    @Test
+    fun `section batcher threshold triggers within one loaded section from end`() {
         assertFalse(
             SectionBatcher.shouldLoadMore(
-                lastVisibleSectionIndex = 2,
+                lastVisibleSectionIndex = 3,
                 loadedSectionCount = 5,
                 isFetchingBatch = false,
                 allSectionsLoaded = false,
@@ -104,7 +192,7 @@ class SectionPlannerTest {
         )
         assertTrue(
             SectionBatcher.shouldLoadMore(
-                lastVisibleSectionIndex = 3,
+                lastVisibleSectionIndex = 4,
                 loadedSectionCount = 5,
                 isFetchingBatch = false,
                 allSectionsLoaded = false,
@@ -179,6 +267,21 @@ internal class FakeTagProfileRepository : TagProfileRepository {
         aliases.values
             .filter { it.canonicalTag == canonicalTag }
             .map { it.rawTag } + canonicalTag
+
+    override suspend fun getExactTermForSource(canonicalTag: String, sourceId: Long): String? =
+        aliases.values
+            .firstOrNull { it.canonicalTag == canonicalTag && it.sourceKey == sourceId }
+            ?.rawTag
+
+    override suspend fun recordSourceVocabulary(rawTag: String, canonicalTag: String, sourceId: Long) {
+        aliases[rawTag.lowercase() to sourceId] = TagAlias(
+            rawTag = rawTag,
+            rawKey = rawTag.lowercase(),
+            canonicalTag = canonicalTag,
+            sourceId = sourceId,
+            sourceKey = sourceId,
+        )
+    }
 
     override suspend fun aliasOrProfileExists(key: String): Boolean =
         key in profiles || aliases.values.any { it.canonicalTag == key || it.rawKey == key }

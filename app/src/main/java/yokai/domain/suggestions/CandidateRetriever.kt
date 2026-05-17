@@ -2,7 +2,6 @@ package yokai.domain.suggestions
 
 import eu.kanade.tachiyomi.data.preference.PreferencesHelper
 import eu.kanade.tachiyomi.source.CatalogueSource
-import eu.kanade.tachiyomi.source.LocalSource
 import eu.kanade.tachiyomi.source.SourceManager
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
@@ -14,9 +13,13 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withTimeoutOrNull
 
 data class SuggestionCandidate(
     val section: PlannedSection,
@@ -39,29 +42,28 @@ class CandidateRetriever(
     private val tagCanonicalizer: TagCanonicalizer,
     private val tagProfileRepository: TagProfileRepository,
 ) {
-    // ── FilterList cache ─────────────────────────────────────────────────────────
-    // Some extensions make a network call inside getFilterList() to build dynamic
-    // genre lists. Caching per sourceId avoids redundant requests across sections
-    // fetched in the same batch. Cache expires after FILTER_CACHE_TTL_MS (1 hour).
-    private val filterListCache = ConcurrentHashMap<Long, Pair<FilterList, Long>>()
+    private fun freshFilterList(source: CatalogueSource): FilterList =
+        source.getFilterList()
 
-    private fun getCachedFilterList(source: CatalogueSource): FilterList {
-        val cached = filterListCache[source.id]
-        if (cached != null && System.currentTimeMillis() - cached.second < FILTER_CACHE_TTL_MS) {
-            return cached.first
-        }
-        val fresh = source.getFilterList()
-        filterListCache[source.id] = fresh to System.currentTimeMillis()
-        return fresh
-    }
-    // ─────────────────────────────────────────────────────────────────────────────
+    fun hasActiveNetworkSources(): Boolean =
+        activeNetworkSources().isNotEmpty()
+
+    fun activeNetworkSourceIdsFlow(): Flow<Set<Long>> =
+        sourceManager.catalogueSources
+            .map { sources ->
+                SuggestionSourceSelector.activeNetworkSourceIds(
+                    sources = sources,
+                    selection = sourceSelection(),
+                )
+            }
+            .distinctUntilChanged()
 
     suspend fun retrieve(
         sections: List<PlannedSection>,
         pageOffset: Int = 1,
     ): List<CandidateRetrievalResult> {
         val results = coroutineScope {
-            val requestGate = Semaphore(MAX_CONCURRENT_SOURCE_REQUESTS)
+            val requestGate = Semaphore(SuggestionsConfig.MAX_CONCURRENT_SOURCE_REQUESTS)
             sections.map { section ->
                 async {
                     CandidateRetrievalResult(
@@ -90,7 +92,7 @@ class CandidateRetriever(
     ) {
         if (sections.isEmpty()) return
         coroutineScope {
-            val requestGate = Semaphore(MAX_CONCURRENT_SOURCE_REQUESTS)
+            val requestGate = Semaphore(SuggestionsConfig.MAX_CONCURRENT_SOURCE_REQUESTS)
             val results = Channel<CandidateRetrievalResult>(Channel.UNLIMITED)
             sections.forEach { section ->
                 launch {
@@ -128,35 +130,114 @@ class CandidateRetriever(
         pageOffset: Int,
         requestGate: Semaphore,
     ): List<SuggestionCandidate> {
+        if (section.isColdStartDiscovery()) {
+            return retrieveColdStartDiscoverySection(section, requestGate)
+        }
+
         val sources = activeSources(discovery = section.type == SectionType.DISCOVERY)
         if (sources.isEmpty()) return emptyList()
 
+        suspend fun fetchPage(page: Int, countBySource: ConcurrentHashMap<Long, AtomicInteger>): List<SuggestionCandidate> {
+            return coroutineScope {
+                when (section.type) {
+                    SectionType.DISCOVERY ->
+                        sources.mapIndexed { sourceIndex, source ->
+                            async { fetchDiscoverySource(section, source, sourceIndex, page, requestGate, countBySource) }
+                        }
+                    else ->
+                        sources.mapIndexed { sourceIndex, source ->
+                            async { fetchSearchSource(section, source, sourceIndex, page, requestGate, countBySource) }
+                        }
+                }.awaitAll().flatten()
+            }
+        }
+
         val countBySource = ConcurrentHashMap<Long, AtomicInteger>()
         val page = pageOffset.coerceAtLeast(1)
-        val candidates = coroutineScope {
-            when (section.type) {
-                SectionType.DISCOVERY ->
-                    // Discovery: one async per source — no tag search involved.
-                    sources.mapIndexed { sourceIndex, source ->
-                        async {
-                            fetchDiscoverySource(section, source, sourceIndex, page, requestGate, countBySource)
-                        }
-                    }
-                else ->
-                    // Tag sections: ONE async per source (Phase C — de-spammed).
-                    // injectGenreFilter / fallback logic inside fetchSearchSource
-                    // resolves the single best query for this source; no flatMap over aliases.
-                    sources.mapIndexed { sourceIndex, source ->
-                        async {
-                            fetchSearchSource(section, source, sourceIndex, page, requestGate, countBySource)
-                        }
-                    }
-            }.awaitAll().flatten()
+        val candidates = fetchPage(page, countBySource).toMutableList()
+
+        // ── Source-rotation backfill ───────────────────────────────────────────
+        // If the initial concurrent fetch did not reach the section minimum, identify
+        // which sources returned 0 results (dry sources with unused quota) and fire
+        // sequential top-up requests to the productive sources, each receiving a cap
+        // equal to the remaining shortfall, until the minimum is met.
+        if (candidates.size < SuggestionsConfig.MIN_RESULTS_PER_SECTION) {
+            val drySources = sources.filter { s ->
+                (countBySource[s.id]?.get() ?: 0) == 0
+            }.toSet()
+            val backfillSources = sources.filterNot { it in drySources }
+            for (source in backfillSources) {
+                val shortfall = SuggestionsConfig.MIN_RESULTS_PER_SECTION - candidates.size
+                if (shortfall <= 0) break
+                // Temporarily reduce the counter so cappedCandidates grants an extra
+                // `shortfall` items on top of what this source already contributed.
+                val counter = countBySource.getOrPut(source.id) { AtomicInteger(0) }
+                val savedCount = counter.get()
+                counter.set((savedCount - shortfall).coerceAtLeast(0))
+                val topUp = when (section.type) {
+                    SectionType.DISCOVERY -> fetchDiscoverySource(
+                        section, source, sources.indexOf(source), page, requestGate, countBySource,
+                    )
+                    else -> fetchSearchSource(
+                        section, source, sources.indexOf(source), page, requestGate, countBySource,
+                    )
+                }
+                candidates.addAll(topUp)
+                // Restore counter to the true total so later cap checks remain accurate.
+                counter.set(savedCount + topUp.size)
+            }
+        }
+        // ──────────────────────────────────────────────────────────────────────
+
+        // Page-2 backstop: if source rotation still couldn't fill the minimum, extend
+        // to the next page from all sources (uses existing per-source caps).
+        if (candidates.size < SuggestionsConfig.MIN_RESULTS_PER_SECTION) {
+            candidates.addAll(fetchPage(page + 1, countBySource))
         }
 
         return candidates
             .distinctBy { it.sourceId to it.manga.url }
             .take(SuggestionsConfig.MAX_CANDIDATES_PER_SECTION)
+    }
+
+    private suspend fun retrieveColdStartDiscoverySection(
+        section: PlannedSection,
+        requestGate: Semaphore,
+    ): List<SuggestionCandidate> {
+        val sources = activeSources(discovery = true)
+            .shuffled()
+        if (sources.isEmpty()) return emptyList()
+
+        val countBySource = ConcurrentHashMap<Long, AtomicInteger>()
+        val candidates = mutableListOf<SuggestionCandidate>()
+        val indexedSources = sources.withIndex().toList()
+        pages@ for (page in 1..SuggestionsConfig.COLD_START_SOURCE_PAGE_LIMIT) {
+            for (chunk in indexedSources.chunked(SuggestionsConfig.COLD_START_SOURCE_CHUNK_SIZE)) {
+                val pageCandidates = coroutineScope {
+                    chunk.map { indexedSource ->
+                        async {
+                            fetchDiscoverySource(
+                                section = section,
+                                source = indexedSource.value,
+                                sourceIndex = indexedSource.index,
+                                page = page,
+                                requestGate = requestGate,
+                                countBySource = countBySource,
+                            )
+                        }
+                    }.awaitAll().flatten()
+                }
+                candidates.addAll(pageCandidates)
+                if (candidates.distinctBy { it.sourceId to it.manga.url }.size >= SuggestionsConfig.COLD_START_EARLY_BAILOUT_CANDIDATES) {
+                    break@pages
+                }
+            }
+        }
+
+        return candidates
+            .distinctBy { it.sourceId to it.manga.url }
+            .shuffled()
+            .take(SuggestionsConfig.COLD_START_MAX_CANDIDATES)
     }
 
     private suspend fun fetchDiscoverySource(
@@ -207,7 +288,9 @@ class CandidateRetriever(
 
         // ── Phase A: genre-filter injection ──────────────────────────────────────
         val injectedFilters = canonicalTag?.let { tag ->
-            source.injectGenreFilter(tag, section.sortOrder)
+            sourceResult(sourceId = source.id) {
+                source.injectGenreFilter(tag, section.sortOrder)
+            }
         }
 
         val pageResult = if (injectedFilters != null) {
@@ -267,21 +350,19 @@ class CandidateRetriever(
     private suspend fun learnVocabulary(candidates: List<SuggestionCandidate>, sourceId: Long) {
         if (candidates.isEmpty()) return
         try {
+            val batch = mutableListOf<Triple<String, String, Long>>()
             candidates.forEach { candidate ->
                 candidate.manga.getGenres()?.forEach { rawTag ->
                     val canonical = tagCanonicalizer.canonicalize(rawTag, sourceId).canonicalKey
                     if (canonical.isNotBlank()) {
-                        tagProfileRepository.recordSourceVocabulary(
-                            rawTag = rawTag,
-                            canonicalTag = canonical,
-                            sourceId = sourceId,
-                        )
+                        batch.add(Triple(rawTag, canonical, sourceId))
                     }
                 }
             }
+            if (batch.isNotEmpty()) {
+                tagProfileRepository.recordSourceVocabularyBatch(batch)
+            }
         } catch (e: Exception) {
-            // Bug 8d: log vocabulary learning failures to the debug log.
-            // No user-facing change needed — this is best-effort only.
             debugLog.add(
                 LogType.SECTION_DROPPED,
                 "learnVocabulary DB write failed for source $sourceId: ${e.javaClass.simpleName}: ${e.message}",
@@ -303,7 +384,7 @@ class CandidateRetriever(
         canonicalTag: String,
         sortOrder: SuggestionSortOrder,
     ): FilterList? {
-        val filters = getCachedFilterList(this)
+        val filters = freshFilterList(this)
         var filterInjected = false
 
         // Apply sort order first (existing behaviour).
@@ -363,16 +444,21 @@ class CandidateRetriever(
         countBySource: ConcurrentHashMap<Long, AtomicInteger>,
     ): List<SuggestionCandidate> {
         val counter = countBySource.getOrPut(sourceId) { AtomicInteger(0) }
-        val remaining = SuggestionsConfig.MAX_PER_SOURCE_FETCH - counter.get()
+        val maxPerSource = if (section.isColdStartDiscovery()) {
+            SuggestionsConfig.COLD_START_MAX_PER_SOURCE_FETCH
+        } else {
+            SuggestionsConfig.MAX_PER_SOURCE_FETCH
+        }
+        val remaining = maxPerSource - counter.get()
         if (remaining <= 0) {
-            debugLog.add(LogType.SOURCE_CAP_HIT, "Source $sourceId capped at ${SuggestionsConfig.MAX_PER_SOURCE_FETCH} candidates for section '${section.sectionKey}'")
+            debugLog.add(LogType.SOURCE_CAP_HIT, "Source $sourceId capped at $maxPerSource candidates for section '${section.sectionKey}'")
             return emptyList()
         }
 
         val selected = mangas.take(remaining)
         val newCount = counter.addAndGet(selected.size)
-        if (newCount >= SuggestionsConfig.MAX_PER_SOURCE_FETCH && mangas.size > selected.size) {
-            debugLog.add(LogType.SOURCE_CAP_HIT, "Source $sourceId capped at ${SuggestionsConfig.MAX_PER_SOURCE_FETCH} candidates for section '${section.sectionKey}'")
+        if (newCount >= maxPerSource && mangas.size > selected.size) {
+            debugLog.add(LogType.SOURCE_CAP_HIT, "Source $sourceId capped at $maxPerSource candidates for section '${section.sectionKey}'")
         }
 
         return selected.mapIndexed { index, manga ->
@@ -387,38 +473,27 @@ class CandidateRetriever(
         }
     }
 
-    private fun activeSources(discovery: Boolean): List<CatalogueSource> {
-        val languages = preferences.enabledLanguages().get()
-        val hiddenSourceIds = preferences.hiddenSources().get()
-        val pinnedSourceIds = preferences.pinnedCatalogues().get()
-        val recentSourceIds = preferences.recentlyUsedSourceIds().get()
+    private fun activeSources(discovery: Boolean): List<CatalogueSource> =
+        activeNetworkSources(discovery)
 
-        val enabledSources = sourceManager.getCatalogueSources()
-            .filter { source -> source.lang in languages || source.id == LocalSource.ID }
-            .filterNot { source -> source.id.toString() in hiddenSourceIds }
+    private fun activeNetworkSources(discovery: Boolean = false): List<CatalogueSource> =
+        SuggestionSourceSelector.activeNetworkSources(
+            sources = sourceManager.getCatalogueSources(),
+            selection = sourceSelection(),
+            discovery = discovery,
+        )
 
-        val sourcePool = if (discovery) {
-            enabledSources.filter { it.id.toString() in pinnedSourceIds }
-                .takeIf { it.isNotEmpty() }
-                ?: enabledSources
-        } else {
-            enabledSources
-        }
-
-        return sourcePool
-            .sortedWith(
-                compareBy<CatalogueSource>(
-                    { it.id.toString() in recentSourceIds },
-                    { it.id.toString() !in pinnedSourceIds },
-                    { "(${it.lang}) ${it.name}" },
-                ),
-            )
-            .take(MAX_ACTIVE_SOURCES)
-    }
+    private fun sourceSelection(): SuggestionSourceSelection =
+        SuggestionSourceSelection(
+            enabledLanguages = preferences.enabledLanguages().get(),
+            hiddenSourceIds = preferences.hiddenSources().get(),
+            pinnedSourceIds = preferences.pinnedCatalogues().get(),
+            recentSourceIds = preferences.recentlyUsedSourceIds().get(),
+        )
 
     /** Sort-filter helper reused in the text-search fallback path. */
     private fun CatalogueSource.searchFiltersFor(sortOrder: SuggestionSortOrder): FilterList {
-        val filters = getCachedFilterList(this)
+        val filters = freshFilterList(this)
         val sortFilter = filters.filterIsInstance<Filter.Sort>().firstOrNull() ?: return filters
         val sortIndex = sortFilter.values.indexOfFirst { value -> value.matchesSortOrder(sortOrder) }
         if (sortIndex >= 0) {
@@ -439,7 +514,17 @@ class CandidateRetriever(
 
     private suspend fun <T> sourceResult(sourceId: Long? = null, block: suspend () -> T): T? =
         try {
-            block()
+            var completed = false
+            val result = withTimeoutOrNull(SuggestionsConfig.SOURCE_REQUEST_TIMEOUT_MS) {
+                block().also { completed = true }
+            }
+            if (!completed && sourceId != null) {
+                debugLog.add(
+                    LogType.SECTION_DROPPED,
+                    "Source $sourceId timed out after ${SuggestionsConfig.SOURCE_REQUEST_TIMEOUT_MS}ms",
+                )
+            }
+            result
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -455,10 +540,6 @@ class CandidateRetriever(
         }
 
     private companion object {
-        private const val MAX_ACTIVE_SOURCES = 10
-        private const val MAX_CONCURRENT_SOURCE_REQUESTS = 8
-        /** FilterList cache TTL — 1 hour. Prevents repeated network calls for dynamic filter lists. */
-        private const val FILTER_CACHE_TTL_MS = 60 * 60 * 1000L
         private val LATEST_SORT_KEYWORDS = setOf("latest", "recent", "update", "updated", "uploaded", "date", "new")
         private val POPULAR_SORT_KEYWORDS = setOf("popular", "views", "view", "follow", "follows", "rating", "score", "trend", "hot")
     }

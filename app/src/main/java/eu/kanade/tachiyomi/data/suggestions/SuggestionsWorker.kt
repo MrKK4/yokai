@@ -13,6 +13,7 @@ import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import uy.kohesive.injekt.Injekt
@@ -22,16 +23,18 @@ import yokai.domain.suggestions.CandidateRetriever
 import yokai.domain.suggestions.FeedAggregator
 import yokai.domain.suggestions.GetUserSuggestionQueriesUseCase
 import yokai.domain.suggestions.InterestProfileBuilder
+import yokai.domain.suggestions.PlannedSection
 import yokai.domain.suggestions.PlannedSectionRepository
 import yokai.domain.suggestions.SectionBatcher
 import yokai.domain.suggestions.SectionPlanner
 import yokai.domain.suggestions.SessionContext
 import yokai.domain.suggestions.ShownMangaHistoryRepository
+import yokai.domain.suggestions.SuggestedManga
 import yokai.domain.suggestions.SuggestionRanker
 import yokai.domain.suggestions.SuggestionSeenLogRepository
 import yokai.domain.suggestions.SuggestionsConfig
 import yokai.domain.suggestions.SuggestionsRepository
-import yokai.domain.suggestions.RankingContext
+import yokai.domain.suggestions.SuggestionsRefreshCoordinator
 import yokai.domain.suggestions.SeenEntry
 import yokai.domain.suggestions.TagCanonicalizer
 import yokai.domain.suggestions.TagProfileRepository
@@ -59,22 +62,30 @@ class SuggestionsWorker(
 
     override suspend fun doWork(): Result {
         return try {
-            if (preferences.suggestionsV2Enabled().get()) {
-                return doV2Work()
-            }
+            SuggestionsRefreshCoordinator.tryRun {
+                if (preferences.suggestionsV2Enabled().get()) {
+                    return@tryRun doV2Work()
+                }
 
-            val suggestionQueries = getSuggestionQueries.execute()
-            val suggestions = feedAggregator.fetch(suggestionQueries)
-            if (suggestions.isEmpty()) return retryOrFailure()
+                val suggestionQueries = getSuggestionQueries.execute()
+                val suggestions = feedAggregator.fetch(suggestionQueries)
+                if (suggestions.isEmpty()) return@tryRun retryOrFailure()
 
-            suggestionsRepository.replaceAll(suggestions)
-            Result.success()
+                suggestionsRepository.replaceAll(suggestions)
+                Result.success()
+            } ?: Result.success()
+        } catch (e: CancellationException) {
+            throw e
         } catch (_: Exception) {
             retryOrFailure()
         }
     }
 
     private suspend fun doV2Work(): Result {
+        if (!candidateRetriever.hasActiveNetworkSources()) {
+            return Result.success()
+        }
+
         val now = System.currentTimeMillis()
         suggestionSeenLogRepository.deleteOlderThan(now - SuggestionsConfig.SEEN_LOG_TTL_MS)
 
@@ -91,35 +102,74 @@ class SuggestionsWorker(
         )
         plannedSectionRepository.replaceAll(plannedSections)
 
-        val loadedReasons = suggestionsRepository.getSuggestions()
-            .map { it.reason }
-            .toSet()
-        val sectionsToFetch = plannedSections
-            .filter { it.displayReason in loadedReasons }
-            .ifEmpty { SectionBatcher.nextBatch(plannedSections, 0) }
+        val existingSuggestions = suggestionsRepository.getSuggestions()
+        val loadedReasons = existingSuggestions.map { it.reason }.toSet()
+        val plannedReasons = plannedSections.map { it.displayReason }.toSet()
+        val hasRetainedSuggestions = existingSuggestions.any { it.reason in plannedReasons }
+        (loadedReasons - plannedReasons).forEach { staleReason ->
+            suggestionsRepository.deleteByReason(staleReason)
+        }
 
-        // Pre-fetch ranking context (localManga + profiles) once, not per-section.
+        val nextMissingIndex = SectionBatcher.contiguousLoadedPrefixSize(
+            plannedSections = plannedSections,
+            loadedReasons = loadedReasons,
+        )
         val rankingContext = suggestionRanker.buildRankingContext()
-        // Fetch all section seen-keys in parallel.
-        val sectionSeenKeys = suggestionSeenLogRepository.recentKeysForSections(
-            sectionKeys = sectionsToFetch.map { it.sectionKey },
-            cutoff = now - SuggestionsConfig.SEEN_LOG_TTL_MS,
-        )
-        val suggestions = suggestionRanker.rankWithContext(
-            retrievalResults = candidateRetriever.retrieve(sectionsToFetch),
-            context = rankingContext,
-            globalSeenKeys = shownMangaHistoryRepository.getAllKeys(),
-            sectionSeenKeys = sectionSeenKeys,
-            sessionContext = sessionContext,
-        )
-        if (suggestions.isEmpty()) return retryOrFailure()
+        val globalSeenKeys = shownMangaHistoryRepository.getAllKeys()
+        var fetchedAny = false
+        var committedRefreshId: Long? = null
+        var batchStartIndex = nextMissingIndex.takeIf { it < plannedSections.size } ?: 0
 
-        suggestionsRepository.replaceAll(suggestions)
+        repeat(SuggestionsConfig.BACKGROUND_MAX_SECTION_BATCHES) {
+            val sectionsToFetch = SectionBatcher.nextBatch(plannedSections, batchStartIndex)
+            if (sectionsToFetch.isEmpty()) return@repeat
+
+            val sectionSeenKeys = suggestionSeenLogRepository.recentKeysForSections(
+                sectionKeys = sectionsToFetch.map { it.sectionKey },
+                cutoff = now - SuggestionsConfig.SEEN_LOG_TTL_MS,
+            )
+            val suggestions = suggestionRanker.rankWithContext(
+                retrievalResults = candidateRetriever.retrieve(sectionsToFetch),
+                context = rankingContext,
+                globalSeenKeys = globalSeenKeys,
+                sectionSeenKeys = sectionSeenKeys,
+                sessionContext = sessionContext,
+            )
+            if (suggestions.isNotEmpty()) {
+                fetchedAny = true
+                if (committedRefreshId == null) {
+                    committedRefreshId = preferences.suggestionsTotalRefreshCount().get() + 1L
+                    preferences.suggestionsTotalRefreshCount().set(committedRefreshId!!.toInt())
+                }
+                persistV2Batch(
+                    suggestions = suggestions,
+                    sectionsToFetch = sectionsToFetch,
+                    refreshId = committedRefreshId!!,
+                    now = now,
+                )
+            }
+
+            batchStartIndex = (batchStartIndex + sectionsToFetch.size).coerceAtMost(plannedSections.size)
+            if (batchStartIndex >= plannedSections.size) return@repeat
+        }
+
+        return if (fetchedAny || hasRetainedSuggestions) Result.success() else retryOrFailure()
+    }
+
+    private suspend fun persistV2Batch(
+        suggestions: List<SuggestedManga>,
+        sectionsToFetch: List<PlannedSection>,
+        refreshId: Long,
+        now: Long,
+    ) {
+        suggestions
+            .groupBy { it.reason }
+            .forEach { (reason, sectionSuggestions) ->
+                suggestionsRepository.deleteByReason(reason)
+                suggestionsRepository.insertSuggestions(sectionSuggestions)
+            }
         shownMangaHistoryRepository.insertAll(suggestions.map { it.source to it.url })
         val sectionKeyByReason = sectionsToFetch.associate { it.displayReason to it.sectionKey }
-        val refreshId = preferences.suggestionsTotalRefreshCount().get() + 1L
-        preferences.suggestionsTotalRefreshCount().set(refreshId.toInt())
-        // Batch insert all seen entries in one transaction.
         suggestionSeenLogRepository.insertSeenBatch(
             suggestions.map { suggestion ->
                 SeenEntry(
@@ -130,7 +180,6 @@ class SuggestionsWorker(
                 )
             },
         )
-        return Result.success()
     }
 
     private suspend fun syncLegacyTagStateForV2(now: Long) {

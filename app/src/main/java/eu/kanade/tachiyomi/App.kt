@@ -32,7 +32,9 @@ import coil3.PlatformContext
 import coil3.SingletonImageLoader
 import coil3.memory.MemoryCache
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
-// import coil3.request.allowHardware
+import coil3.request.allowHardware
+import coil3.disk.DiskCache
+import okio.Path.Companion.toOkioPath
 import coil3.request.allowRgb565
 import coil3.request.crossfade
 import coil3.util.DebugLogger
@@ -309,10 +311,17 @@ open class App : Application(), DefaultLifecycleObserver, SingletonImageLoader.F
                     .maxSizePercent(context)
                     .build(),
             )
+            diskCache(
+                DiskCache.Builder()
+                    .directory(context.cacheDir.resolve("image_cache").toOkioPath())
+                    .maxSizePercent(0.02)
+                    .build(),
+            )
 
             crossfade(true)
-            allowRgb565(this@App.getSystemService<ActivityManager>()!!.isLowRamDevice)
-            // allowHardware(true)
+            val isLowRam = this@App.getSystemService<ActivityManager>()!!.isLowRamDevice
+            allowRgb565(isLowRam)
+            allowHardware(!isLowRam)
             if (networkPreferences.verboseLogging().get()) {
                 logger(DebugLogger())
             }

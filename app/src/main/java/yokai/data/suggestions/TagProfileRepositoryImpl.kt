@@ -103,6 +103,23 @@ class TagProfileRepositoryImpl(
         }
     }
 
+    override suspend fun recordSourceVocabularyBatch(entries: List<Triple<String, String, Long>>) {
+        if (entries.isEmpty()) return
+        handler.await(inTransaction = true) {
+            entries.forEach { (rawTag, canonicalTag, sourceId) ->
+                val rawKey = rawTag.trim().lowercase()
+                if (rawKey.isBlank() || canonicalTag.isBlank()) return@forEach
+                tag_aliasQueries.insertOrIgnoreAlias(
+                    rawTag = rawTag.trim(),
+                    rawKey = rawKey,
+                    canonicalTag = canonicalTag,
+                    sourceId = sourceId,
+                    sourceKey = sourceId,
+                )
+            }
+        }
+    }
+
     override suspend fun aliasOrProfileExists(key: String): Boolean {
         val aliasCount = handler.awaitOne { tag_aliasQueries.aliasExists(key) }
         if (aliasCount > 0) return true

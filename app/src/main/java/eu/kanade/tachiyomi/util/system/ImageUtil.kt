@@ -358,15 +358,33 @@ object ImageUtil {
         hasMargins: Boolean,
         progressCallback: ((Int) -> Unit)? = null,
     ): BufferedSource {
-        val imageBitmap = BitmapFactory.decodeStream(imageSource.inputStream())
+        val inputStream = imageSource.inputStream()
+        val decoder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            BitmapRegionDecoder.newInstance(inputStream)
+        } else {
+            @Suppress("DEPRECATION")
+            BitmapRegionDecoder.newInstance(inputStream, false)
+        }
+        
+        checkNotNull(decoder) { "Failed to create BitmapRegionDecoder" }
 
-        val height = imageBitmap.height
-        val width = imageBitmap.width
+        val height = decoder.height
+        val width = decoder.width
         val gap = if (hasMargins) 15.dpToPx else 0
         val result = Bitmap.createBitmap(width / 2, height * 2 + gap, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(result)
         canvas.drawColor(Color.BLACK)
         progressCallback?.invoke(98)
+        
+        val options = BitmapFactory.Options()
+        // Decode left half
+        val leftRect = Rect(0, 0, width / 2, height)
+        val leftBitmap = decoder.decodeRegion(leftRect, options)
+        
+        // Decode right half
+        val rightRect = Rect(width / 2, 0, width, height)
+        val rightBitmap = decoder.decodeRegion(rightRect, options)
+
         val upperPart = Rect(
             0,
             0,
@@ -379,28 +397,25 @@ object ImageUtil {
             result.width,
             result.height,
         )
+
         canvas.drawBitmap(
-            imageBitmap,
-            Rect(
-                if (!rightSideOnTop) 0 else width / 2,
-                0,
-                if (!rightSideOnTop) width / 2 else width,
-                height,
-            ),
+            if (!rightSideOnTop) leftBitmap else rightBitmap,
+            null,
             upperPart,
             null,
         )
         canvas.drawBitmap(
-            imageBitmap,
-            Rect(
-                if (rightSideOnTop) 0 else width / 2,
-                0,
-                if (rightSideOnTop) width / 2 else width,
-                height,
-            ),
+            if (rightSideOnTop) leftBitmap else rightBitmap,
+            null,
+
             lowerPart,
             null,
         )
+        
+        leftBitmap?.recycle()
+        rightBitmap?.recycle()
+        decoder.recycle()
+
         progressCallback?.invoke(99)
         val output = Buffer()
         result.compress(Bitmap.CompressFormat.JPEG, 100, output.outputStream())

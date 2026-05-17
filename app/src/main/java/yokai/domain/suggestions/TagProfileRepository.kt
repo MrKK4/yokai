@@ -22,6 +22,7 @@ interface TagProfileRepository {
      * understands. No-op if the mapping already exists.
      */
     suspend fun recordSourceVocabulary(rawTag: String, canonicalTag: String, sourceId: Long)
+    suspend fun recordSourceVocabularyBatch(entries: List<Triple<String, String, Long>>)
     suspend fun aliasOrProfileExists(key: String): Boolean
     suspend fun aliasCount(): Long
     suspend fun seedAliases(aliases: List<TagAlias>)

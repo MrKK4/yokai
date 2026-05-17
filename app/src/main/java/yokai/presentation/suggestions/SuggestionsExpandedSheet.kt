@@ -22,6 +22,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -29,7 +30,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import dev.icerock.moko.resources.compose.stringResource
 import eu.kanade.tachiyomi.domain.manga.models.Manga
+import yokai.i18n.MR
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -39,6 +42,7 @@ fun SuggestionsExpandedSheet(
     isLoading: Boolean,
     error: String?,
     onMangaClick: (Manga) -> Unit,
+    onRetry: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -71,7 +75,7 @@ fun SuggestionsExpandedSheet(
                 IconButton(onClick = onDismiss) {
                     Icon(
                         imageVector = Icons.Outlined.Close,
-                        contentDescription = "Close",
+                        contentDescription = stringResource(MR.strings.close),
                     )
                 }
             }
@@ -95,11 +99,16 @@ fun SuggestionsExpandedSheet(
                             .padding(24.dp),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Text(
-                            text = error,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.error,
-                        )
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                text = error,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                            TextButton(onClick = onRetry) {
+                                Text(text = stringResource(MR.strings.retry))
+                            }
+                        }
                     }
                 }
                 results.isEmpty() -> {
@@ -110,7 +119,7 @@ fun SuggestionsExpandedSheet(
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
-                            text = "No results found.",
+                            text = stringResource(MR.strings.no_results_found),
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -136,11 +145,7 @@ fun SuggestionsExpandedSheet(
                         ) { manga ->
                             SuggestionItem(
                                 manga = manga,
-                                onClick = {
-                                    onMangaClick(manga)
-                                    // Don't dismiss — presenter state is preserved while the
-                                    // controller is in the backstack. Sheet will reconstruct on return.
-                                },
+                                onClick = { onMangaClick(manga) },
                             )
                         }
                     }

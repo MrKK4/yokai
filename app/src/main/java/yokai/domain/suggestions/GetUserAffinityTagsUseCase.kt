@@ -25,6 +25,8 @@ class GetUserAffinityTagsUseCase(
         val histories = historyRepository.getAll()
         val chapters = chapterRepository.getAll()
         val blacklistedTags = preferences.suggestionsTagsBlacklist().get().normalizedTagKeys()
+        val historySignalCount = histories.size + chapters.count { it.read || it.last_page_read > 0 }
+        if (historySignalCount < SuggestionsConfig.COLD_START_HISTORY_THRESHOLD) return emptyList()
 
         // Small-library fast path: IDF is meaningless with very few titles,
         // so just return raw tag frequency ranking instead.
