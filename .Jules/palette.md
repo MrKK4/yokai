@@ -1,0 +1,1 @@
+## 2026-05-17 - Content Description on IconButtons\n**Learning:** Null content descriptions on interactive elements like IconButton hide the button entirely from screen readers, presenting an accessibility barrier.\n**Action:** Use localized string resources (via Moko MR) for the contentDescription in any interactive, icon-only Jetpack Compose UI component.
