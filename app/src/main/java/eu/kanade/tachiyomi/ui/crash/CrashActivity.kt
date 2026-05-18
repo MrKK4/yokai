@@ -21,6 +21,7 @@ import eu.kanade.tachiyomi.data.preference.PreferencesHelper
 import eu.kanade.tachiyomi.ui.main.MainActivity
 import eu.kanade.tachiyomi.util.CrashLogUtil
 import eu.kanade.tachiyomi.util.system.setThemeByPref
+import eu.kanade.tachiyomi.ui.security.SecureActivityDelegate
 import kotlinx.coroutines.launch
 import uy.kohesive.injekt.injectLazy
 import yokai.i18n.MR
@@ -34,6 +35,8 @@ class CrashActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setThemeByPref(preferences)
+
+        SecureActivityDelegate.setSecure(this)
 
         val exception = GlobalExceptionHandler.getThrowableFromIntent(intent)
         setContent {

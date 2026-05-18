@@ -1,0 +1,4 @@
+## 2024-05-18 - Missing FLAG_SECURE on CrashActivity
+**Vulnerability:** The `CrashActivity` which displays sensitive application crash logs (stack traces) and runs when an exception goes unhandled, did not set `FLAG_SECURE`. If the user had "Secure screen" enabled, it was not respected in the crash screen, potentially exposing application state and internal details in recent apps or screenshots.
+**Learning:** Activities launched independently of the main app flow (like from an UncaughtExceptionHandler) might bypass base activity security configurations. It's crucial to ensure that all activities, especially those handling errors or logs, apply the user's security preferences.
+**Prevention:** Apply security settings/flags like `SecureActivityDelegate.setSecure(this)` across all entry points and distinct activities in an application, not just the ones derived from a common base activity.
