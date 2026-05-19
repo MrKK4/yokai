@@ -3,7 +3,6 @@ package yokai.domain.suggestions
 import eu.kanade.tachiyomi.data.preference.PreferencesHelper
 import eu.kanade.tachiyomi.source.CatalogueSource
 import eu.kanade.tachiyomi.source.SourceManager
-import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.SManga
 import java.util.concurrent.ConcurrentHashMap
@@ -33,6 +32,7 @@ data class SuggestionCandidate(
 data class CandidateRetrievalResult(
     val section: PlannedSection,
     val candidates: List<SuggestionCandidate>,
+    val isSectionComplete: Boolean = false,
 )
 
 class CandidateRetriever(
@@ -94,24 +94,42 @@ class CandidateRetriever(
         coroutineScope {
             val requestGate = Semaphore(SuggestionsConfig.MAX_CONCURRENT_SOURCE_REQUESTS)
             val results = Channel<CandidateRetrievalResult>(Channel.UNLIMITED)
+            val pendingSections = java.util.concurrent.atomic.AtomicInteger(sections.size)
+
             sections.forEach { section ->
                 launch {
+                    val allCandidates = retrieveSection(
+                        section = section,
+                        pageOffset = pageOffset,
+                        requestGate = requestGate,
+                        onSourceComplete = { batch ->
+                            results.send(
+                                CandidateRetrievalResult(
+                                    section = section,
+                                    candidates = batch,
+                                    isSectionComplete = false,
+                                ),
+                            )
+                        },
+                    )
+
+                    // Signal section completion
                     results.send(
                         CandidateRetrievalResult(
                             section = section,
-                            candidates = retrieveSection(
-                                section = section,
-                                pageOffset = pageOffset,
-                                requestGate = requestGate,
-                            ),
+                            candidates = allCandidates,
+                            isSectionComplete = true,
                         ),
                     )
+
+                    if (pendingSections.decrementAndGet() == 0) {
+                        results.close()
+                    }
                 }
             }
 
-            repeat(sections.size) {
-                val result = results.receive()
-                if (result.section.type == SectionType.DISCOVERY) {
+            for (result in results) {
+                if (result.section.type == SectionType.DISCOVERY && result.isSectionComplete) {
                     val discoverySourceIds = result.candidates
                         .map { it.sourceId.toString() }
                         .toSet()
@@ -121,7 +139,6 @@ class CandidateRetriever(
                 }
                 onResult(result)
             }
-            results.close()
         }
     }
 
@@ -129,6 +146,7 @@ class CandidateRetriever(
         section: PlannedSection,
         pageOffset: Int,
         requestGate: Semaphore,
+        onSourceComplete: (suspend (List<SuggestionCandidate>) -> Unit)? = null,
     ): List<SuggestionCandidate> {
         if (section.isColdStartDiscovery()) {
             return retrieveColdStartDiscoverySection(section, requestGate)
@@ -137,8 +155,13 @@ class CandidateRetriever(
         val sources = activeSources(discovery = section.type == SectionType.DISCOVERY)
         if (sources.isEmpty()) return emptyList()
 
-        suspend fun fetchPage(page: Int, countBySource: ConcurrentHashMap<Long, AtomicInteger>): List<SuggestionCandidate> {
+        suspend fun fetchPageProgressive(
+            page: Int,
+            countBySource: ConcurrentHashMap<Long, AtomicInteger>,
+            emit: (suspend (List<SuggestionCandidate>) -> Unit)?,
+        ): List<SuggestionCandidate> {
             return coroutineScope {
+                val allCandidates = mutableListOf<SuggestionCandidate>()
                 when (section.type) {
                     SectionType.DISCOVERY ->
                         sources.mapIndexed { sourceIndex, source ->
@@ -148,19 +171,22 @@ class CandidateRetriever(
                         sources.mapIndexed { sourceIndex, source ->
                             async { fetchSearchSource(section, source, sourceIndex, page, requestGate, countBySource) }
                         }
-                }.awaitAll().flatten()
+                }.forEach { job ->
+                    val batch = job.await()
+                    if (batch.isNotEmpty() && emit != null) {
+                        emit(batch)
+                    }
+                    allCandidates.addAll(batch)
+                }
+                allCandidates
             }
         }
 
         val countBySource = ConcurrentHashMap<Long, AtomicInteger>()
         val page = pageOffset.coerceAtLeast(1)
-        val candidates = fetchPage(page, countBySource).toMutableList()
+        val candidates = fetchPageProgressive(page, countBySource, onSourceComplete).toMutableList()
 
         // ── Source-rotation backfill ───────────────────────────────────────────
-        // If the initial concurrent fetch did not reach the section minimum, identify
-        // which sources returned 0 results (dry sources with unused quota) and fire
-        // sequential top-up requests to the productive sources, each receiving a cap
-        // equal to the remaining shortfall, until the minimum is met.
         if (candidates.size < SuggestionsConfig.MIN_RESULTS_PER_SECTION) {
             val drySources = sources.filter { s ->
                 (countBySource[s.id]?.get() ?: 0) == 0
@@ -169,8 +195,6 @@ class CandidateRetriever(
             for (source in backfillSources) {
                 val shortfall = SuggestionsConfig.MIN_RESULTS_PER_SECTION - candidates.size
                 if (shortfall <= 0) break
-                // Temporarily reduce the counter so cappedCandidates grants an extra
-                // `shortfall` items on top of what this source already contributed.
                 val counter = countBySource.getOrPut(source.id) { AtomicInteger(0) }
                 val savedCount = counter.get()
                 counter.set((savedCount - shortfall).coerceAtLeast(0))
@@ -183,16 +207,18 @@ class CandidateRetriever(
                     )
                 }
                 candidates.addAll(topUp)
-                // Restore counter to the true total so later cap checks remain accurate.
+                if (topUp.isNotEmpty() && onSourceComplete != null) {
+                    onSourceComplete(topUp)
+                }
                 counter.set(savedCount + topUp.size)
             }
         }
         // ──────────────────────────────────────────────────────────────────────
 
-        // Page-2 backstop: if source rotation still couldn't fill the minimum, extend
-        // to the next page from all sources (uses existing per-source caps).
+        // Page-2 backstop
         if (candidates.size < SuggestionsConfig.MIN_RESULTS_PER_SECTION) {
-            candidates.addAll(fetchPage(page + 1, countBySource))
+            val page2Candidates = fetchPageProgressive(page + 1, countBySource, onSourceComplete)
+            candidates.addAll(page2Candidates)
         }
 
         return candidates
@@ -248,8 +274,8 @@ class CandidateRetriever(
         requestGate: Semaphore,
         countBySource: ConcurrentHashMap<Long, AtomicInteger>,
     ): List<SuggestionCandidate> {
-        val pageResult = sourceResult(sourceId = source.id) {
-            requestGate.withPermit {
+        val pageResult = requestGate.withPermit {
+            sourceResult(sourceId = source.id) {
                 when (section.sortOrder) {
                     SuggestionSortOrder.Latest ->
                         if (source.supportsLatest) source.getLatestUpdates(page) else source.getPopularManga(page)
@@ -267,8 +293,8 @@ class CandidateRetriever(
      * Fetch candidates for a tag section from a single source.
      *
      * Strategy (Phase B):
-     * 1. Try to inject the genre into the source's native filter checkboxes via
-     *    [injectGenreFilter]. If a match is found, call `getSearchManga(query="", filters)`.
+     * 1. Try to inject the tag into the source's native tag/genre filters via
+     *    [tryIncludeTagFilter]. If a match is found, call `getSearchManga(query="", filters)`.
      *    This uses the source's exact internal genre ID — no vocabulary mismatch possible.
      * 2. Fallback: look up the exact raw string this source has used before for the
      *    canonical tag via [TagProfileRepository.getExactTermForSource].
@@ -286,39 +312,42 @@ class CandidateRetriever(
     ): List<SuggestionCandidate> {
         val canonicalTag = section.canonicalTag
 
-        // ── Phase A: genre-filter injection ──────────────────────────────────────
+        // ── Phase A: tag/genre filter injection ──────────────────────────────────
         val injectedFilters = canonicalTag?.let { tag ->
             sourceResult(sourceId = source.id) {
-                source.injectGenreFilter(tag, section.sortOrder)
+                source.tryIncludeTagFilter(tag, tagCanonicalizer)
             }
         }
 
         val pageResult = if (injectedFilters != null) {
-            // SUCCESS: source has a native genre filter for this tag — empty query, filter checked.
+            // SUCCESS: source has a native tag/genre filter for this tag - empty query, filter checked.
             debugLog.add(
                 LogType.SECTION_SELECTED,
-                "Source ${source.id} (${source.name}): genre filter injected for '$canonicalTag'",
+                "Source ${source.id} (${source.name}): tag filter injected for '$canonicalTag'",
             )
-            sourceResult(sourceId = source.id) {
-                requestGate.withPermit {
+            requestGate.withPermit {
+                sourceResult(sourceId = source.id) {
                     source.getSearchManga(page, query = "", injectedFilters)
                 }
             }
         } else {
-            // FALLBACK: no native genre checkbox — look up source-specific vocabulary.
+            // FALLBACK: no native tag checkbox - use source vocabulary, then aliases, then canonical key.
             val exactTerm = canonicalTag?.let {
                 tagProfileRepository.getExactTermForSource(it, source.id)
             }
-            val query = exactTerm ?: canonicalTag ?: section.searchTerms.firstOrNull() ?: return emptyList()
+            val query = exactTerm
+                ?: section.searchTerms.firstOrNull()
+                ?: canonicalTag
+                ?: return emptyList()
             if (exactTerm == null && canonicalTag != null) {
                 debugLog.add(
                     LogType.SORT_FALLBACK,
-                    "Source ${source.id} (${source.name}): no genre filter for '$canonicalTag' — text search with '$query'",
+                    "Source ${source.id} (${source.name}): no tag filter for '$canonicalTag' - text search with '$query'",
                 )
             }
-            sourceResult(sourceId = source.id) {
-                requestGate.withPermit {
-                    source.getSearchManga(page, query, source.searchFiltersFor(section.sortOrder))
+            requestGate.withPermit {
+                sourceResult(sourceId = source.id) {
+                    source.getSearchManga(page, query, freshFilterList(source))
                 }
             }
         } ?: return emptyList()
@@ -328,7 +357,7 @@ class CandidateRetriever(
             section,
             source.id,
             sourceIndex,
-            searchTerm = injectedFilters?.let { "" } ?: (canonicalTag ?: section.searchTerms.firstOrNull()),
+            searchTerm = injectedFilters?.let { "" } ?: (section.searchTerms.firstOrNull() ?: canonicalTag),
             pageResult.mangas,
             countBySource,
         )
@@ -370,71 +399,6 @@ class CandidateRetriever(
         }
     }
 
-    /**
-     * Phase A: attempt to programmatically "check the box" for [canonicalTag] in the
-     * source's native filter list. Returns the modified [FilterList] if a match was
-     * found, or `null` if this source doesn't expose a genre filter for this tag.
-     *
-     * Handles all three filter types used by Tachiyomi/Yokai extensions:
-     * - `Filter.CheckBox` — binary include/exclude checkbox
-     * - `Filter.TriState` — include / exclude / ignore (most common for mature extensions)
-     * - `Filter.Select`   — dropdown selector (less common; matches on option name)
-     */
-    private fun CatalogueSource.injectGenreFilter(
-        canonicalTag: String,
-        sortOrder: SuggestionSortOrder,
-    ): FilterList? {
-        val filters = freshFilterList(this)
-        var filterInjected = false
-
-        // Apply sort order first (existing behaviour).
-        val sortFilter = filters.filterIsInstance<Filter.Sort>().firstOrNull()
-        if (sortFilter != null) {
-            val sortIndex = sortFilter.values.indexOfFirst { it.matchesSortOrder(sortOrder) }
-            if (sortIndex >= 0) {
-                sortFilter.state = Filter.Sort.Selection(index = sortIndex, ascending = false)
-            }
-        }
-
-        // Scan for genre filters and check the matching box.
-        filters.forEach { filter ->
-            when (filter) {
-                is Filter.Group<*> -> {
-                    filter.state.forEach { item ->
-                        val matchedTag = when (item) {
-                            is Filter.CheckBox -> {
-                                if (tagCanonicalizer.normalizeToLookupKey(item.name) == canonicalTag) {
-                                    item.state = true
-                                    true
-                                } else false
-                            }
-                            is Filter.TriState -> {
-                                if (tagCanonicalizer.normalizeToLookupKey(item.name) == canonicalTag) {
-                                    item.state = Filter.TriState.STATE_INCLUDE
-                                    true
-                                } else false
-                            }
-                            else -> false
-                        }
-                        if (matchedTag) filterInjected = true
-                    }
-                }
-                is Filter.Select<*> -> {
-                    val matchIndex = filter.values.indexOfFirst { value ->
-                        tagCanonicalizer.normalizeToLookupKey(value.toString()) == canonicalTag
-                    }
-                    if (matchIndex >= 0) {
-                        filter.state = matchIndex
-                        filterInjected = true
-                    }
-                }
-                else -> { /* Sort and Header — already handled above */ }
-            }
-        }
-
-        return if (filterInjected) filters else null
-    }
-
     private fun cappedCandidates(
         section: PlannedSection,
         sourceId: Long,
@@ -474,13 +438,14 @@ class CandidateRetriever(
     }
 
     private fun activeSources(discovery: Boolean): List<CatalogueSource> =
-        activeNetworkSources(discovery)
+        activeNetworkSources(discovery, freshSourceFirst = !discovery)
 
-    private fun activeNetworkSources(discovery: Boolean = false): List<CatalogueSource> =
+    private fun activeNetworkSources(discovery: Boolean = false, freshSourceFirst: Boolean = false): List<CatalogueSource> =
         SuggestionSourceSelector.activeNetworkSources(
             sources = sourceManager.getCatalogueSources(),
             selection = sourceSelection(),
             discovery = discovery,
+            freshSourceFirst = freshSourceFirst,
         )
 
     private fun sourceSelection(): SuggestionSourceSelection =
@@ -489,28 +454,8 @@ class CandidateRetriever(
             hiddenSourceIds = preferences.hiddenSources().get(),
             pinnedSourceIds = preferences.pinnedCatalogues().get(),
             recentSourceIds = preferences.recentlyUsedSourceIds().get(),
+            lastFetchedSourceIds = preferences.lastFetchedSuggestionsSourceIds().get(),
         )
-
-    /** Sort-filter helper reused in the text-search fallback path. */
-    private fun CatalogueSource.searchFiltersFor(sortOrder: SuggestionSortOrder): FilterList {
-        val filters = freshFilterList(this)
-        val sortFilter = filters.filterIsInstance<Filter.Sort>().firstOrNull() ?: return filters
-        val sortIndex = sortFilter.values.indexOfFirst { value -> value.matchesSortOrder(sortOrder) }
-        if (sortIndex >= 0) {
-            sortFilter.state = Filter.Sort.Selection(index = sortIndex, ascending = false)
-        } else if (sortOrder == SuggestionSortOrder.Latest) {
-            debugLog.add(LogType.SORT_FALLBACK, "Source $id does not expose latest-by-tag sort - fell back to default search order")
-        }
-        return filters
-    }
-
-    private fun String.matchesSortOrder(sortOrder: SuggestionSortOrder): Boolean {
-        val value = lowercase().trim()
-        return when (sortOrder) {
-            SuggestionSortOrder.Latest -> LATEST_SORT_KEYWORDS.any { it in value }
-            SuggestionSortOrder.Popular -> POPULAR_SORT_KEYWORDS.any { it in value }
-        }
-    }
 
     private suspend fun <T> sourceResult(sourceId: Long? = null, block: suspend () -> T): T? =
         try {
@@ -539,8 +484,4 @@ class CandidateRetriever(
             null
         }
 
-    private companion object {
-        private val LATEST_SORT_KEYWORDS = setOf("latest", "recent", "update", "updated", "uploaded", "date", "new")
-        private val POPULAR_SORT_KEYWORDS = setOf("popular", "views", "view", "follow", "follows", "rating", "score", "trend", "hot")
-    }
 }

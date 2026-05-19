@@ -71,6 +71,7 @@ class SuggestionsWorker(
                 val suggestions = feedAggregator.fetch(suggestionQueries)
                 if (suggestions.isEmpty()) return@tryRun retryOrFailure()
 
+                preferences.suggestionsResultVersion().set(SuggestionsConfig.RESULT_VERSION_V1)
                 suggestionsRepository.replaceAll(suggestions)
                 Result.success()
             } ?: Result.success()
@@ -103,16 +104,16 @@ class SuggestionsWorker(
         plannedSectionRepository.replaceAll(plannedSections)
 
         val existingSuggestions = suggestionsRepository.getSuggestions()
-        val loadedReasons = existingSuggestions.map { it.reason }.toSet()
-        val plannedReasons = plannedSections.map { it.displayReason }.toSet()
-        val hasRetainedSuggestions = existingSuggestions.any { it.reason in plannedReasons }
-        (loadedReasons - plannedReasons).forEach { staleReason ->
-            suggestionsRepository.deleteByReason(staleReason)
+        val loadedSectionKeys = existingSuggestions.map { it.sectionKey }.toSet()
+        val plannedSectionKeys = plannedSections.map { it.sectionKey }.toSet()
+        val hasRetainedSuggestions = existingSuggestions.any { it.sectionKey in plannedSectionKeys }
+        (loadedSectionKeys - plannedSectionKeys).forEach { staleSectionKey ->
+            suggestionsRepository.deleteBySectionKey(staleSectionKey)
         }
 
         val nextMissingIndex = SectionBatcher.contiguousLoadedPrefixSize(
             plannedSections = plannedSections,
-            loadedReasons = loadedReasons,
+            loadedSectionKeys = loadedSectionKeys,
         )
         val rankingContext = suggestionRanker.buildRankingContext()
         val globalSeenKeys = shownMangaHistoryRepository.getAllKeys()
@@ -139,12 +140,12 @@ class SuggestionsWorker(
                 fetchedAny = true
                 if (committedRefreshId == null) {
                     committedRefreshId = preferences.suggestionsTotalRefreshCount().get() + 1L
-                    preferences.suggestionsTotalRefreshCount().set(committedRefreshId!!.toInt())
+                    preferences.suggestionsTotalRefreshCount().set(committedRefreshId.toInt())
                 }
                 persistV2Batch(
                     suggestions = suggestions,
                     sectionsToFetch = sectionsToFetch,
-                    refreshId = committedRefreshId!!,
+                    refreshId = committedRefreshId,
                     now = now,
                 )
             }
@@ -162,18 +163,18 @@ class SuggestionsWorker(
         refreshId: Long,
         now: Long,
     ) {
+        preferences.suggestionsResultVersion().set(SuggestionsConfig.RESULT_VERSION_V2)
         suggestions
-            .groupBy { it.reason }
-            .forEach { (reason, sectionSuggestions) ->
-                suggestionsRepository.deleteByReason(reason)
+            .groupBy { it.sectionKey }
+            .forEach { (sectionKey, sectionSuggestions) ->
+                suggestionsRepository.deleteBySectionKey(sectionKey)
                 suggestionsRepository.insertSuggestions(sectionSuggestions)
             }
         shownMangaHistoryRepository.insertAll(suggestions.map { it.source to it.url })
-        val sectionKeyByReason = sectionsToFetch.associate { it.displayReason to it.sectionKey }
         suggestionSeenLogRepository.insertSeenBatch(
             suggestions.map { suggestion ->
                 SeenEntry(
-                    sectionKey = sectionKeyByReason[suggestion.reason] ?: suggestion.reason.lowercase().trim(),
+                    sectionKey = suggestion.sectionKey,
                     mangaKey = "${suggestion.source}:${suggestion.url}",
                     shownAt = now,
                     refreshId = refreshId,

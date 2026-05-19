@@ -736,12 +736,14 @@ class RecentsController(bundle: Bundle? = null) :
         activityBinding?.mainTabs?.run { selectTab(getTabAt(viewType.mainValue)) }
         (activity as? MainActivity)?.reEnableBackPressedCallBack()
         updateTitleAndMenu()
+        activity?.invalidateOptionsMenu()
     }
 
     private fun setViewType(viewType: RecentsViewType) {
         if (viewType != presenter.viewType) {
             presenter.toggleGroupRecents(viewType)
             updateTitleAndMenu()
+            activity?.invalidateOptionsMenu()
         }
     }
 
@@ -832,6 +834,17 @@ class RecentsController(bundle: Bundle? = null) :
         }
     }
 
+    fun confirmClearHistory() {
+        val activity = activity ?: return
+        activity.materialAlertDialog()
+            .setMessage(activity.getString(MR.strings.clear_history_confirmation))
+            .setPositiveButton(MR.strings.clear) { _, _ ->
+                presenter.deleteAllHistory()
+            }
+            .setNegativeButton(AR.string.cancel, null)
+            .show()
+    }
+
     override fun markAsRead(position: Int) {
         val preferences = presenter.preferences
         val item = adapter.getItem(position) as? RecentMangaItem ?: return
@@ -905,6 +918,11 @@ class RecentsController(bundle: Bundle? = null) :
             }
             true
         }
+    }
+
+    override fun onPrepareOptionsMenu(menu: Menu) {
+        super.onPrepareOptionsMenu(menu)
+        menu.findItem(R.id.action_clear_history)?.isVisible = presenter.viewType.isHistory
     }
 
     override fun onChangeStarted(handler: ControllerChangeHandler, type: ControllerChangeType) {
@@ -995,16 +1013,21 @@ class RecentsController(bundle: Bundle? = null) :
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
-        when (item.itemId) {
+        return when (item.itemId) {
             R.id.display_options -> {
                 displaySheet = TabbedRecentsOptionsSheet(
                     this,
                     (presenter.viewType.mainValue - 1).coerceIn(0, 2),
                 )
                 displaySheet?.show()
+                true
             }
+            R.id.action_clear_history -> {
+                confirmClearHistory()
+                true
+            }
+            else -> super.onOptionsItemSelected(item)
         }
-        return super.onOptionsItemSelected(item)
     }
 
     override fun noMoreLoad(newItemsSize: Int) {}

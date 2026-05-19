@@ -65,9 +65,9 @@ import yokai.domain.track.interactor.InsertTrack
 
 fun domainModule() = module {
     factory { TrustExtension(get(), get()) }
-    factory { GetUserAffinityTagsUseCase(get(), get(), get(), get()) }
+    factory { GetUserAffinityTagsUseCase(get(), get(), get(), get(), get()) }
     factory { GetUserSuggestionQueriesUseCase(get(), get()) }
-    factory { FeedAggregator(get(), get(), get()) }
+    factory { FeedAggregator(get(), get(), get(), get(), get()) }
     single { SuggestionsDebugLog() }
     single { SessionContext() }
     single { TagCanonicalizer(get()) }

@@ -47,7 +47,7 @@ class SectionPlanner(
         now: Long,
         coldStart: Boolean = false,
     ): PlannedSection {
-        val reason = when (sortOrder) {
+        val displayReason = when (sortOrder) {
             SuggestionSortOrder.Latest -> "Latest from your sources"
             SuggestionSortOrder.Popular -> "Popular from your sources"
         }
@@ -55,7 +55,7 @@ class SectionPlanner(
             sectionKey = if (coldStart) COLD_START_DISCOVERY_SECTION_KEY else "discovery",
             type = SectionType.DISCOVERY,
             canonicalTag = null,
-            displayReason = reason,
+            displayReason = displayReason,
             searchTerms = emptyList(),
             sortOrder = sortOrder,
             plannedAt = now,

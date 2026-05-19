@@ -8,6 +8,7 @@ data class SuggestionSourceSelection(
     val hiddenSourceIds: Set<String>,
     val pinnedSourceIds: Set<String>,
     val recentSourceIds: Set<String>,
+    val lastFetchedSourceIds: Set<String> = emptySet(),
 )
 
 object SuggestionSourceSelector {
@@ -16,27 +17,28 @@ object SuggestionSourceSelector {
         selection: SuggestionSourceSelection,
         discovery: Boolean,
         maxSources: Int = SuggestionsConfig.MAX_ACTIVE_SOURCES,
+        freshSourceFirst: Boolean = false,
     ): List<CatalogueSource> {
         val enabledSources = sources
             .filterNot { source -> source.id == LocalSource.ID }
-            .filter { source -> source.lang in selection.enabledLanguages }
             .filterNot { source -> source.id.toString() in selection.hiddenSourceIds }
 
-        val sourcePool = if (discovery) {
-            enabledSources.filter { it.id.toString() in selection.pinnedSourceIds }
-                .takeIf { it.isNotEmpty() }
-                ?: enabledSources
-        } else {
-            enabledSources
-        }
-
-        return sourcePool
+        return enabledSources
             .sortedWith(
-                compareBy<CatalogueSource>(
-                    { it.id.toString() !in selection.pinnedSourceIds },
-                    { it.id.toString() !in selection.recentSourceIds },
-                    { "(${it.lang}) ${it.name}" },
-                ),
+                if (freshSourceFirst) {
+                    compareBy<CatalogueSource>(
+                        { it.id.toString() in selection.lastFetchedSourceIds },
+                        { it.id.toString() !in selection.pinnedSourceIds },
+                        { it.id.toString() in selection.recentSourceIds },
+                        { "(${it.lang}) ${it.name}" },
+                    )
+                } else {
+                    compareBy<CatalogueSource>(
+                        { it.id.toString() !in selection.pinnedSourceIds },
+                        { it.id.toString() in selection.recentSourceIds },
+                        { "(${it.lang}) ${it.name}" },
+                    )
+                },
             )
             .take(maxSources)
     }

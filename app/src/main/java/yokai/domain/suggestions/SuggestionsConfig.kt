@@ -18,13 +18,17 @@ object SuggestionsConfig {
     const val LOAD_MORE_SECTION_THRESHOLD = 2
 
     // ── Per-section result caps ────────────────────────────────────────────────
-    // Raised so a section reliably shows ≥10 items (12 max after dedup/filter).
-    const val MAX_RESULTS_PER_SECTION = 12
-    const val MAX_ACTIVE_SOURCES = MAX_RESULTS_PER_SECTION
-    const val MAX_CONCURRENT_SOURCE_REQUESTS = 6
-    const val SOURCE_REQUEST_TIMEOUT_MS = 15_000L
-    const val MAX_CANDIDATES_PER_SECTION = 50
-    const val MAX_PER_SOURCE_FETCH = 12
+    // Normal sections stay compact; expanded "view more" sheets carry deeper lists.
+    const val MAX_RESULTS_PER_SECTION = 9
+    const val EXPANDED_MAX_RESULTS = 40
+    const val EXPANDED_PAGE_SIZE = 20
+    const val EXPANDED_SOURCE_BATCH_SIZE = 8
+    const val MAX_ACTIVE_SOURCES = Int.MAX_VALUE
+    const val MAX_CONCURRENT_SOURCE_REQUESTS = 8
+    const val SOURCE_REQUEST_TIMEOUT_MS = 30_000L
+    const val MAX_CANDIDATES_PER_SECTION = 500
+    const val MAX_PER_SOURCE_FETCH = 4
+    const val EXPANDED_MAX_PER_SOURCE_FETCH = 5
     const val COLD_START_HISTORY_THRESHOLD = 12
     const val COLD_START_SOURCE_PAGE_LIMIT = 2
     const val COLD_START_SOURCE_CHUNK_SIZE = 4
@@ -37,7 +41,7 @@ object SuggestionsConfig {
     /** Minimum acceptable results per section. If a section yields fewer than this
      *  after all sources + dedup + filters, it is logged as SECTION_THIN and the
      *  seen-log filter is relaxed for a second ranking pass. */
-    const val MIN_RESULTS_PER_SECTION = 10
+    const val MIN_RESULTS_PER_SECTION = 5
     // ──────────────────────────────────────────────────────────────────────────
 
     const val HARD_REFRESH_NOVELTY_QUOTA = 0.70
@@ -47,4 +51,8 @@ object SuggestionsConfig {
     const val SEEN_LOG_TTL_MS = 24 * 60 * 60 * 1000L
 
     const val DEBUG_LOG_MAX_ENTRIES = 500
+
+    const val RESULT_VERSION_UNKNOWN = 0
+    const val RESULT_VERSION_V1 = 1
+    const val RESULT_VERSION_V2 = 2
 }

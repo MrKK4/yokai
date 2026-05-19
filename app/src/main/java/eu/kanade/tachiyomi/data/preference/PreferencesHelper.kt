@@ -215,6 +215,8 @@ class PreferencesHelper(val context: Context, val preferenceStore: PreferenceSto
 
     fun suggestionsV2Enabled() = preferenceStore.getBoolean("suggestions_v2_enabled", true)
 
+    fun suggestionsResultVersion() = preferenceStore.getInt("suggestions_result_version", 0)
+
     fun suggestionsTotalRefreshCount() = preferenceStore.getInt("suggestions_total_refresh_count", 0)
 
     fun suggestionsEmptySectionCount() = preferenceStore.getInt("suggestions_empty_section_count", 0)
@@ -229,6 +231,8 @@ class PreferencesHelper(val context: Context, val preferenceStore: PreferenceSto
     fun usedSuggestionTags() = preferenceStore.getStringSet("used_suggestion_tags", emptySet())
 
     fun recentlyUsedSourceIds() = preferenceStore.getStringSet("recently_used_source_ids", emptySet())
+
+    fun lastFetchedSuggestionsSourceIds() = preferenceStore.getStringSet("last_fetched_suggestions_source_ids", emptySet())
 
     fun removeAfterReadSlots() = preferenceStore.getInt(Keys.removeAfterReadSlots, -1)
 

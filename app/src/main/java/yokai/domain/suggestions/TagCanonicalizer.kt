@@ -24,11 +24,7 @@ class TagCanonicalizer(
         }
 
         val registryMatch = TagRegistry.find(rawKey)
-        val alias = repository.findAlias(rawKey, sourceId)
-        val canonicalKey = alias?.canonicalTag
-            ?: registryMatch?.canonicalKey
-            ?: depluralizeIfKnown(rawKey)
-            ?: rawKey
+        val canonicalKey = resolveCanonicalKey(rawKey, sourceId, registryMatch)
 
         repository.recordVariant(canonicalKey, displayName)
         val bestDisplayName = repository.bestDisplayName(canonicalKey)
@@ -42,6 +38,15 @@ class TagCanonicalizer(
         )
     }
 
+    suspend fun canonicalizeToLookupKey(rawTag: String, sourceId: Long? = null): String {
+        ensureDefaultAliases()
+
+        val rawKey = normalizeToLookupKey(rawTag)
+        if (rawKey.isBlank()) return ""
+
+        return resolveCanonicalKey(rawKey, sourceId, TagRegistry.find(rawKey))
+    }
+
     fun normalizeToLookupKey(rawTag: String): String {
         val normalized = Normalizer.normalize(rawTag.trim(), Normalizer.Form.NFKC)
             .replace(DECORATIVE_SYMBOLS, "")
@@ -53,6 +58,18 @@ class TagCanonicalizer(
             .lowercase(Locale.US)
 
         return normalized
+    }
+
+    private suspend fun resolveCanonicalKey(
+        rawKey: String,
+        sourceId: Long?,
+        registryMatch: TagPattern?,
+    ): String {
+        val alias = repository.findAlias(rawKey, sourceId)
+        return alias?.canonicalTag
+            ?: registryMatch?.canonicalKey
+            ?: depluralizeIfKnown(rawKey)
+            ?: rawKey
     }
 
     private suspend fun depluralizeIfKnown(rawKey: String): String? {

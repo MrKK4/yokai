@@ -51,6 +51,7 @@ class SuggestionRanker(
         globalSeenKeys: Set<String>,
         sectionSeenKeys: Map<String, Set<String>>,
         sessionContext: SessionContext,
+        maxResults: Int = SuggestionsConfig.MAX_RESULTS_PER_SECTION,
     ): List<SuggestedManga> {
         val recentSessionTags = sessionContext.getRecentTags()
         val rankedBySection = retrievalResults.flatMap { result ->
@@ -63,9 +64,30 @@ class SuggestionRanker(
                 profiles = context.profiles,
                 blacklistedTags = context.blacklistedTags,
                 recentSessionTags = recentSessionTags,
+                maxResults = maxResults,
             )
         }
         return rankedBySection.mapIndexed { index, suggestion -> suggestion.copy(displayRank = index.toLong()) }
+    }
+
+    /**
+     * Rank expanded "view more" results fetched by [FeedAggregator].
+     * Applies title dedup (best score wins) and source diversity (round-robin).
+     * Library/seen-URL/blacklisted-tag filtering is already done by FeedAggregator.
+     */
+    fun rankExpandedResults(
+        results: List<SuggestedManga>,
+        maxResults: Int = SuggestionsConfig.EXPANDED_MAX_RESULTS,
+    ): List<SuggestedManga> {
+        val bestByTitle = linkedMapOf<String, SuggestedManga>()
+        for (manga in results) {
+            val titleKey = manga.title.normalizedTitle()
+            val existing = bestByTitle[titleKey]
+            if (existing == null || manga.relevanceScore > existing.relevanceScore) {
+                bestByTitle[titleKey] = manga
+            }
+        }
+        return bestByTitle.values.roundRobinBySourceSuggested(maxResults)
     }
 
     /** Legacy overload — fetches context from DB on every call. Use [rankWithContext] in batch flows. */
@@ -74,9 +96,10 @@ class SuggestionRanker(
         globalSeenKeys: Set<String>,
         sectionSeenKeys: Map<String, Set<String>>,
         sessionContext: SessionContext,
+        maxResults: Int = SuggestionsConfig.MAX_RESULTS_PER_SECTION,
     ): List<SuggestedManga> {
         val context = buildRankingContext()
-        return rankWithContext(retrievalResults, context, globalSeenKeys, sectionSeenKeys, sessionContext)
+        return rankWithContext(retrievalResults, context, globalSeenKeys, sectionSeenKeys, sessionContext, maxResults)
     }
 
     private suspend fun rankSection(
@@ -88,6 +111,7 @@ class SuggestionRanker(
         profiles: Map<String, TagProfile>,
         blacklistedTags: Set<String>,
         recentSessionTags: Set<String>,
+        maxResults: Int = SuggestionsConfig.MAX_RESULTS_PER_SECTION,
     ): List<SuggestedManga> {
 
         val coldStartDiscovery = result.section.isColdStartDiscovery()
@@ -136,18 +160,18 @@ class SuggestionRanker(
         }
 
         return withContext(Dispatchers.Default) {
-            val maxResults = if (coldStartDiscovery) {
+            val effectiveMax = if (coldStartDiscovery) {
                 SuggestionsConfig.COLD_START_MAX_RESULTS
             } else {
-                SuggestionsConfig.MAX_RESULTS_PER_SECTION
+                maxResults
             }
             val selected = if (coldStartDiscovery) {
                 bestByTitle.values
                     .sortedByDescending { it.score }
                     .capScoredBySource(SuggestionsConfig.COLD_START_MAX_PER_SOURCE_FETCH)
-                    .take(maxResults)
+                    .take(effectiveMax)
             } else {
-                bestByTitle.values.roundRobinBySource(maxResults)
+                bestByTitle.values.roundRobinBySource(effectiveMax)
             }
             selected
                 .map { it.toSuggestedManga() }
@@ -216,7 +240,7 @@ class SuggestionRanker(
                 url = candidate.manga.url,
                 title = candidate.manga.title,
                 thumbnailUrl = candidate.manga.thumbnail_url,
-                reason = candidate.section.displayReason,
+                sectionKey = candidate.section.sectionKey,
                 relevanceScore = score,
             )
     }
@@ -235,33 +259,23 @@ class SuggestionRanker(
     }
 
     private fun Collection<ScoredCandidate>.roundRobinBySource(maxResults: Int): List<ScoredCandidate> {
-        val sourceBuckets = groupBy { it.candidate.sourceId }
-            .values
-            .map { sourceItems ->
-                sourceItems
-                    .sortedByDescending { it.score }
-                    .toMutableList()
-            }
-            .sortedWith(
-                compareBy<MutableList<ScoredCandidate>>(
-                    { it.firstOrNull()?.candidate?.sourceIndex ?: Int.MAX_VALUE },
-                    { it.firstOrNull()?.candidate?.sourceId ?: Long.MAX_VALUE },
-                ),
-            )
+        return SourceDiversity.roundRobinBySource(
+            items = this,
+            maxResults = maxResults,
+            sourceId = { it.candidate.sourceId },
+            sourceIndex = { it.candidate.sourceIndex },
+            score = { it.score },
+        )
+    }
 
-        val selected = mutableListOf<ScoredCandidate>()
-        while (selected.size < maxResults) {
-            var addedInPass = false
-            for (bucket in sourceBuckets) {
-                if (selected.size >= maxResults) break
-                if (bucket.isNotEmpty()) {
-                    selected += bucket.removeAt(0)
-                    addedInPass = true
-                }
-            }
-            if (!addedInPass) break
-        }
-        return selected
+    private fun Collection<SuggestedManga>.roundRobinBySourceSuggested(maxResults: Int): List<SuggestedManga> {
+        return SourceDiversity.roundRobinBySource(
+            items = this,
+            maxResults = maxResults,
+            sourceId = { it.source },
+            sourceIndex = { 0 }, // no source index available; all treated equally
+            score = { it.relevanceScore },
+        )
     }
 
     private companion object {

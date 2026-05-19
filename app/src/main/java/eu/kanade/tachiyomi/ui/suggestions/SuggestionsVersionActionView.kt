@@ -34,16 +34,16 @@ class SuggestionsVersionActionView @JvmOverloads constructor(
         minWidth = VERSION_BUTTON_SIZE
         minHeight = VERSION_BUTTON_SIZE
         layoutParams = ViewGroup.LayoutParams(VERSION_BUTTON_SIZE, VERSION_BUTTON_SIZE)
-        ViewCompat.setTooltipText(this, "Switch between For you and Surprise me suggestions")
+        ViewCompat.setTooltipText(this, "Switch between V1 and V2 suggestions")
     }
 
     fun setVersion(isV2Enabled: Boolean) {
-        text = if (isV2Enabled) "4U" else "!"
-        textSize = 10f
+        text = if (isV2Enabled) "V2" else "V1"
+        textSize = 11f
         contentDescription = if (isV2Enabled) {
-            "For you suggestions selected. Tap to switch to surprise me."
+            "V2 suggestions selected. Tap to switch to V1."
         } else {
-            "Surprise me suggestions selected. Tap to switch to for you."
+            "V1 suggestions selected. Tap to switch to V2."
         }
 
         val actionTint = context.getResourceColor(R.attr.actionBarTintColor)

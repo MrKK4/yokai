@@ -20,7 +20,7 @@ class SuggestionsRepositoryImpl(private val handler: DatabaseHandler) : Suggesti
                     url = it.url,
                     title = it.title,
                     thumbnailUrl = it.thumbnailUrl,
-                    reason = it.reason,
+                    sectionKey = it.sectionKey,
                     relevanceScore = it.relevanceScore,
                     displayRank = it.displayRank,
                     fetchedAt = it.fetchedAt,
@@ -38,7 +38,7 @@ class SuggestionsRepositoryImpl(private val handler: DatabaseHandler) : Suggesti
                     url = it.url,
                     title = it.title,
                     thumbnailUrl = it.thumbnailUrl,
-                    reason = it.reason,
+                    sectionKey = it.sectionKey,
                     relevanceScore = it.relevanceScore,
                     displayRank = it.displayRank,
                     fetchedAt = it.fetchedAt,
@@ -51,8 +51,8 @@ class SuggestionsRepositoryImpl(private val handler: DatabaseHandler) : Suggesti
         handler.await { suggestionsQueries.deleteAll() }
     }
 
-    override suspend fun deleteByReason(reason: String) {
-        handler.await { suggestionsQueries.deleteByReason(reason) }
+    override suspend fun deleteBySectionKey(sectionKey: String) {
+        handler.await { suggestionsQueries.deleteBySectionKey(sectionKey) }
     }
 
     override suspend fun count(): Long =
@@ -64,9 +64,9 @@ class SuggestionsRepositoryImpl(private val handler: DatabaseHandler) : Suggesti
         url: String,
         title: String,
         thumbnailUrl: String?,
-        reason: String,
+        sectionKey: String,
         relevanceScore: Double,
         displayRank: Long,
         fetchedAt: Long,
-    ): SuggestedManga = SuggestedManga(_id, source, url, title, thumbnailUrl, reason, relevanceScore, displayRank, fetchedAt)
+    ): SuggestedManga = SuggestedManga(_id, source, url, title, thumbnailUrl, sectionKey, relevanceScore, displayRank, fetchedAt)
 }

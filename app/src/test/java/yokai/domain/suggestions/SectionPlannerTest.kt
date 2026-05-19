@@ -161,28 +161,28 @@ class SectionPlannerTest {
             2,
             SectionBatcher.contiguousLoadedPrefixSize(
                 plannedSections = planned,
-                loadedReasons = setOf("Because you read 0", "Because you read 1", "Because you read 3"),
+                loadedSectionKeys = setOf("tag:0", "tag:1", "tag:3"),
             ),
         )
         assertEquals(
             0,
             SectionBatcher.contiguousLoadedPrefixSize(
                 plannedSections = planned,
-                loadedReasons = setOf("Because you read 1"),
+                loadedSectionKeys = setOf("tag:1"),
             ),
         )
         assertEquals(
             planned.size,
             SectionBatcher.contiguousLoadedPrefixSize(
                 plannedSections = planned,
-                loadedReasons = planned.map { it.displayReason }.toSet(),
+                loadedSectionKeys = planned.map { it.sectionKey }.toSet(),
             ),
         )
     }
 
     @Test
-    fun `section batcher threshold triggers within one loaded section from end`() {
-        assertFalse(
+    fun `section batcher threshold triggers within two loaded sections from end`() {
+        assertTrue(
             SectionBatcher.shouldLoadMore(
                 lastVisibleSectionIndex = 3,
                 loadedSectionCount = 5,
@@ -281,6 +281,12 @@ internal class FakeTagProfileRepository : TagProfileRepository {
             sourceId = sourceId,
             sourceKey = sourceId,
         )
+    }
+
+    override suspend fun recordSourceVocabularyBatch(entries: List<Triple<String, String, Long>>) {
+        entries.forEach { (rawTag, canonicalTag, sourceId) ->
+            recordSourceVocabulary(rawTag, canonicalTag, sourceId)
+        }
     }
 
     override suspend fun aliasOrProfileExists(key: String): Boolean =

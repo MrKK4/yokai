@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material3.CircularProgressIndicator
@@ -37,15 +38,19 @@ import yokai.i18n.MR
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SuggestionsExpandedSheet(
-    reason: String,
+    displayName: String,
     results: List<Manga>,
     isLoading: Boolean,
+    isLoadingMore: Boolean,
+    hasMore: Boolean,
     error: String?,
     onMangaClick: (Manga) -> Unit,
     onRetry: () -> Unit,
     onDismiss: () -> Unit,
+    onLoadMore: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val gridState = rememberLazyGridState()
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -65,7 +70,7 @@ fun SuggestionsExpandedSheet(
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Text(
-                    text = reason,
+                    text = displayName,
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.weight(1f),
@@ -127,6 +132,7 @@ fun SuggestionsExpandedSheet(
                 }
                 else -> {
                     LazyVerticalGrid(
+                        state = gridState,
                         columns = GridCells.Adaptive(104.dp),
                         modifier = Modifier
                             .fillMaxWidth()
@@ -147,6 +153,27 @@ fun SuggestionsExpandedSheet(
                                 manga = manga,
                                 onClick = { onMangaClick(manga) },
                             )
+                        }
+                        if (isLoadingMore) {
+                            item {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(80.dp),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    CircularProgressIndicator()
+                                }
+                            }
+                        }
+                    }
+
+                    // Trigger load-more when near the bottom and more sources available
+                    if (hasMore && !isLoadingMore) {
+                        val lastVisibleIndex = gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+                        val totalItems = gridState.layoutInfo.totalItemsCount
+                        if (lastVisibleIndex >= totalItems - 4 && totalItems > 0) {
+                            onLoadMore()
                         }
                     }
                 }

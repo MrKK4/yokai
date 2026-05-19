@@ -237,7 +237,7 @@ class SuggestionsController(
     private fun showFilterSheet() {
         val activity = activity ?: return
         val state = presenter.state.value
-        val reasons = state.suggestions.keys.toList()
+        val sectionKeys = state.suggestions.keys.toList()
         val items = buildList {
             add(
                 MaterialMenuSheet.MenuSheetItem(
@@ -247,19 +247,19 @@ class SuggestionsController(
                     endDrawableRes = R.drawable.ic_check_24dp,
                 ),
             )
-            reasons.forEachIndexed { index, reason ->
+            sectionKeys.forEachIndexed { index, sectionKey ->
                 add(
                     MaterialMenuSheet.MenuSheetItem(
                         id = index + 1,
                         drawable = R.drawable.ic_label_outline_24dp,
-                        text = reason,
+                        text = state.sectionDisplayNames[sectionKey] ?: sectionKey,
                         endDrawableRes = R.drawable.ic_check_24dp,
                     ),
                 )
             }
         }
-        val selectedId = state.selectedReason
-            ?.let { selected -> reasons.indexOf(selected).takeIf { it >= 0 }?.plus(1) }
+        val selectedId = state.selectedSectionKey
+            ?.let { selected -> sectionKeys.indexOf(selected).takeIf { it >= 0 }?.plus(1) }
             ?: FILTER_ALL
 
         MaterialMenuSheet(
@@ -268,11 +268,11 @@ class SuggestionsController(
             title = activity.getString(MR.strings.suggestions_filter_title),
             selectedId = selectedId,
         ) { _, itemId ->
-            presenter.setSelectedReason(
+            presenter.setSelectedSectionKey(
                 if (itemId == FILTER_ALL) {
                     null
                 } else {
-                    reasons.getOrNull(itemId - 1)
+                    sectionKeys.getOrNull(itemId - 1)
                 },
             )
             true

@@ -2,7 +2,12 @@
   "permissions": {
     "allow": [
       "Bash(./gradlew :app:testStandardDebugUnitTest --tests \"yokai.domain.suggestions.TagCanonicalizerTest\" --stacktrace)",
-      "Bash(./gradlew assembleDebug)"
+      "Bash(./gradlew assembleDebug)",
+      "Bash(./gradlew :app:testDebugUnitTest --tests \"yokai.domain.suggestions.SuggestionRankerTest\")",
+      "Bash(./gradlew :app:testStandardDebugUnitTest --tests \"yokai.domain.suggestions.SuggestionRankerTest\")",
+      "Bash(./gradlew :app:testStandardDebugUnitTest --tests \"yokai.domain.suggestions.SuggestionRankerTest\" --tests \"yokai.domain.suggestions.SourceDiversityTest\" --tests \"yokai.domain.suggestions.SuggestionSourceSelectorTest\" --tests \"yokai.domain.suggestions.SectionPlannerTest\")",
+      "Bash(./gradlew :app:testStandardDebugUnitTest --tests \"yokai.domain.suggestions.*\")",
+      "Bash(./gradlew :app:compileStandardDebugKotlin)"
     ]
   }
 }

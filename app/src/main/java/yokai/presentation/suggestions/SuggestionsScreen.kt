@@ -78,8 +78,8 @@ fun SuggestionsScreen(
             gridState.scrollToItem(targetIndex, targetOffset)
         }
     }
-    val visibleSuggestions = state.selectedReason
-        ?.let { reason -> state.suggestions.filterKeys { it == reason } }
+    val visibleSuggestions = state.selectedSectionKey
+        ?.let { key -> state.suggestions.filterKeys { it == key } }
         ?: state.suggestions
     val sectionStartIndexes = remember(visibleSuggestions) {
         visibleSuggestions.values.toSectionStartIndexes()
@@ -92,7 +92,7 @@ fun SuggestionsScreen(
     )
     ReportLoadMoreState(
         gridState = gridState,
-        enabled = state.selectedReason == null && !state.isLoading && !state.isFetching && !state.hasReachedEnd,
+        enabled = state.selectedSectionKey == null && !state.isLoading && !state.isFetching && !state.hasReachedEnd,
         sectionStartIndexes = sectionStartIndexes,
         loadedSectionCount = visibleSuggestions.size,
         isFetchingBatch = state.isFetchingBatch,
@@ -135,26 +135,26 @@ fun SuggestionsScreen(
                             RefreshingFooter()
                         }
                     }
-                    visibleSuggestions.forEach { (reason, mangaList) ->
+                    visibleSuggestions.forEach { (sectionKey, mangaList) ->
                         item(
-                            key = "header:$reason",
+                            key = "header:$sectionKey",
                             span = { GridItemSpan(maxLineSpan) },
                         ) {
-                            val query = remember(reason) { presenter.extractQueryFromReason(reason) }
+                            val query = remember(sectionKey) { presenter.extractQueryFromSection(sectionKey) }
                             SuggestionHeader(
-                                reason = reason,
+                                displayName = state.sectionDisplayNames[sectionKey] ?: sectionKey,
                                 hasExpandButton = query != null,
-                                onExpand = query?.let { { onExpandSection(reason) } },
+                                onExpand = query?.let { { onExpandSection(sectionKey) } },
                             )
                         }
                         items(
                             items = mangaList,
-                            key = { manga -> "$reason:${manga.source}:${manga.url}" },
+                            key = { manga -> "$sectionKey:${manga.source}:${manga.url}" },
                         ) { manga ->
                             SuggestionItem(manga = manga, onClick = { onMangaClick(manga) })
                         }
                         item(
-                            key = "space:$reason",
+                            key = "space:$sectionKey",
                             span = { GridItemSpan(maxLineSpan) },
                         ) {
                             Box(modifier = Modifier.height(18.dp))
@@ -169,7 +169,7 @@ fun SuggestionsScreen(
                         }
                     }
                     val endMessage = state.endMessage
-                    if (state.selectedReason == null && state.hasReachedEnd && endMessage != null) {
+                    if (state.selectedSectionKey == null && state.hasReachedEnd && endMessage != null) {
                         item(
                             key = "end-of-feed",
                             span = { GridItemSpan(maxLineSpan) },
@@ -189,16 +189,19 @@ fun SuggestionsScreen(
                 )
             }
 
-            val sheetReason = state.sheetReason
-            if (sheetReason != null && !state.sheetSuppressed) {
+            val sheetSectionKey = state.sheetSectionKey
+            if (sheetSectionKey != null && !state.sheetSuppressed) {
                 SuggestionsExpandedSheet(
-                    reason = sheetReason,
+                    displayName = state.sectionDisplayNames[sheetSectionKey] ?: sheetSectionKey,
                     results = state.sheetResults,
                     isLoading = state.sheetIsLoading,
+                    isLoadingMore = state.sheetIsLoadingMore,
+                    hasMore = state.sheetHasMore,
                     error = state.sheetError,
                     onMangaClick = onMangaClick,
-                    onRetry = { presenter.expandSection(sheetReason) },
+                    onRetry = { presenter.expandSection(sheetSectionKey) },
                     onDismiss = presenter::dismissExpandSheet,
+                    onLoadMore = presenter::loadMoreExpandedSection,
                 )
             }
         }
@@ -381,7 +384,7 @@ private fun EndOfFeedFooter(message: String) {
 
 @Composable
 private fun SuggestionHeader(
-    reason: String,
+    displayName: String,
     hasExpandButton: Boolean,
     onExpand: (() -> Unit)?,
 ) {
@@ -393,7 +396,7 @@ private fun SuggestionHeader(
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
         Text(
-            text = reason,
+            text = displayName,
             style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.Bold,
             modifier = Modifier.weight(1f),
@@ -404,7 +407,7 @@ private fun SuggestionHeader(
             IconButton(onClick = { onExpand?.invoke() }) {
                 Icon(
                     imageVector = Icons.Outlined.ExpandMore,
-                    contentDescription = stringResource(MR.strings.suggestions_expand_content_description, reason),
+                    contentDescription = stringResource(MR.strings.suggestions_expand_content_description, displayName),
                     tint = MaterialTheme.colorScheme.primary,
                 )
             }

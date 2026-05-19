@@ -54,6 +54,6 @@ data class AffinityTag(
 
 data class SuggestionQuery(
     val query: String,
-    val reason: String,
+    val sectionKey: String,
     val score: Double,
 )

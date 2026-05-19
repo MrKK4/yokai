@@ -51,6 +51,43 @@ class SuggestionRankerTest {
     }
 
     @Test
+    fun `ranker caps normal sections at nine results with unique sources first`() = runBlocking {
+        val tagRepository = FakeTagProfileRepository()
+        val ranker = SuggestionRanker(
+            mangaRepository = mockk<MangaRepository>(relaxed = true),
+            tagCanonicalizer = TagCanonicalizer(tagRepository),
+            tagProfileRepository = tagRepository,
+            debugLog = SuggestionsDebugLog(),
+            random = ZeroRandom,
+        )
+
+        val section = section()
+        val candidates = buildList {
+            (1L..20L).forEach { sourceId ->
+                repeat(2) { position ->
+                    add(candidate(section = section, sourceId = sourceId, sourceIndex = sourceId.toInt() - 1, position = position))
+                }
+            }
+        }
+
+        val ranked = ranker.rankWithContext(
+            retrievalResults = listOf(CandidateRetrievalResult(section, candidates)),
+            context = RankingContext(
+                localKeys = emptySet(),
+                localTitles = emptySet(),
+                profiles = mapOf("action" to profile("action", recent = 10.0)),
+                blacklistedTags = emptySet(),
+            ),
+            globalSeenKeys = emptySet(),
+            sectionSeenKeys = emptyMap(),
+            sessionContext = SessionContext(),
+        )
+
+        assertEquals(9, ranked.size)
+        assertEquals((1L..9L).toList(), ranked.map { it.source })
+    }
+
+    @Test
     fun `ranker circles back to productive sources when other sources are thin`() = runBlocking {
         val tagRepository = FakeTagProfileRepository()
         val ranker = SuggestionRanker(
@@ -85,7 +122,7 @@ class SuggestionRankerTest {
         )
 
         assertEquals(
-            listOf(1L, 2L, 1L, 2L, 1L, 1L, 1L, 1L, 1L, 1L, 1L, 1L),
+            listOf(1L, 2L, 1L, 2L, 1L, 1L, 1L, 1L, 1L),
             ranked.map { it.source },
         )
     }

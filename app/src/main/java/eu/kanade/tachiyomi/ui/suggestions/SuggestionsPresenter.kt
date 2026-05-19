@@ -31,6 +31,7 @@ import yokai.domain.suggestions.FeedAggregator
 import yokai.domain.suggestions.GetUserSuggestionQueriesUseCase
 import yokai.domain.suggestions.CandidateRetriever
 import yokai.domain.suggestions.CandidateRetrievalResult
+import yokai.domain.suggestions.SuggestionCandidate
 import yokai.domain.suggestions.InterestProfileBuilder
 import yokai.domain.suggestions.RankingContext
 import yokai.domain.suggestions.SeenEntry
@@ -58,7 +59,8 @@ import yokai.util.lang.getString
 
 data class SuggestionsState(
     val suggestions: Map<String, List<Manga>> = emptyMap(),
-    val selectedReason: String? = null,
+    val sectionDisplayNames: Map<String, String> = emptyMap(),
+    val selectedSectionKey: String? = null,
     val availableTags: List<String> = emptyList(),
     val blacklistedTags: Set<String> = emptySet(),
     val isTagFilterSheetVisible: Boolean = false,
@@ -73,9 +75,11 @@ data class SuggestionsState(
     val endMessage: String? = null,
     val emptyMessage: String? = null,
     val sortOrder: SuggestionSortOrder = SuggestionSortOrder.Popular,
-    val sheetReason: String? = null,
+    val sheetSectionKey: String? = null,
     val sheetResults: List<Manga> = emptyList(),
     val sheetIsLoading: Boolean = false,
+    val sheetIsLoadingMore: Boolean = false,
+    val sheetHasMore: Boolean = false,
     val sheetError: String? = null,
     val sheetSuppressed: Boolean = false,
 )
@@ -173,6 +177,9 @@ class SuggestionsPresenter(
     private val feedAggregator: FeedAggregator = Injekt.get()
     private val sectionLastFetchedAt = ConcurrentHashMap<String, Long>()
     private var currentV2RefreshId = 0L
+    private var nextExpandedSourceOffset = 0
+    private var expandedQuery: String? = null
+    private var expandedSectionKey: String? = null
     /** Random page offset (1–3) re-rolled on every user-initiated refresh so each
      *  refresh fetches a different page from each source, guaranteeing variety. */
     @Volatile private var currentPageOffset: Int = 1
@@ -227,6 +234,7 @@ class SuggestionsPresenter(
                 // Without this guard, in-flight network requests from the previous sort can
                 // insert results into the DB whose flow emission then overwrites the new state.
                 if (feedGeneration.get() != activeFlowGeneration) return@onEach
+                if (suggestedList.isNotEmpty() && !storedResultsMatchCurrentVersion()) return@onEach
                 // While showing a snapshot-restored sort, the DB may still hold the
                 // previous sort's rows. Ignore only that exact snapshot; accept later
                 // worker/refresh updates so the cached UI does not stay stale forever.
@@ -243,7 +251,7 @@ class SuggestionsPresenter(
                     isRebuilding = false
                 }
                 warmSessionMemory(suggestedList)
-                val grouped = suggestedList.groupBy { it.reason }.mapValues { entry ->
+                val grouped = suggestedList.groupBy { it.sectionKey }.mapValues { entry ->
                     entry.value
                         .distinctBy { it.source to it.url }
                         .map { suggested ->
@@ -253,10 +261,12 @@ class SuggestionsPresenter(
                             }
                         }
                 }
-                val selectedReason = _state.value.selectedReason?.takeIf { it in grouped.keys }
+                val displayNames = _state.value.plannedSections.associate { it.sectionKey to it.displayReason }
+                val selectedSectionKey = _state.value.selectedSectionKey?.takeIf { it in grouped.keys }
                 _state.update { it.copy(
                     suggestions = grouped,
-                    selectedReason = selectedReason,
+                    sectionDisplayNames = displayNames,
+                    selectedSectionKey = selectedSectionKey,
                     emptyMessage = it.emptyMessage.takeIf { grouped.isEmpty() },
                 )}
             }
@@ -294,6 +304,11 @@ class SuggestionsPresenter(
             .launchIn(presenterScope)
 
         presenterScope.launchIO {
+            if (suggestionsRepository.count() > 0L && !storedResultsMatchCurrentVersion()) {
+                suggestionsRepository.deleteAll()
+                plannedSectionRepository.deleteAll()
+                preferences.suggestionsResultVersion().set(SuggestionsConfig.RESULT_VERSION_UNKNOWN)
+            }
             if (preferences.suggestionsV2Enabled().get()) {
                 restoreV2PlanState()
             }
@@ -303,6 +318,8 @@ class SuggestionsPresenter(
                     if (!candidateRetriever.hasActiveNetworkSources()) {
                         showWaitingForSources()
                         isInitialLoad.set(false)
+                    } else {
+                        refresh(hardRefresh = true)
                     }
                 } else {
                     refresh()
@@ -343,6 +360,16 @@ class SuggestionsPresenter(
             isFetchingBatch = false,
         )}
     }
+
+    private fun currentSuggestionsResultVersion(): Int =
+        if (preferences.suggestionsV2Enabled().get()) {
+            SuggestionsConfig.RESULT_VERSION_V2
+        } else {
+            SuggestionsConfig.RESULT_VERSION_V1
+        }
+
+    private fun storedResultsMatchCurrentVersion(): Boolean =
+        preferences.suggestionsResultVersion().get() == currentSuggestionsResultVersion()
 
     /**
      * Refresh the feed.
@@ -396,12 +423,13 @@ class SuggestionsPresenter(
         _state.update { it.copy(
             emptyMessage = null,
             plannedSections = emptyList(),
+            sectionDisplayNames = emptyMap(),
             nextBatchStartIndex = 0,
             isFetchingBatch = false,
             allSectionsLoaded = false,
             hasReachedEnd = false,
             endMessage = null,
-            sheetReason = null,
+            sheetSectionKey = null,
             sheetResults = emptyList(),
             sheetIsLoading = false,
             sheetError = null,
@@ -415,6 +443,11 @@ class SuggestionsPresenter(
             try {
                 SuggestionsRefreshCoordinator.withLock {
                     if (generation != feedGeneration.get()) return@withLock
+                    if (suggestionsRepository.count() > 0L && !storedResultsMatchCurrentVersion()) {
+                        suggestionsRepository.deleteAll()
+                        plannedSectionRepository.deleteAll()
+                        preferences.suggestionsResultVersion().set(SuggestionsConfig.RESULT_VERSION_UNKNOWN)
+                    }
                     sectionLastFetchedAt.clear()
                     if (preferences.suggestionsV2Enabled().get()) {
                         if (!candidateRetriever.hasActiveNetworkSources()) {
@@ -431,6 +464,7 @@ class SuggestionsPresenter(
                     } else {
                         val suggestions = buildFreshSuggestions(pageOffset)
                         if (generation != feedGeneration.get()) return@withLock
+                        preferences.suggestionsResultVersion().set(SuggestionsConfig.RESULT_VERSION_V1)
                         suggestionsRepository.replaceAll(suggestions)
                         // Persist shown manga into the 30-day history
                         shownHistoryRepository.insertAll(
@@ -460,7 +494,7 @@ class SuggestionsPresenter(
                     isRebuilding = false
                     updateLoadingState()
                     try {
-                        syncSelectedReasonWithStoredSuggestions()
+                        syncSelectedSectionKeyWithStoredSuggestions()
                     } catch (_: Exception) {
                     }
                     val message = pendingRefreshMessage
@@ -492,7 +526,7 @@ class SuggestionsPresenter(
 
     private fun loadNextPage(includeSourceSection: Boolean, clearExisting: Boolean = false) {
         val currentState = _state.value
-        if (currentState.hasReachedEnd || currentState.selectedReason != null) return
+        if (currentState.hasReachedEnd || currentState.selectedSectionKey != null) return
         if (!isPageFetching.compareAndSet(false, true)) return
         val generation = feedGeneration.get()
         val pageOffset = currentPageOffset
@@ -552,9 +586,9 @@ class SuggestionsPresenter(
         }
     }
 
-    fun setSelectedReason(reason: String?) {
+    fun setSelectedSectionKey(sectionKey: String?) {
         _state.update { state ->
-            state.copy(selectedReason = reason?.takeIf { it in state.suggestions.keys })
+            state.copy(selectedSectionKey = sectionKey?.takeIf { it in state.suggestions.keys })
         }
     }
 
@@ -606,12 +640,12 @@ class SuggestionsPresenter(
                 frozenForSort = sortOrder
                 frozenDbSignature = dbSignatureAtRestore
                 preferences.suggestionsSortOrder().set(sortOrder)
-                val selectedReason = currentState.selectedReason
+                val selectedSectionKey = currentState.selectedSectionKey
                     ?.takeIf { selected -> selected in cached.suggestions.keys }
                 _state.update { it.copy(
                     sortOrder          = sortOrder,
                     suggestions        = cached.suggestions,
-                    selectedReason     = selectedReason,
+                    selectedSectionKey = selectedSectionKey,
                     isLoading          = false,
                     isFetching         = false,
                     isFetchingBatch    = false,
@@ -621,7 +655,7 @@ class SuggestionsPresenter(
                     hasReachedEnd      = cached.hasReachedEnd,
                     endMessage         = cached.endMessage,
                     emptyMessage       = null,
-                    sheetReason        = null,
+                    sheetSectionKey    = null,
                     sheetResults       = emptyList(),
                     sheetIsLoading     = false,
                     sheetError         = null,
@@ -671,28 +705,34 @@ class SuggestionsPresenter(
         rebuildFeed(sortOrder = _state.value.sortOrder)
     }
 
-    fun expandSection(reason: String) {
-        val query = extractQueryFromReason(reason) ?: return
+    fun expandSection(sectionKey: String) {
+        val query = extractQueryFromSection(sectionKey) ?: return
         if (_state.value.sheetIsLoading) return
 
+        expandedQuery = query
+        expandedSectionKey = sectionKey
+
         _state.update { it.copy(
-            sheetReason = reason,
+            sheetSectionKey = sectionKey,
             sheetResults = emptyList(),
             sheetIsLoading = true,
+            sheetHasMore = false,
             sheetError = null,
         )}
 
-        val currentSeenUrls = seenMangaUrls.toSet() // capture snapshot before coroutine
+        val currentSeenUrls = seenMangaUrls.toSet()
 
         presenterScope.launchIO {
             try {
-                val results = feedAggregator.fetchExpandedSection(
+                val page = feedAggregator.fetchExpandedSection(
                     query = query,
-                    reason = reason,
-                    sortOrder = _state.value.sortOrder,
                     seenMangaUrls = currentSeenUrls,
+                    sourceOffset = 0,
+                    sourceLimit = SuggestionsConfig.EXPANDED_SOURCE_BATCH_SIZE,
                 )
-                val mangaList = results.map { suggested ->
+                nextExpandedSourceOffset = page.nextSourceOffset
+                val ranked = suggestionRanker.rankExpandedResults(page.suggestions)
+                val mangaList = ranked.map { suggested ->
                     MangaImpl(source = suggested.source, url = suggested.url).apply {
                         title = suggested.title
                         thumbnail_url = suggested.thumbnailUrl
@@ -701,6 +741,7 @@ class SuggestionsPresenter(
                 _state.update { it.copy(
                     sheetResults = mangaList,
                     sheetIsLoading = false,
+                    sheetHasMore = page.hasMoreSources,
                 )}
             } catch (_: Exception) {
                 _state.update { it.copy(
@@ -711,9 +752,48 @@ class SuggestionsPresenter(
         }
     }
 
+    fun loadMoreExpandedSection() {
+        val query = expandedQuery ?: return
+        val sectionKey = expandedSectionKey ?: return
+        if (_state.value.sheetIsLoadingMore) return
+
+        _state.update { it.copy(sheetIsLoadingMore = true) }
+
+        val currentSeenUrls = seenMangaUrls.toSet()
+
+        presenterScope.launchIO {
+            try {
+                val page = feedAggregator.fetchExpandedSection(
+                    query = query,
+                    seenMangaUrls = currentSeenUrls,
+                    sourceOffset = nextExpandedSourceOffset,
+                    sourceLimit = SuggestionsConfig.EXPANDED_SOURCE_BATCH_SIZE,
+                )
+                nextExpandedSourceOffset = page.nextSourceOffset
+                val ranked = suggestionRanker.rankExpandedResults(page.suggestions)
+                val newManga = ranked.map { suggested ->
+                    MangaImpl(source = suggested.source, url = suggested.url).apply {
+                        title = suggested.title
+                        thumbnail_url = suggested.thumbnailUrl
+                    }
+                }
+                _state.update { it.copy(
+                    sheetResults = it.sheetResults + newManga,
+                    sheetIsLoadingMore = false,
+                    sheetHasMore = page.hasMoreSources,
+                )}
+            } catch (_: Exception) {
+                _state.update { it.copy(sheetIsLoadingMore = false) }
+            }
+        }
+    }
+
     fun dismissExpandSheet() {
+        expandedQuery = null
+        expandedSectionKey = null
+        nextExpandedSourceOffset = 0
         _state.update { it.copy(
-            sheetReason = null,
+            sheetSectionKey = null,
             sheetResults = emptyList(),
             sheetIsLoading = false,
             sheetError = null,
@@ -727,7 +807,7 @@ class SuggestionsPresenter(
      * internal BackHandler doesn't intercept the return back-press.
      */
     fun suppressExpandSheet() {
-        if (_state.value.sheetReason == null) return
+        if (_state.value.sheetSectionKey == null) return
         _state.update { it.copy(sheetSuppressed = true) }
     }
 
@@ -736,7 +816,7 @@ class SuggestionsPresenter(
      * the foreground (onChangeStarted isEnter).
      */
     fun restoreExpandSheet() {
-        if (_state.value.sheetReason == null) return
+        if (_state.value.sheetSectionKey == null) return
         _state.update { it.copy(sheetSuppressed = false) }
     }
 
@@ -754,14 +834,17 @@ class SuggestionsPresenter(
         // Keep old suggestions visible during rebuild — the DB flow observer will skip
         // empty emissions while isRebuilding is true, preventing a blank-screen flash.
         isRebuilding = true
+        val clearRenderedResults = !storedResultsMatchCurrentVersion()
         _state.update { it.copy(
+            suggestions = if (clearRenderedResults) emptyMap() else it.suggestions,
+            selectedSectionKey = if (clearRenderedResults) null else it.selectedSectionKey,
             isLoading = false,
             isFetching = false,
             isFetchingBatch = false,
             endMessage = null,
             emptyMessage = null,
             sortOrder = sortOrder,
-            sheetReason = null,
+            sheetSectionKey = null,
             sheetResults = emptyList(),
             sheetIsLoading = false,
             sheetError = null,
@@ -880,10 +963,7 @@ class SuggestionsPresenter(
         if (generation != feedGeneration.get()) return
         if (existing.isNotEmpty()) {
             // Build a map of sectionKey → list of existing candidates for that section.
-            val bySectionKey = existing.groupBy { suggestion ->
-                plannedSections.firstOrNull { it.displayReason == suggestion.reason }?.sectionKey
-                    ?: suggestion.reason.lowercase().trim()
-            }
+            val bySectionKey = existing.groupBy { it.sectionKey }
             val reRanked = plannedSections.flatMapIndexed { sectionIndex, section ->
                 val sectionSuggestions = bySectionKey[section.sectionKey].orEmpty()
                 sectionSuggestions.mapIndexed { itemIndex, suggestion ->
@@ -894,6 +974,7 @@ class SuggestionsPresenter(
             }
             if (reRanked.isNotEmpty()) {
                 if (generation != feedGeneration.get()) return
+                preferences.suggestionsResultVersion().set(SuggestionsConfig.RESULT_VERSION_V2)
                 suggestionsRepository.replaceAll(reRanked)
                 debugLog.add(LogType.REFRESH_MODE, "Soft refresh: re-ranked ${reRanked.size} items across ${plannedSections.size} sections")
             }
@@ -905,8 +986,10 @@ class SuggestionsPresenter(
 
         val staleSections = plannedSections.filter { !isSectionCacheFresh(it, now) }
         if (generation != feedGeneration.get()) return
+        val displayNames = plannedSections.associate { it.sectionKey to it.displayReason }
         _state.update { it.copy(
             plannedSections = plannedSections,
+            sectionDisplayNames = displayNames,
             nextBatchStartIndex = 0,
             isFetchingBatch = false,
             allSectionsLoaded = staleSections.isEmpty(),
@@ -972,8 +1055,10 @@ class SuggestionsPresenter(
         preferences.suggestionsLastHardRefreshAt().set(now)
 
         if (generation != feedGeneration.get()) return
+        val displayNames = plannedSections.associate { it.sectionKey to it.displayReason }
         _state.update { it.copy(
             plannedSections = plannedSections,
+            sectionDisplayNames = displayNames,
             nextBatchStartIndex = 0,
             isFetchingBatch = false,
             allSectionsLoaded = plannedSections.isEmpty(),
@@ -1021,17 +1106,19 @@ class SuggestionsPresenter(
         val plannedSections = plannedSectionRepository.getPlannedSections()
         if (plannedSections.isEmpty()) return
 
-        val loadedReasons = suggestionsRepository.getSuggestions()
-            .map { it.reason }
+        val loadedSectionKeys = suggestionsRepository.getSuggestions()
+            .map { it.sectionKey }
             .toSet()
         val nextIndex = SectionBatcher.contiguousLoadedPrefixSize(
             plannedSections = plannedSections,
-            loadedReasons = loadedReasons,
+            loadedSectionKeys = loadedSectionKeys,
         )
         val allLoaded = nextIndex >= plannedSections.size
         currentV2RefreshId = preferences.suggestionsTotalRefreshCount().get().toLong()
+        val displayNames = plannedSections.associate { it.sectionKey to it.displayReason }
         _state.update { it.copy(
             plannedSections = plannedSections,
+            sectionDisplayNames = displayNames,
             nextBatchStartIndex = nextIndex,
             allSectionsLoaded = allLoaded,
             hasReachedEnd = allLoaded,
@@ -1106,16 +1193,42 @@ class SuggestionsPresenter(
             )
             // ─────────────────────────────────────────────────────────────────────────
 
+            val fetchedSourceIds = mutableSetOf<String>()
+            val accumulatedCandidates = mutableMapOf<String, MutableList<SuggestionCandidate>>()
+
             candidateRetriever.retrieveProgressively(sectionsToFetch, pageOffset) { result ->
                 if (generation == feedGeneration.get()) {
-                    insertedCount += appendSectionResult(
-                        result = result,
-                        refreshId = refreshId,
-                        rankingContext = rankingContext,
-                        sectionSeenKeys = allSectionSeenKeys,
-                        now = now,
-                    )
+                    result.candidates.map { it.sourceId.toString() }.toCollection(fetchedSourceIds)
+                    val sectionKey = result.section.sectionKey
+                    val acc = accumulatedCandidates.getOrPut(sectionKey) { mutableListOf() }
+                    acc.addAll(result.candidates)
+
+                    if (result.isSectionComplete) {
+                        val fullResult = CandidateRetrievalResult(
+                            section = result.section,
+                            candidates = acc,
+                            isSectionComplete = true,
+                        )
+                        insertedCount += appendSectionResult(
+                            result = fullResult,
+                            refreshId = refreshId,
+                            rankingContext = rankingContext,
+                            sectionSeenKeys = allSectionSeenKeys,
+                            now = now,
+                        )
+                    } else if (acc.isNotEmpty()) {
+                        // Show partial results immediately via incremental ranking
+                        appendPartialSectionResult(
+                            result = CandidateRetrievalResult(result.section, acc.toList()),
+                            rankingContext = rankingContext,
+                            sectionSeenKeys = allSectionSeenKeys,
+                        )
+                    }
                 }
+            }
+
+            if (generation == feedGeneration.get() && fetchedSourceIds.isNotEmpty()) {
+                preferences.lastFetchedSuggestionsSourceIds().set(fetchedSourceIds)
             }
         } finally {
             val nextIndex = (batchStartIndex + batch.size).coerceAtMost(state.plannedSections.size)
@@ -1147,6 +1260,26 @@ class SuggestionsPresenter(
             else -> SuggestionsConfig.TAG_SECTION_CACHE_TTL_MS
         }
         return now - fetchedAt <= ttl
+    }
+
+    private suspend fun appendPartialSectionResult(
+        result: CandidateRetrievalResult,
+        rankingContext: RankingContext,
+        sectionSeenKeys: Map<String, Set<String>>,
+    ) {
+        val suggestions = suggestionRanker.rankWithContext(
+            retrievalResults = listOf(result),
+            context = rankingContext,
+            globalSeenKeys = seenMangaUrls.toSet(),
+            sectionSeenKeys = sectionSeenKeys,
+            sessionContext = sessionContext,
+        ).withSectionDisplayRanks(result.section)
+
+        if (suggestions.isEmpty()) return
+
+        // Replace this section's results in DB with partial results so UI updates immediately
+        suggestionsRepository.deleteBySectionKey(result.section.sectionKey)
+        suggestionsRepository.insertSuggestions(suggestions)
     }
 
     private suspend fun appendSectionResult(
@@ -1203,13 +1336,14 @@ class SuggestionsPresenter(
         }
         // ─────────────────────────────────────────────────────────────────────────
 
+        preferences.suggestionsResultVersion().set(SuggestionsConfig.RESULT_VERSION_V2)
         if (pendingV2HardRefreshReplace.compareAndSet(true, false)) {
             suggestionsRepository.replaceAll(suggestions)
         } else {
             // Bug 6 fix: purge stale content for this section before inserting fresh results.
             // Without this, re-fetched sections accumulate old manga that the source no longer
-            // returns, growing the section indefinitely. The `reason` field maps 1:1 to a section.
-            suggestionsRepository.deleteByReason(result.section.displayReason)
+            // returns, growing the section indefinitely.
+            suggestionsRepository.deleteBySectionKey(result.section.sectionKey)
             suggestionsRepository.insertSuggestions(suggestions)
         }
         shownHistoryRepository.insertAll(suggestions.map { it.source to it.url })
@@ -1271,19 +1405,19 @@ class SuggestionsPresenter(
             isSectionBatchFetching.get() ||
             isWorkerRefreshing
         if (suggestedList.isEmpty()) return true
-        val selectedReason = currentState.selectedReason
-        return selectedReason != null &&
+        val selectedSectionKey = currentState.selectedSectionKey
+        return selectedSectionKey != null &&
             isBusy &&
-            suggestedList.none { it.reason == selectedReason }
+            suggestedList.none { it.sectionKey == selectedSectionKey }
     }
 
-    private suspend fun syncSelectedReasonWithStoredSuggestions() {
-        val selectedReason = _state.value.selectedReason ?: return
-        val storedReasons = suggestionsRepository.getSuggestions()
-            .map { it.reason }
+    private suspend fun syncSelectedSectionKeyWithStoredSuggestions() {
+        val selectedSectionKey = _state.value.selectedSectionKey ?: return
+        val storedSectionKeys = suggestionsRepository.getSuggestions()
+            .map { it.sectionKey }
             .toSet()
-        if (storedReasons.isNotEmpty() && selectedReason !in storedReasons) {
-            _state.update { it.copy(selectedReason = null) }
+        if (storedSectionKeys.isNotEmpty() && selectedSectionKey !in storedSectionKeys) {
+            _state.update { it.copy(selectedSectionKey = null) }
         }
     }
 
@@ -1293,7 +1427,7 @@ class SuggestionsPresenter(
             seenMangaUrls.addAll(suggestions.map { it.memoryKey() })
         }
         if (usedTags.isEmpty()) {
-            usedTags.addAll(suggestions.mapNotNull { it.reason.toSuggestionQueryKey() })
+            usedTags.addAll(suggestions.mapNotNull { it.sectionKey.toTagFromSectionKey() })
         }
     }
 
@@ -1315,7 +1449,7 @@ class SuggestionsPresenter(
             31L * hash +
                 suggestion.source +
                 31L * suggestion.url.hashCode() +
-                31L * suggestion.reason.hashCode() +
+                31L * suggestion.sectionKey.hashCode() +
                 31L * suggestion.displayRank +
                 31L * suggestion.fetchedAt
         }
@@ -1327,27 +1461,19 @@ class SuggestionsPresenter(
             context.getString(MR.strings.suggestions_caught_up)
         }
 
-    fun extractQueryFromReason(reason: String): String? {
-        // Match all three reason tiers: "Because you love X",
-        // "Because you often read X", "Because you read X", and saved-search.
-        val tagPrefix = READ_REASON_PREFIXES.firstOrNull { reason.startsWith(it) }
+    fun extractQueryFromSection(sectionKey: String): String? {
         return when {
-            tagPrefix != null ->
-                reason.removePrefix(tagPrefix)
-            reason.startsWith(PINNED_REASON_PREFIX) ->
-                reason.removePrefix(PINNED_REASON_PREFIX)
-            reason.startsWith(SEARCH_REASON_PREFIX) ->
-                reason.removePrefix(SEARCH_REASON_PREFIX).removeSuffix("\"")
+            sectionKey.startsWith("tag:") -> sectionKey.removePrefix("tag:")
+            sectionKey.startsWith("search:") -> sectionKey.removePrefix("search:")
+            sectionKey.startsWith("expanded:") -> sectionKey.removePrefix("expanded:")
             else -> null
-        }?.trim()?.takeIf { it.isNotBlank() }
+        }?.takeIf { it.isNotBlank() }
     }
 
-    private fun String.toSuggestionQueryKey(): String? {
-        val tagPrefix = READ_REASON_PREFIXES.firstOrNull { startsWith(it) }
+    private fun String.toTagFromSectionKey(): String? {
         return when {
-            tagPrefix != null -> removePrefix(tagPrefix)
-            startsWith(PINNED_REASON_PREFIX) -> removePrefix(PINNED_REASON_PREFIX)
-            startsWith(SEARCH_REASON_PREFIX) -> removePrefix(SEARCH_REASON_PREFIX).substringBeforeLast("\"")
+            startsWith("tag:") -> removePrefix("tag:")
+            startsWith("search:") -> removePrefix("search:")
             else -> null
         }
             ?.normalizedQuery()
@@ -1402,16 +1528,6 @@ class SuggestionsPresenter(
     internal companion object {
         private const val MAX_ZERO_INSERT_RETRIES = 10
         private const val ZERO_INSERT_RETRY_DELAY_MS = 300L
-        // Ordered longest-first so the more specific prefixes match before the shorter one.
-        internal val READ_REASON_PREFIXES = listOf(
-            "Because you love ",
-            "Because you often read ",
-            "Because you read ",
-        )
-        internal const val PINNED_REASON_PREFIX = "Pinned: "
-        /** Legacy alias kept so call-sites that use READ_REASON_PREFIX still compile. */
-        internal const val READ_REASON_PREFIX = "Because you read "
-        internal const val SEARCH_REASON_PREFIX = "Because you searched \""
         private const val SECTION_DISPLAY_RANK_STRIDE = 1_000L
         private const val SOURCE_CHANGE_DEBOUNCE_MILLIS = 500L
         private val WHITESPACE = Regex("\\s+")

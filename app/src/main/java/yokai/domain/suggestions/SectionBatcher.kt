@@ -14,9 +14,9 @@ object SectionBatcher {
 
     fun contiguousLoadedPrefixSize(
         plannedSections: List<PlannedSection>,
-        loadedReasons: Set<String>,
+        loadedSectionKeys: Set<String>,
     ): Int {
-        val firstMissingIndex = plannedSections.indexOfFirst { it.displayReason !in loadedReasons }
+        val firstMissingIndex = plannedSections.indexOfFirst { it.sectionKey !in loadedSectionKeys }
         return if (firstMissingIndex == -1) plannedSections.size else firstMissingIndex
     }
 
