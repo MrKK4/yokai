@@ -1,0 +1,3 @@
+## 2024-05-24 - [Kotlin Sequence Optimization]
+**Learning:** Chained collection operations (`.map`, `.filter`, `.take`) in Kotlin standard library evaluate eagerly and create intermediate collections for each step. When the initial dataset is large (like a library or reading history) and we only need a subset, this is a major performance bottleneck.
+**Action:** Use `.asSequence()` before chained operations to enforce lazy evaluation, avoiding costly intermediate allocations and stopping iteration exactly when constraints like `.take()` are met. Ensure to materialize back to list using `.toList()` at the end if the original type was `List`.
