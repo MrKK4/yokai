@@ -9,14 +9,15 @@ import org.junit.jupiter.api.Test
 class SectionPlannerTest {
 
     @Test
-    fun `plan orders discovery pinned then every managed tag by affinity`() = runBlocking {
+    fun `plan orders discovery followed by every managed tag by affinity`() = runBlocking {
         val repository = FakeTagProfileRepository()
         val planner = SectionPlanner(repository, SuggestionsDebugLog())
+        // V2 never pins — affinity ranking only. Pin functionality is V1-only.
         val profiles = listOf(
             profile("romance", recent = 10.0),
-            profile("action", recent = 8.0, state = TagState.PINNED, pinnedAt = 2L),
+            profile("action", recent = 8.0),
             profile("fantasy", recent = 6.0),
-            profile("comedy", recent = 4.0, state = TagState.PINNED, pinnedAt = 1L),
+            profile("comedy", recent = 4.0),
             profile("drama", recent = 3.0),
         )
 
@@ -27,9 +28,11 @@ class SectionPlannerTest {
         )
 
         assertEquals(SectionType.DISCOVERY, sections[0].type)
-        assertEquals(listOf("comedy", "action"), sections.drop(1).take(2).map { it.canonicalTag })
-        assertEquals(listOf("romance", "fantasy", "drama"), sections.drop(3).map { it.canonicalTag })
-        assertTrue(sections.drop(3).all { it.type == SectionType.MANAGED_TAG })
+        assertEquals(
+            listOf("romance", "action", "fantasy", "comedy", "drama"),
+            sections.drop(1).map { it.canonicalTag },
+        )
+        assertTrue(sections.drop(1).all { it.type == SectionType.MANAGED_TAG })
     }
 
     @Test
@@ -94,7 +97,7 @@ class SectionPlannerTest {
 
         val sections = planner.plan(
             profiles = listOf(
-                profile("action", recent = 0.0, state = TagState.PINNED, pinnedAt = 1L),
+                profile("action", recent = 0.0),
                 profile("romance", recent = 0.0),
             ),
             sortOrder = SuggestionSortOrder.Popular,
@@ -138,8 +141,8 @@ class SectionPlannerTest {
             )
         }
 
-        assertEquals(listOf("tag:0", "tag:1"), SectionBatcher.nextBatch(planned, 0).map { it.sectionKey })
-        assertEquals(listOf("tag:10", "tag:11"), SectionBatcher.nextBatch(planned, 10).map { it.sectionKey })
+        assertEquals(listOf("tag:0"), SectionBatcher.nextBatch(planned, 0).map { it.sectionKey })
+        assertEquals(listOf("tag:10"), SectionBatcher.nextBatch(planned, 10).map { it.sectionKey })
         assertTrue(SectionBatcher.nextBatch(planned, 12).isEmpty())
     }
 
@@ -181,8 +184,8 @@ class SectionPlannerTest {
     }
 
     @Test
-    fun `section batcher threshold triggers within two loaded sections from end`() {
-        assertTrue(
+    fun `section batcher threshold triggers at the loaded section end`() {
+        assertFalse(
             SectionBatcher.shouldLoadMore(
                 lastVisibleSectionIndex = 3,
                 loadedSectionCount = 5,
@@ -255,7 +258,7 @@ internal class FakeTagProfileRepository : TagProfileRepository {
         val existing = profiles[canonicalTag] ?: profile(canonicalTag)
         profiles[canonicalTag] = existing.copy(
             state = state,
-            pinnedAt = if (state == TagState.PINNED) now else null,
+            pinnedAt = null,
             updatedAt = now,
         )
     }
@@ -312,4 +315,12 @@ internal class FakeTagProfileRepository : TagProfileRepository {
             .maxWithOrNull(compareBy<Map.Entry<Pair<String, String>, Int>> { it.value }.thenBy { it.key.second })
             ?.key
             ?.second
+
+    override suspend fun resetBlacklistedToManaged(now: Long) {
+        profiles.forEach { (key, profile) ->
+            if (profile.isBlacklisted) {
+                profiles[key] = profile.copy(state = TagState.MANAGED, pinnedAt = null, updatedAt = now)
+            }
+        }
+    }
 }

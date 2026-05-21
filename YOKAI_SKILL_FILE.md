@@ -271,8 +271,8 @@ InterestProfileBuilder.buildProfile(now)
   ▼
 SectionPlanner.plan(profiles, sortOrder, now)
   ├─ DISCOVERY section first (always)
-  ├─ PINNED_TAG sections (sorted by pinnedAt)
   └─ MANAGED_TAG sections (sorted by affinity desc)
+  Note: pin functionality is V1-only — V2 ranks managed tags by inferred affinity only.
   │
   ▼
 SectionBatcher.nextBatch(sections, startIndex, batchSize=2)
@@ -319,8 +319,11 @@ Insert into suggestions table by section key → UI observes Flow
 ### Section Structure
 
 1. **DISCOVERY section**: "Latest from your sources" or "Popular from your sources" based on sort order. Always first.
-2. **PINNED_TAG sections**: User-pinned tags, sorted by `pinnedAt` timestamp
-3. **MANAGED_TAG sections**: Tags ordered by affinity score (how many of user's manga contain this tag)
+2. **MANAGED_TAG sections**: Tags ordered by affinity score (how many of user's manga contain this tag)
+
+V1 pin: pinned tags become high-score `pinned:<tag>` queries in `GetUserSuggestionQueriesUseCase`
+(score `1_000.0` > saved-search `1.5` > affinity). V2 has no pin — `TagState.PINNED` and
+`SectionType.PINNED_TAG` were removed; `tag_profile.pinned_at` column is dormant.
 
 Each section targets 12 manga. Sources divide equally: 12 sources = 1 each. Failed sources cycle back to fill 12.
 

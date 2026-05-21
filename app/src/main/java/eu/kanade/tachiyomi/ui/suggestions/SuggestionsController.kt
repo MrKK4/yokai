@@ -111,7 +111,13 @@ class SuggestionsController(
         updateSwipeRefreshOffset()
 
         presenter.state
-            .onEach { state -> binding.swipeRefresh.isRefreshing = state.isLoading }
+            .onEach { state ->
+                // Show SwipeRefresh spinner only for user-triggered foreground refresh when
+                // content already exists. Cold-start and background loads use the Compose
+                // EmptySuggestions spinner so we never show two spinners simultaneously.
+                binding.swipeRefresh.isRefreshing =
+                    state.isForegroundRefresh && state.suggestions.isNotEmpty()
+            }
             .launchIn(viewScope)
 
         // Bug 8b: if the background worker has been failing for >24h, show a single
@@ -136,6 +142,7 @@ class SuggestionsController(
                     contentPadding = suggestionsContentPadding(),
                     onMangaClick = ::openManga,
                     onCanScrollUpChanged = ::onSuggestionsCanScrollUpChanged,
+                    onVisibleSectionChanged = presenter::setVisibleSectionKey,
                     onExpandSection = presenter::expandSection,
                 )
             }
@@ -154,6 +161,7 @@ class SuggestionsController(
             isNavigatingToManga = false
             syncAppBarMode()
             updateSwipeRefreshOffset()
+            presenter.restoreExpandSheet()
         }
     }
 
@@ -162,6 +170,7 @@ class SuggestionsController(
 
         val v2Item = menu.findItem(R.id.action_toggle_v2)
         setupVersionAction(v2Item)
+        view?.post { bindVersionActions(presenter.isSuggestionsV2Enabled()) }
 
         activityBinding?.searchToolbar?.searchQueryHint = view?.context?.getString(MR.strings.global_search)
         setOnQueryTextChangeListener(activityBinding?.searchToolbar?.searchView, true) {
@@ -185,11 +194,8 @@ class SuggestionsController(
     }
 
     private fun setupVersionAction(item: MenuItem?) {
-        val actionView = item?.actionView as? SuggestionsVersionActionView ?: return
         val isV2Enabled = presenter.isSuggestionsV2Enabled()
-        item.title = suggestionsModeTitle(isV2Enabled)
-        actionView.setVersion(isV2Enabled)
-        actionView.setOnClickListener { toggleSuggestionsVersion() }
+        bindVersionAction(item, isV2Enabled)
     }
 
     private fun toggleSuggestionsVersion() {
@@ -200,13 +206,30 @@ class SuggestionsController(
     }
 
     private fun updateVersionAction(isV2Enabled: Boolean) {
-        val title = suggestionsModeTitle(isV2Enabled)
+        bindVersionActions(isV2Enabled)
+        activity?.invalidateOptionsMenu()
+        view?.post { bindVersionActions(isV2Enabled) }
+    }
+
+    private fun bindVersionActions(isV2Enabled: Boolean) {
         listOfNotNull(
             activityBinding?.toolbar?.menu?.findItem(R.id.action_toggle_v2),
             activityBinding?.searchToolbar?.menu?.findItem(R.id.action_toggle_v2),
-        ).forEach { item ->
-            item.title = title
-            (item.actionView as? SuggestionsVersionActionView)?.setVersion(isV2Enabled)
+        ).forEach { item -> bindVersionAction(item, isV2Enabled) }
+    }
+
+    private fun bindVersionAction(item: MenuItem?, isV2Enabled: Boolean) {
+        item ?: return
+        val context = view?.context ?: activity ?: return
+        item.title = suggestionsModeTitle(isV2Enabled)
+        item.setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+        val actionView = SuggestionsVersionActionView(context)
+        item.actionView = actionView
+        // actionView handles all taps — do NOT also register setOnMenuItemClickListener
+        // or both fire on every tap, double-toggling and reverting the change.
+        actionView.setVersion(isV2Enabled)
+        actionView.setOnClickListener {
+            toggleSuggestionsVersion()
         }
     }
 
@@ -353,6 +376,7 @@ class SuggestionsController(
             0
         }
         appBar.updateAppBarAfterY(appBarScrollProxy)
+        view?.post { bindVersionActions(presenter.isSuggestionsV2Enabled()) }
     }
 
     private fun onSuggestionsCanScrollUpChanged(canScrollUp: Boolean) {
@@ -429,10 +453,17 @@ class SuggestionsController(
         }
     }
 
+    private var lastToggleRefreshMs = 0L
+
     // BottomSheetController — re-tapping the suggestions tab scrolls to top and refreshes.
+    // Guard: skip refresh if suggestions already loaded and last refresh was recent.
     override fun showSheet() = toggleSheet()
     override fun hideSheet() = toggleSheet()
     override fun toggleSheet() {
+        val now = System.currentTimeMillis()
+        val hasSuggestions = presenter.state.value.suggestions.isNotEmpty()
+        if (hasSuggestions && now - lastToggleRefreshMs < TOGGLE_REFRESH_COOLDOWN_MS) return
+        lastToggleRefreshMs = now
         presenter.refresh()
     }
 
@@ -467,5 +498,6 @@ class SuggestionsController(
         const val SORT_FILTER = 3
         const val SORT_TAG_FILTER = 4
         const val VERSION_POPUP_ALPHA = 220
+        const val TOGGLE_REFRESH_COOLDOWN_MS = 5 * 60 * 1000L
     }
 }

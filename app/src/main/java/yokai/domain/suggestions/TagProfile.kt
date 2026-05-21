@@ -16,9 +16,6 @@ data class TagProfile(
     val affinity: Double
         get() = SuggestionsConfig.STM_WEIGHT * recentCount + SuggestionsConfig.LTM_WEIGHT * longTermCount
 
-    val isPinned: Boolean
-        get() = state == TagState.PINNED
-
     val isBlacklisted: Boolean
         get() = state == TagState.BLACKLISTED
 

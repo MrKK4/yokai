@@ -37,6 +37,9 @@ class RecentMangaHolder(
     init {
         binding.card.setOnClickListener { adapter.delegate.onCoverClick(flexibleAdapterPosition) }
         binding.constraintLayout.setOnClickListener { adapter.delegate.onCoverClick(flexibleAdapterPosition) }
+        binding.removeHistory.setOnClickListener {
+            adapter.delegate.onRemoveHistoryClicked(flexibleAdapterPosition)
+        }
         
         binding.compactTitle.isVisible = false
         binding.gradient.isVisible = false
@@ -62,6 +65,11 @@ class RecentMangaHolder(
 
         binding.subtitle.text = ""
         binding.subtitle.isVisible = false
+        binding.removeHistory.isVisible = shouldShowHistoryResetButton(
+            viewType = adapter.viewType,
+            showRemoveHistory = adapter.showRemoveHistory,
+            historyId = item.mch.history.id,
+        )
 
         if (adapter.uniformCovers) {
             binding.constraintLayout.layoutParams = FrameLayout.LayoutParams(
@@ -135,3 +143,10 @@ class RecentMangaHolder(
         }
     }
 }
+
+internal fun shouldShowHistoryResetButton(
+    viewType: RecentsViewType,
+    showRemoveHistory: Boolean,
+    historyId: Long?,
+): Boolean =
+    viewType.isHistory && showRemoveHistory && historyId != null

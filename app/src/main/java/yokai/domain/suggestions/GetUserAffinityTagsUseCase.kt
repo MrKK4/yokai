@@ -47,6 +47,7 @@ class GetUserAffinityTagsUseCase(
                     .map { (key, count) ->
                         AffinityTag(
                             name = taggedManga.displayNameFor(key),
+                            canonicalTag = key,
                             score = count.toDouble(),
                         )
                     }
@@ -132,7 +133,13 @@ class GetUserAffinityTagsUseCase(
                 .entries
                 .sortedByDescending { it.value }
                 .take(TOP_N)
-                .map { AffinityTag(name = tagNames[it.key] ?: it.key.toDisplayTag(), score = it.value) }
+                .map {
+                    AffinityTag(
+                        name = tagNames[it.key] ?: it.key.toDisplayTag(),
+                        canonicalTag = it.key,
+                        score = it.value,
+                    )
+                }
         }
     }
 

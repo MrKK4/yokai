@@ -22,6 +22,7 @@ class FeedAggregator(
     private val preferences: PreferencesHelper,
     private val tagCanonicalizer: TagCanonicalizer,
     private val tagProfileRepository: TagProfileRepository,
+    private val catalogueSourcesProvider: () -> List<CatalogueSource> = sourceManager::getCatalogueSources,
 ) {
     suspend fun fetch(suggestionQueries: List<SuggestionQuery>): List<SuggestedManga> {
         return fetchPage(
@@ -51,12 +52,20 @@ class FeedAggregator(
         }
         val blacklistedTags = preferences.suggestionsTagsBlacklist().get().normalizedQueries()
         val normalizedSeenMangaUrls = if (coldStartDiscovery) emptySet() else seenMangaUrls
-        val querySelection = selectQueriesForPage(
-            suggestionQueries = suggestionQueries,
-            usedTags = usedTags.normalizedQueries(),
-            blacklistedTags = blacklistedTags,
-            random = random,
-        )
+        val querySelection = if (includeSourceSection) {
+            QuerySelection(
+                selectedQueries = emptyList(),
+                selectedNormalizedTags = emptySet(),
+                hasReachedEnd = coldStartDiscovery,
+            )
+        } else {
+            selectQueriesForPage(
+                suggestionQueries = suggestionQueries,
+                usedTags = usedTags.normalizedQueries(),
+                blacklistedTags = blacklistedTags,
+                random = random,
+            )
+        }
         val sources = activeSources(random)
         if (sources.isEmpty) {
             return SuggestionFeedPage(
@@ -477,15 +486,22 @@ class FeedAggregator(
         requestGate: Semaphore,
         random: Random,
     ): List<ScoredManga> {
-        return requestGate.withPermit {
-            sourceResult {
-                if (source.supportsLatest) source.getLatestUpdates(page) else source.getPopularManga(page)
+        val pageResult = requestGate.withPermit {
+            if (source.supportsLatest) {
+                val latest = sourceResult { source.getLatestUpdates(page) }
+                latest?.takeIf { it.mangas.isNotEmpty() }
+                    ?: sourceResult { source.getPopularManga(page) }
+            } else {
+                sourceResult {
+                    source.getPopularManga(page)
+                }
             }
-        }
-            ?.mangas
-            ?.asSequence()
-            ?.filterAllowed(source.id, localKeys, localTitles, seenMangaUrls, blacklistedTags)
-            ?.mapIndexed { index, manga ->
+        } ?: return emptyList()
+
+        return pageResult.mangas
+            .asSequence()
+            .filterAllowed(source.id, localKeys, localTitles, seenMangaUrls, blacklistedTags)
+            .mapIndexed { index, manga ->
                 ScoredManga(
                     manga = manga,
                     titleKey = manga.title.normalizedTitle(),
@@ -495,8 +511,7 @@ class FeedAggregator(
                     queryScore = 0.0,
                 )
             }
-            ?.toList()
-            .orEmpty()
+            .toList()
     }
 
     private suspend fun fetchPopularFromSource(
@@ -545,7 +560,6 @@ class FeedAggregator(
         val localTitles = localManga.map { it.title.normalizedTitle() }.toSet()
         val blacklistedTags = preferences.suggestionsTagsBlacklist().get().normalizedQueries()
         val allSources = activeNetworkSources()
-            .shuffled(random)
         val batchedSources = allSources.drop(sourceOffset).take(sourceLimit)
         val hasMoreSources = (sourceOffset + sourceLimit) < allSources.size
         val requestGate = Semaphore(SuggestionsConfig.MAX_CONCURRENT_SOURCE_REQUESTS)
@@ -655,7 +669,7 @@ class FeedAggregator(
 
     private fun activeNetworkSources(): List<CatalogueSource> =
         SuggestionSourceSelector.activeNetworkSources(
-            sources = sourceManager.getCatalogueSources(),
+            sources = catalogueSourcesProvider(),
             selection = SuggestionSourceSelection(
                 enabledLanguages = preferences.enabledLanguages().get(),
                 hiddenSourceIds = preferences.hiddenSources().get(),
@@ -721,7 +735,10 @@ class FeedAggregator(
             }.takeIf { completed }
         } catch (e: CancellationException) {
             throw e
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
+            // Catch Throwable so an extension throwing NoClassDefFoundError, OutOfMemoryError,
+            // or ExceptionInInitializerError doesn't propagate through awaitAll and kill the
+            // entire V1 fetch — one bad source should produce a null result, not an empty feed.
             null
         }
     }
@@ -807,7 +824,7 @@ class FeedAggregator(
     }
 
     private companion object {
-        private const val PAGE_TAG_COUNT = 4
+        private const val PAGE_TAG_COUNT = 1
         private const val TAG_SELECTION_JITTER = 0.25  // Lower = more quality bias, rotation handles variety
         private const val MAX_SOURCE_SECTION_TOTAL = SuggestionsConfig.MAX_RESULTS_PER_SECTION
         private const val MAX_PER_AFFINITY_SECTION = SuggestionsConfig.MAX_RESULTS_PER_SECTION

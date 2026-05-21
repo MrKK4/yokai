@@ -55,6 +55,10 @@ class SuggestionsRepositoryImpl(private val handler: DatabaseHandler) : Suggesti
         handler.await { suggestionsQueries.deleteBySectionKey(sectionKey) }
     }
 
+    override suspend fun deleteOrphanedByPlan() {
+        handler.await { suggestionsQueries.deleteOrphanedByPlan() }
+    }
+
     override suspend fun count(): Long =
         handler.awaitOne { suggestionsQueries.count() }
 

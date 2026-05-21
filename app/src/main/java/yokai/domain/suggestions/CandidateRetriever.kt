@@ -14,6 +14,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
@@ -41,6 +42,8 @@ class CandidateRetriever(
     private val debugLog: SuggestionsDebugLog,
     private val tagCanonicalizer: TagCanonicalizer,
     private val tagProfileRepository: TagProfileRepository,
+    private val catalogueSourcesProvider: () -> List<CatalogueSource> = sourceManager::getCatalogueSources,
+    private val catalogueSourcesFlowProvider: () -> Flow<List<CatalogueSource>> = { sourceManager.catalogueSources },
 ) {
     private fun freshFilterList(source: CatalogueSource): FilterList =
         source.getFilterList()
@@ -49,7 +52,7 @@ class CandidateRetriever(
         activeNetworkSources().isNotEmpty()
 
     fun activeNetworkSourceIdsFlow(): Flow<Set<Long>> =
-        sourceManager.catalogueSources
+        catalogueSourcesFlowProvider()
             .map { sources ->
                 SuggestionSourceSelector.activeNetworkSourceIds(
                     sources = sources,
@@ -61,6 +64,7 @@ class CandidateRetriever(
     suspend fun retrieve(
         sections: List<PlannedSection>,
         pageOffset: Int = 1,
+        maxPerSourceFetch: Int? = null,
     ): List<CandidateRetrievalResult> {
         val results = coroutineScope {
             val requestGate = Semaphore(SuggestionsConfig.MAX_CONCURRENT_SOURCE_REQUESTS)
@@ -68,7 +72,7 @@ class CandidateRetriever(
                 async {
                     CandidateRetrievalResult(
                         section = section,
-                        candidates = retrieveSection(section, pageOffset, requestGate),
+                        candidates = retrieveSection(section, pageOffset, requestGate, maxPerSourceFetch),
                     )
                 }
             }.awaitAll()
@@ -88,6 +92,7 @@ class CandidateRetriever(
     suspend fun retrieveProgressively(
         sections: List<PlannedSection>,
         pageOffset: Int = 1,
+        maxPerSourceFetch: Int? = null,
         onResult: suspend (CandidateRetrievalResult) -> Unit,
     ) {
         if (sections.isEmpty()) return
@@ -98,26 +103,31 @@ class CandidateRetriever(
 
             sections.forEach { section ->
                 launch {
-                    val allCandidates = retrieveSection(
-                        section = section,
-                        pageOffset = pageOffset,
-                        requestGate = requestGate,
-                        onSourceComplete = { batch ->
-                            results.send(
-                                CandidateRetrievalResult(
-                                    section = section,
-                                    candidates = batch,
-                                    isSectionComplete = false,
-                                ),
-                            )
-                        },
-                    )
-
-                    // Signal section completion
+                    val partial = mutableListOf<SuggestionCandidate>()
+                    val complete = withTimeoutOrNull(SuggestionsConfig.SECTION_TIMEOUT_MS) {
+                        retrieveSection(
+                            section = section,
+                            pageOffset = pageOffset,
+                            requestGate = requestGate,
+                            maxPerSourceFetch = maxPerSourceFetch,
+                            onSourceComplete = { batch ->
+                                partial.addAll(batch)
+                                results.trySend(
+                                    CandidateRetrievalResult(
+                                        section = section,
+                                        candidates = batch,
+                                        isSectionComplete = false,
+                                    ),
+                                )
+                            },
+                        )
+                    }
+                    // complete == null means section timed out — emit partial results as final
+                    val finalCandidates = complete ?: partial.distinctBy { it.sourceId to it.manga.url }
                     results.send(
                         CandidateRetrievalResult(
                             section = section,
-                            candidates = allCandidates,
+                            candidates = finalCandidates,
                             isSectionComplete = true,
                         ),
                     )
@@ -146,10 +156,11 @@ class CandidateRetriever(
         section: PlannedSection,
         pageOffset: Int,
         requestGate: Semaphore,
+        maxPerSourceFetch: Int? = null,
         onSourceComplete: (suspend (List<SuggestionCandidate>) -> Unit)? = null,
     ): List<SuggestionCandidate> {
         if (section.isColdStartDiscovery()) {
-            return retrieveColdStartDiscoverySection(section, requestGate)
+            return retrieveColdStartDiscoverySection(section, requestGate, onSourceComplete)
         }
 
         val sources = activeSources(discovery = section.type == SectionType.DISCOVERY)
@@ -162,17 +173,36 @@ class CandidateRetriever(
         ): List<SuggestionCandidate> {
             return coroutineScope {
                 val allCandidates = mutableListOf<SuggestionCandidate>()
-                when (section.type) {
+                val sourceFetches = when (section.type) {
                     SectionType.DISCOVERY ->
                         sources.mapIndexed { sourceIndex, source ->
-                            async { fetchDiscoverySource(section, source, sourceIndex, page, requestGate, countBySource) }
+                            suspend { fetchDiscoverySource(section, source, sourceIndex, page, requestGate, countBySource, maxPerSourceFetch) }
                         }
                     else ->
                         sources.mapIndexed { sourceIndex, source ->
-                            async { fetchSearchSource(section, source, sourceIndex, page, requestGate, countBySource) }
+                            suspend { fetchSearchSource(section, source, sourceIndex, page, requestGate, countBySource, maxPerSourceFetch) }
                         }
-                }.forEach { job ->
-                    val batch = job.await()
+                }
+                val sourceResults = Channel<List<SuggestionCandidate>>(Channel.UNLIMITED)
+                sourceFetches.forEach { fetch ->
+                    launch {
+                        // Defend against non-Exception throwables (OOM, NoClassDefFoundError,
+                        // ExceptionInInitializerError from a corrupt extension). Without this
+                        // any sibling source failing with a Throwable would propagate up the
+                        // coroutineScope and cancel every other in-flight source fetch,
+                        // killing the whole section instead of just the bad source.
+                        val batch = try {
+                            fetch()
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (_: Throwable) {
+                            emptyList()
+                        }
+                        sourceResults.send(batch)
+                    }
+                }
+                repeat(sourceFetches.size) {
+                    val batch = sourceResults.receive()
                     if (batch.isNotEmpty() && emit != null) {
                         emit(batch)
                     }
@@ -200,10 +230,10 @@ class CandidateRetriever(
                 counter.set((savedCount - shortfall).coerceAtLeast(0))
                 val topUp = when (section.type) {
                     SectionType.DISCOVERY -> fetchDiscoverySource(
-                        section, source, sources.indexOf(source), page, requestGate, countBySource,
+                        section, source, sources.indexOf(source), page, requestGate, countBySource, maxPerSourceFetch,
                     )
                     else -> fetchSearchSource(
-                        section, source, sources.indexOf(source), page, requestGate, countBySource,
+                        section, source, sources.indexOf(source), page, requestGate, countBySource, maxPerSourceFetch,
                     )
                 }
                 candidates.addAll(topUp)
@@ -229,19 +259,30 @@ class CandidateRetriever(
     private suspend fun retrieveColdStartDiscoverySection(
         section: PlannedSection,
         requestGate: Semaphore,
+        onSourceComplete: (suspend (List<SuggestionCandidate>) -> Unit)?,
     ): List<SuggestionCandidate> {
-        val sources = activeSources(discovery = true)
-            .shuffled()
+        var sources = activeSources(discovery = true).shuffled()
+        if (sources.isEmpty()) {
+            // SourceManager's IO coroutine may not have finished populating the map yet.
+            // Wait for the live Flow to emit at least one source before giving up.
+            debugLog.add(LogType.SECTION_DROPPED, "Cold-start: no sources in snapshot — waiting up to ${SuggestionsConfig.SOURCE_POPULATION_TIMEOUT_MS}ms for source map")
+            withTimeoutOrNull(SuggestionsConfig.SOURCE_POPULATION_TIMEOUT_MS) {
+                catalogueSourcesFlowProvider().first { it.isNotEmpty() }
+            }
+            sources = activeSources(discovery = true).shuffled()
+            debugLog.add(LogType.SECTION_DROPPED, "Cold-start: after wait — ${sources.size} sources available")
+        }
         if (sources.isEmpty()) return emptyList()
 
         val countBySource = ConcurrentHashMap<Long, AtomicInteger>()
         val candidates = mutableListOf<SuggestionCandidate>()
         val indexedSources = sources.withIndex().toList()
         pages@ for (page in 1..SuggestionsConfig.COLD_START_SOURCE_PAGE_LIMIT) {
-            for (chunk in indexedSources.chunked(SuggestionsConfig.COLD_START_SOURCE_CHUNK_SIZE)) {
-                val pageCandidates = coroutineScope {
-                    chunk.map { indexedSource ->
-                        async {
+            val pageCandidates = coroutineScope {
+                val sourceResults = Channel<List<SuggestionCandidate>>(Channel.UNLIMITED)
+                indexedSources.forEach { indexedSource ->
+                    launch {
+                        val batch = try {
                             fetchDiscoverySource(
                                 section = section,
                                 source = indexedSource.value,
@@ -250,13 +291,30 @@ class CandidateRetriever(
                                 requestGate = requestGate,
                                 countBySource = countBySource,
                             )
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (_: Throwable) {
+                            // Bad cold-start source -> empty batch instead of cancelling siblings.
+                            emptyList()
                         }
-                    }.awaitAll().flatten()
+                        sourceResults.send(batch)
+                    }
                 }
-                candidates.addAll(pageCandidates)
-                if (candidates.distinctBy { it.sourceId to it.manga.url }.size >= SuggestionsConfig.COLD_START_EARLY_BAILOUT_CANDIDATES) {
-                    break@pages
+
+                val pageCandidates = mutableListOf<SuggestionCandidate>()
+                repeat(indexedSources.size) {
+                    val batch = sourceResults.receive()
+                    if (batch.isNotEmpty()) {
+                        pageCandidates.addAll(batch)
+                        onSourceComplete?.invoke(batch)
+                    }
                 }
+                pageCandidates
+            }
+            candidates.addAll(pageCandidates)
+            // Check after full page so every source gets at least one page queried.
+            if (candidates.distinctBy { it.sourceId to it.manga.url }.size >= SuggestionsConfig.COLD_START_EARLY_BAILOUT_CANDIDATES) {
+                break@pages
             }
         }
 
@@ -273,18 +331,31 @@ class CandidateRetriever(
         page: Int,
         requestGate: Semaphore,
         countBySource: ConcurrentHashMap<Long, AtomicInteger>,
+        maxPerSourceFetch: Int? = null,
     ): List<SuggestionCandidate> {
         val pageResult = requestGate.withPermit {
-            sourceResult(sourceId = source.id) {
-                when (section.sortOrder) {
-                    SuggestionSortOrder.Latest ->
-                        if (source.supportsLatest) source.getLatestUpdates(page) else source.getPopularManga(page)
-                    SuggestionSortOrder.Popular -> source.getPopularManga(page)
+            when (section.sortOrder) {
+                SuggestionSortOrder.Latest -> {
+                    val latest = if (source.supportsLatest) {
+                        sourceResult(sourceId = source.id) {
+                            source.getLatestUpdates(page)
+                        }
+                    } else {
+                        null
+                    }
+                    latest?.takeIf { it.mangas.isNotEmpty() }
+                        ?: sourceResult(sourceId = source.id) {
+                            source.getPopularManga(page)
+                        }
                 }
-            }
+                SuggestionSortOrder.Popular ->
+                    sourceResult(sourceId = source.id) {
+                        source.getPopularManga(page)
+                    }
+                }
         } ?: return emptyList()
 
-        val candidates = cappedCandidates(section, source.id, sourceIndex, null, pageResult.mangas, countBySource)
+        val candidates = cappedCandidates(section, source.id, sourceIndex, null, pageResult.mangas, countBySource, maxPerSourceFetch)
         learnVocabulary(candidates, source.id)
         return candidates
     }
@@ -309,6 +380,7 @@ class CandidateRetriever(
         page: Int,
         requestGate: Semaphore,
         countBySource: ConcurrentHashMap<Long, AtomicInteger>,
+        maxPerSourceFetch: Int? = null,
     ): List<SuggestionCandidate> {
         val canonicalTag = section.canonicalTag
 
@@ -360,6 +432,7 @@ class CandidateRetriever(
             searchTerm = injectedFilters?.let { "" } ?: (section.searchTerms.firstOrNull() ?: canonicalTag),
             pageResult.mangas,
             countBySource,
+            maxPerSourceFetch,
         )
 
         // ── Phase: vocabulary learning ────────────────────────────────────────────
@@ -406,12 +479,13 @@ class CandidateRetriever(
         searchTerm: String?,
         mangas: List<SManga>,
         countBySource: ConcurrentHashMap<Long, AtomicInteger>,
+        maxPerSourceFetch: Int? = null,
     ): List<SuggestionCandidate> {
         val counter = countBySource.getOrPut(sourceId) { AtomicInteger(0) }
         val maxPerSource = if (section.isColdStartDiscovery()) {
             SuggestionsConfig.COLD_START_MAX_PER_SOURCE_FETCH
         } else {
-            SuggestionsConfig.MAX_PER_SOURCE_FETCH
+            maxPerSourceFetch ?: SuggestionsConfig.MAX_PER_SOURCE_FETCH
         }
         val remaining = maxPerSource - counter.get()
         if (remaining <= 0) {
@@ -442,7 +516,7 @@ class CandidateRetriever(
 
     private fun activeNetworkSources(discovery: Boolean = false, freshSourceFirst: Boolean = false): List<CatalogueSource> =
         SuggestionSourceSelector.activeNetworkSources(
-            sources = sourceManager.getCatalogueSources(),
+            sources = catalogueSourcesProvider(),
             selection = sourceSelection(),
             discovery = discovery,
             freshSourceFirst = freshSourceFirst,
@@ -472,9 +546,10 @@ class CandidateRetriever(
             result
         } catch (e: CancellationException) {
             throw e
-        } catch (e: Exception) {
-            // Log individual source failures to the debug log (Bug 8a).
-            // Not surfaced to the user per-source; only aggregate failures are shown.
+        } catch (e: Throwable) {
+            // Log individual source failures to the debug log (Bug 8a). Catching Throwable
+            // (not just Exception) keeps a corrupt extension that throws e.g. NoClassDefFoundError
+            // from killing every other source in the same coroutineScope.
             if (sourceId != null) {
                 debugLog.add(
                     LogType.SECTION_DROPPED,

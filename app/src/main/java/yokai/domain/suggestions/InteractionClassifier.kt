@@ -49,6 +49,7 @@ object InteractionClassifier {
 
 data class AffinityTag(
     val name: String,
+    val canonicalTag: String,
     val score: Double,
 )
 

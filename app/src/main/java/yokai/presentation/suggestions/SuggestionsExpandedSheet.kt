@@ -5,9 +5,9 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -26,6 +26,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -133,10 +137,10 @@ fun SuggestionsExpandedSheet(
                 else -> {
                     LazyVerticalGrid(
                         state = gridState,
-                        columns = GridCells.Adaptive(104.dp),
+                        columns = GridCells.Fixed(SUGGESTION_GRID_COLUMNS),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(max = 600.dp),
+                            .fillMaxHeight(0.85f),
                         contentPadding = PaddingValues(
                             start = 16.dp,
                             end = 16.dp,
@@ -168,16 +172,24 @@ fun SuggestionsExpandedSheet(
                         }
                     }
 
-                    // Trigger load-more when near the bottom and more sources available
-                    if (hasMore && !isLoadingMore) {
-                        val lastVisibleIndex = gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
-                        val totalItems = gridState.layoutInfo.totalItemsCount
-                        if (lastVisibleIndex >= totalItems - 4 && totalItems > 0) {
-                            onLoadMore()
+                    // Trigger load-more reactively via snapshotFlow so it fires at most once
+                    // per threshold-crossing instead of on every recomposition.
+                    LaunchedEffect(gridState, hasMore, isLoadingMore) {
+                        if (!hasMore || isLoadingMore) return@LaunchedEffect
+                        snapshotFlow {
+                            val info = gridState.layoutInfo
+                            val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+                            val total = info.totalItemsCount
+                            total > 0 && lastVisible >= total - 4
                         }
+                            .distinctUntilChanged()
+                            .filter { it }
+                            .collect { onLoadMore() }
                     }
                 }
             }
         }
     }
 }
+
+private const val SUGGESTION_GRID_COLUMNS = 3

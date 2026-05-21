@@ -2,7 +2,6 @@ package yokai.domain.suggestions
 
 enum class SectionType {
     DISCOVERY,
-    PINNED_TAG,
     MANAGED_TAG,
 }
 

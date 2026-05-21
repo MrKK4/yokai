@@ -1,5 +1,10 @@
 package yokai.presentation.suggestions
 
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -60,6 +65,7 @@ fun SuggestionsScreen(
     contentPadding: PaddingValues,
     onMangaClick: (Manga) -> Unit,
     onCanScrollUpChanged: (Boolean) -> Unit,
+    onVisibleSectionChanged: (String?) -> Unit,
     onExpandSection: (String) -> Unit,
 ) {
     val state by presenter.state.collectAsState()
@@ -81,14 +87,88 @@ fun SuggestionsScreen(
     val visibleSuggestions = state.selectedSectionKey
         ?.let { key -> state.suggestions.filterKeys { it == key } }
         ?: state.suggestions
-    val sectionStartIndexes = remember(visibleSuggestions) {
-        visibleSuggestions.values.toSectionStartIndexes()
+
+    // Sections visible in the current filter context, preserving planned order.
+    val effectivePlannedSections = remember(state.plannedSections, state.selectedSectionKey) {
+        if (state.selectedSectionKey != null) {
+            state.plannedSections.filter { it.sectionKey == state.selectedSectionKey }
+        } else {
+            state.plannedSections
+        }
+    }
+    val displayedPlannedSections = remember(
+        effectivePlannedSections,
+        state.nextBatchStartIndex,
+        state.isFetchingBatch,
+        state.allSectionsLoaded,
+        state.selectedSectionKey,
+    ) {
+        if (state.selectedSectionKey != null) {
+            effectivePlannedSections
+        } else {
+            val loadingSectionCount = if (state.isFetchingBatch && !state.allSectionsLoaded) 1 else 0
+            val visibleCount = (state.nextBatchStartIndex + loadingSectionCount)
+                .coerceIn(0, effectivePlannedSections.size)
+            effectivePlannedSections.take(visibleCount)
+        }
+    }
+    val hasVisibleSuggestions = visibleSuggestions.values.any { it.isNotEmpty() }
+    val hasLoadingPlannedSection = displayedPlannedSections.isNotEmpty() && state.isFetchingBatch
+    // V2 progressive layout: render only fetched sections plus the currently fetching one.
+    val usePlannedLayout = displayedPlannedSections.isNotEmpty()
+    val showGrid = shouldShowSuggestionsGrid(
+        hasVisibleSuggestions = hasVisibleSuggestions,
+        hasLoadingPlannedSection = hasLoadingPlannedSection,
+    )
+
+    val sectionStartIndexes = remember(displayedPlannedSections, visibleSuggestions, usePlannedLayout) {
+        if (usePlannedLayout) {
+            val indexes = mutableListOf<Int>()
+            var idx = 0
+            displayedPlannedSections.forEachIndexed { index, section ->
+                val mangaList = visibleSuggestions[section.sectionKey]
+                val isLoadingSection = index >= state.nextBatchStartIndex && state.isFetchingBatch
+                if (!isLoadingSection && mangaList.isNullOrEmpty()) return@forEachIndexed
+                indexes += idx
+                val count = mangaList?.size ?: SKELETON_CARDS_PER_SECTION
+                idx += 1 + count + 1 // header + items/skeleton + spacer
+            }
+            indexes
+        } else {
+            visibleSuggestions.values.toSectionStartIndexes()
+        }
+    }
+    val sectionKeysForIndexes = remember(
+        displayedPlannedSections,
+        visibleSuggestions,
+        usePlannedLayout,
+        state.nextBatchStartIndex,
+        state.isFetchingBatch,
+    ) {
+        if (usePlannedLayout) {
+            buildList {
+                displayedPlannedSections.forEachIndexed { index, section ->
+                    val mangaList = visibleSuggestions[section.sectionKey]
+                    val isLoadingSection = index >= state.nextBatchStartIndex && state.isFetchingBatch
+                    if (!isLoadingSection && mangaList.isNullOrEmpty()) return@forEachIndexed
+                    add(section.sectionKey)
+                }
+            }
+        } else {
+            visibleSuggestions.keys.toList()
+        }
     }
 
     ReportScrollState(gridState, onCanScrollUpChanged)
     ReportScrollPosition(
         gridState = gridState,
         onScrollPositionChanged = presenter::saveGridScrollPosition,
+    )
+    ReportVisibleSectionState(
+        gridState = gridState,
+        sectionStartIndexes = sectionStartIndexes,
+        sectionKeys = sectionKeysForIndexes,
+        onVisibleSectionChanged = onVisibleSectionChanged,
     )
     ReportLoadMoreState(
         gridState = gridState,
@@ -97,7 +177,7 @@ fun SuggestionsScreen(
         loadedSectionCount = visibleSuggestions.size,
         isFetchingBatch = state.isFetchingBatch,
         allSectionsLoaded = state.allSectionsLoaded,
-        useSectionThreshold = state.plannedSections.isNotEmpty(),
+        useSectionThreshold = false,
         onLoadMore = presenter::loadNextPage,
     )
 
@@ -107,7 +187,7 @@ fun SuggestionsScreen(
         contentColor = MaterialTheme.colorScheme.onBackground,
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
-            if (visibleSuggestions.isEmpty()) {
+            if (!showGrid) {
                 EmptySuggestions(
                     hasSuggestions = state.suggestions.isNotEmpty(),
                     isLoading = state.isLoading,
@@ -120,7 +200,7 @@ fun SuggestionsScreen(
                 )
             } else {
                 LazyVerticalGrid(
-                    columns = GridCells.Adaptive(MANGA_GRID_MIN_WIDTH),
+                    columns = GridCells.Fixed(SUGGESTION_GRID_COLUMNS),
                     modifier = Modifier.fillMaxSize(),
                     state = gridState,
                     contentPadding = contentPadding,
@@ -135,29 +215,72 @@ fun SuggestionsScreen(
                             RefreshingFooter()
                         }
                     }
-                    visibleSuggestions.forEach { (sectionKey, mangaList) ->
-                        item(
-                            key = "header:$sectionKey",
-                            span = { GridItemSpan(maxLineSpan) },
-                        ) {
-                            val query = remember(sectionKey) { presenter.extractQueryFromSection(sectionKey) }
-                            SuggestionHeader(
-                                displayName = state.sectionDisplayNames[sectionKey] ?: sectionKey,
-                                hasExpandButton = query != null,
-                                onExpand = query?.let { { onExpandSection(sectionKey) } },
-                            )
+                    if (usePlannedLayout) {
+                        // Progressive layout: show skeleton for unloaded sections,
+                        // replace with real items as each section's data arrives.
+                        displayedPlannedSections.forEachIndexed { index, section ->
+                            val sectionKey = section.sectionKey
+                            val mangaList = visibleSuggestions[sectionKey]
+                            val isLoadingSection = index >= state.nextBatchStartIndex && state.isFetchingBatch
+                            if (!isLoadingSection && mangaList.isNullOrEmpty()) return@forEachIndexed
+                            item(
+                                key = "header:$sectionKey",
+                                span = { GridItemSpan(maxLineSpan) },
+                            ) {
+                                val query = remember(sectionKey) { presenter.extractQueryFromSection(sectionKey) }
+                                SuggestionHeader(
+                                    displayName = state.sectionDisplayNames[sectionKey] ?: section.displayReason,
+                                    hasExpandButton = query != null,
+                                    onExpand = query?.let { { onExpandSection(sectionKey) } },
+                                )
+                            }
+                            if (!mangaList.isNullOrEmpty()) {
+                                items(
+                                    items = mangaList,
+                                    key = { manga -> "$sectionKey:${manga.source}:${manga.url}" },
+                                ) { manga ->
+                                    SuggestionItem(manga = manga, onClick = { onMangaClick(manga) })
+                                }
+                            } else if (isLoadingSection) {
+                                repeat(SKELETON_CARDS_PER_SECTION) { index ->
+                                    item(key = "skeleton:$sectionKey:$index") {
+                                        SuggestionSkeletonCard()
+                                    }
+                                }
+                            }
+                            item(
+                                key = "space:$sectionKey",
+                                span = { GridItemSpan(maxLineSpan) },
+                            ) {
+                                Box(modifier = Modifier.height(18.dp))
+                            }
                         }
-                        items(
-                            items = mangaList,
-                            key = { manga -> "$sectionKey:${manga.source}:${manga.url}" },
-                        ) { manga ->
-                            SuggestionItem(manga = manga, onClick = { onMangaClick(manga) })
-                        }
-                        item(
-                            key = "space:$sectionKey",
-                            span = { GridItemSpan(maxLineSpan) },
-                        ) {
-                            Box(modifier = Modifier.height(18.dp))
+                    } else {
+                        // V1 / legacy: iterate loaded sections directly.
+                        visibleSuggestions.forEach { (sectionKey, mangaList) ->
+                            item(
+                                key = "header:$sectionKey",
+                                span = { GridItemSpan(maxLineSpan) },
+                            ) {
+                                val query = remember(sectionKey) { presenter.extractQueryFromSection(sectionKey) }
+                                SuggestionHeader(
+                                    displayName = state.sectionDisplayNames[sectionKey] ?: sectionKey,
+                                    hasExpandButton = query != null,
+                                    onExpand = query?.let { { onExpandSection(sectionKey) } },
+                                )
+                            }
+                            items(
+                                items = mangaList,
+                                key = { manga -> "$sectionKey:${manga.source}:${manga.url}" },
+                            ) { manga ->
+                                SuggestionItem(manga = manga, onClick = { onMangaClick(manga) })
+                            }
+                            item(
+                                key = "space:$sectionKey",
+                                span = { GridItemSpan(maxLineSpan) },
+                            ) {
+                                Box(modifier = Modifier.height(18.dp))
+                            }
                         }
                     }
                     if (state.isFetching && !state.isLoading) {
@@ -184,7 +307,9 @@ fun SuggestionsScreen(
                 SuggestionsFilterSheet(
                     availableTags = state.availableTags,
                     blacklistedTags = state.blacklistedTags,
-                    onApply = presenter::applyTagBlacklist,
+                    pinnedTags = state.pinnedTags,
+                    pinEnabled = state.pinFilterEnabled,
+                    onApply = presenter::applyTagFilters,
                     onDismissRequest = presenter::dismissTagFilterSheet,
                 )
             }
@@ -205,6 +330,25 @@ fun SuggestionsScreen(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun ReportVisibleSectionState(
+    gridState: LazyGridState,
+    sectionStartIndexes: List<Int>,
+    sectionKeys: List<String>,
+    onVisibleSectionChanged: (String?) -> Unit,
+) {
+    LaunchedEffect(gridState, sectionStartIndexes, sectionKeys) {
+        snapshotFlow {
+            val firstVisibleItem = gridState.layoutInfo.visibleItemsInfo.firstOrNull()?.index
+                ?: gridState.firstVisibleItemIndex
+            val sectionIndex = sectionStartIndexes.indexOfLast { it <= firstVisibleItem }
+            sectionKeys.getOrNull(sectionIndex)
+        }
+            .distinctUntilChanged()
+            .collect(onVisibleSectionChanged)
     }
 }
 
@@ -300,17 +444,20 @@ private fun EmptySuggestions(
     emptyMessage: String?,
     modifier: Modifier = Modifier,
 ) {
-    val isRefreshing = isLoading || isFetching
+    // emptyMessage is a terminal state (error / no matches / waiting for sources). It must
+    // win over an overlapping background refresh so the user isn't shown an endless spinner
+    // while the worker happens to be running.
+    val isRefreshing = (isLoading || isFetching) && emptyMessage == null
     val title = when {
-        isRefreshing -> stringResource(MR.strings.suggestions_refreshing)
         emptyMessage != null -> emptyMessage
+        isRefreshing -> stringResource(MR.strings.suggestions_refreshing)
         hasSuggestions -> stringResource(MR.strings.suggestions_no_matching)
         else -> stringResource(MR.strings.suggestions_none_found)
     }
     val subtitle = when {
+        emptyMessage != null -> null
         isRefreshing -> stringResource(MR.strings.suggestions_searching_sources)
         hasSuggestions -> stringResource(MR.strings.suggestions_try_another_filter)
-        emptyMessage != null -> null
         else -> stringResource(MR.strings.suggestions_read_to_build)
     }
     Column(
@@ -445,7 +592,7 @@ internal fun SuggestionItem(manga: Manga, onClick: () -> Unit) {
             )
             Text(
                 text = manga.title,
-                style = MaterialTheme.typography.titleMedium,
+                style = MaterialTheme.typography.bodyMedium,
                 color = Color.White,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 3,
@@ -458,8 +605,40 @@ internal fun SuggestionItem(manga: Manga, onClick: () -> Unit) {
     }
 }
 
-private val MANGA_GRID_MIN_WIDTH = 104.dp
+@Composable
+private fun SuggestionSkeletonCard() {
+    val transition = rememberInfiniteTransition(label = "skeleton")
+    val alpha by transition.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 0.75f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 900),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "skeleton_alpha",
+    )
+    ElevatedCard(
+        modifier = Modifier
+            .fillMaxWidth()
+            .aspectRatio(2f / 3f),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = alpha)),
+        )
+    }
+}
+
+private const val SUGGESTION_GRID_COLUMNS = 3
 private const val LOAD_MORE_THRESHOLD = 3
+private const val SKELETON_CARDS_PER_SECTION = 9
+
+internal fun shouldShowSuggestionsGrid(
+    hasVisibleSuggestions: Boolean,
+    hasLoadingPlannedSection: Boolean,
+): Boolean =
+    hasVisibleSuggestions || hasLoadingPlannedSection
 
 private fun Collection<List<Manga>>.toSectionStartIndexes(): List<Int> {
     val indexes = mutableListOf<Int>()

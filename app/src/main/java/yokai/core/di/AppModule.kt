@@ -125,7 +125,7 @@ fun appModule(app: Application) = module {
                 builder.addInterceptor(
                     ChuckerInterceptor.Builder(app)
                         .collector(ChuckerCollector(app))
-                        .maxContentLength(250000L)
+                        .maxContentLength(8192L)
                         .redactHeaders(emptySet())
                         .alwaysReadResponseBody(false)
                         .build(),

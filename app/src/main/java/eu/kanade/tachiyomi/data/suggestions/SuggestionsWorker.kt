@@ -63,18 +63,23 @@ class SuggestionsWorker(
     override suspend fun doWork(): Result {
         return try {
             SuggestionsRefreshCoordinator.tryRun {
-                if (preferences.suggestionsV2Enabled().get()) {
+                val v2AtStart = preferences.suggestionsV2Enabled().get()
+                if (v2AtStart) {
                     return@tryRun doV2Work()
                 }
 
                 val suggestionQueries = getSuggestionQueries.execute()
                 val suggestions = feedAggregator.fetch(suggestionQueries)
+                // The user may have flipped V2 on while the network fetch was in flight.
+                // Don't write V1 rows under a V2 expectation — the foreground rebuild will
+                // produce fresh V2 results, so let it own the table.
+                if (preferences.suggestionsV2Enabled().get() != v2AtStart) return@tryRun Result.success()
                 if (suggestions.isEmpty()) return@tryRun retryOrFailure()
 
                 preferences.suggestionsResultVersion().set(SuggestionsConfig.RESULT_VERSION_V1)
                 suggestionsRepository.replaceAll(suggestions)
                 Result.success()
-            } ?: Result.success()
+            } ?: retryOrFailure()
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
@@ -102,6 +107,10 @@ class SuggestionsWorker(
             now = now,
         )
         plannedSectionRepository.replaceAll(plannedSections)
+        // Belt-and-braces orphan sweep: deletes any rows whose section_key isn't in the new
+        // plan, including the empty-string section_key edge case that the per-section loop
+        // below would skip.
+        suggestionsRepository.deleteOrphanedByPlan()
 
         val existingSuggestions = suggestionsRepository.getSuggestions()
         val loadedSectionKeys = existingSuggestions.map { it.sectionKey }.toSet()
@@ -122,6 +131,9 @@ class SuggestionsWorker(
         var batchStartIndex = nextMissingIndex.takeIf { it < plannedSections.size } ?: 0
 
         repeat(SuggestionsConfig.BACKGROUND_MAX_SECTION_BATCHES) {
+            // Bail mid-run if the foreground toggled the V2 flag — the foreground rebuild owns
+            // the table after the toggle, and any further writes here would mix V1/V2 rows.
+            if (!preferences.suggestionsV2Enabled().get()) return@repeat
             val sectionsToFetch = SectionBatcher.nextBatch(plannedSections, batchStartIndex)
             if (sectionsToFetch.isEmpty()) return@repeat
 
@@ -184,12 +196,7 @@ class SuggestionsWorker(
     }
 
     private suspend fun syncLegacyTagStateForV2(now: Long) {
-        preferences.suggestionsPinnedTags().get().forEach { rawTag ->
-            val canonicalTag = tagCanonicalizer.canonicalize(rawTag).canonicalKey
-            if (canonicalTag.isNotBlank()) {
-                tagProfileRepository.setTagState(canonicalTag, TagState.PINNED, now)
-            }
-        }
+        // Pins are V1-only and not synced to the V2 tag_profile table.
         preferences.suggestionsTagsBlacklist().get().forEach { rawTag ->
             val canonicalTag = tagCanonicalizer.canonicalize(rawTag).canonicalKey
             if (canonicalTag.isNotBlank()) {

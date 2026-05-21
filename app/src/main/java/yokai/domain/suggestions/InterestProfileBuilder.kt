@@ -157,8 +157,10 @@ class InterestProfileBuilder(
         InteractionClassifier.baseWeight(interaction)
 
     private suspend fun clearManagedProfiles(now: Long) {
+        // Only zero managed (history-derived) profiles. Blacklisted state is preserved so the
+        // user's explicit hide selections survive a library wipe / cold-start condition.
         val clearedProfiles = tagProfileRepository.getAllProfiles()
-            .filter { !it.isBlacklisted && it.affinity > 0.0 }
+            .filter { it.isManaged && it.affinity > 0.0 }
             .map { profile ->
                 profile.copy(
                     longTermCount = 0.0,

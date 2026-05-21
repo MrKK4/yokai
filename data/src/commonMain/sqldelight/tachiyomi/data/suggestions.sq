@@ -37,5 +37,12 @@ DELETE FROM suggestions;
 deleteBySectionKey:
 DELETE FROM suggestions WHERE section_key = :sectionKey;
 
+deleteOrphanedByPlan:
+-- Removes V2 suggestions whose section_key no longer maps to a planned section. V1 must NOT
+-- call this — V1 doesn't populate suggestion_planned_section so every V1 row would be wiped.
+DELETE FROM suggestions
+WHERE section_key NOT IN (SELECT section_key FROM suggestion_planned_section)
+  AND section_key != '';
+
 count:
 SELECT COUNT(*) FROM suggestions;

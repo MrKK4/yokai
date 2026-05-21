@@ -1,7 +1,6 @@
 package yokai.domain.suggestions
 
 enum class TagState {
-    PINNED,
     MANAGED,
     BLACKLISTED,
 }
