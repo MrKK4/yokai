@@ -1,0 +1,4 @@
+## 2024-05-24 - [Ensure secure screen applied to uninherited Activities]
+**Vulnerability:** Application content could be visible in the recent apps screen or when screen recording/sharing for certain independent screens that do not inherit from `BaseActivity` (where `SecureActivityDelegate.setSecure` is typically applied). E.g. CrashActivity, BiometricActivity, BaseOAuthLoginActivity, and ExtensionInstallActivity.
+**Learning:** Activities that don't inherit from the central BaseActivity might bypass security restrictions inadvertently (like FLAG_SECURE) if security delegates aren't explicitly called in their `onCreate` lifecycle hook.
+**Prevention:** Ensure any activity entry point, even temporary or error handling screens, explicitly calls `SecureActivityDelegate.setSecure` or securely inherits from a common BaseActivity to enforce application-wide privacy settings.

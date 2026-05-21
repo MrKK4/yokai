@@ -10,6 +10,7 @@ import android.widget.ProgressBar
 import eu.kanade.tachiyomi.data.track.TrackManager
 import eu.kanade.tachiyomi.ui.base.activity.BaseThemedActivity
 import eu.kanade.tachiyomi.ui.main.MainActivity
+import eu.kanade.tachiyomi.ui.security.SecureActivityDelegate
 import uy.kohesive.injekt.injectLazy
 
 abstract class BaseOAuthLoginActivity : BaseThemedActivity() {
@@ -20,6 +21,7 @@ abstract class BaseOAuthLoginActivity : BaseThemedActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        SecureActivityDelegate.setSecure(this)
 
         val view = ProgressBar(this)
         setContentView(

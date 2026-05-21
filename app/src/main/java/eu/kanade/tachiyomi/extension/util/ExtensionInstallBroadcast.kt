@@ -18,6 +18,7 @@ import eu.kanade.tachiyomi.extension.util.ExtensionInstallBroadcast.Companion.EX
 import eu.kanade.tachiyomi.extension.util.ExtensionInstallBroadcast.Companion.PACKAGE_INSTALLED_ACTION
 import eu.kanade.tachiyomi.extension.util.ExtensionInstallBroadcast.Companion.packageInstallStep
 import eu.kanade.tachiyomi.util.system.DeviceUtil
+import eu.kanade.tachiyomi.ui.security.SecureActivityDelegate
 import eu.kanade.tachiyomi.util.system.getParcelableCompat
 import eu.kanade.tachiyomi.util.system.toast
 import uy.kohesive.injekt.injectLazy
@@ -126,6 +127,7 @@ class ExtensionInstallActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        SecureActivityDelegate.setSecure(this)
         try {
             if (PACKAGE_INSTALLED_ACTION == intent.action) {
                 packageInstallStep(this, intent)

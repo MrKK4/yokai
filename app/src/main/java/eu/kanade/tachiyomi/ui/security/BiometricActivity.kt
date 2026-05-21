@@ -15,6 +15,7 @@ class BiometricActivity : BaseThemedActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        SecureActivityDelegate.setSecure(this)
         val fromSearch = intent.getBooleanExtra("fromSearch", false)
         AuthenticatorUtil.isAuthenticating = true
         val biometricPrompt = BiometricPrompt(
