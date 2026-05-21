@@ -37,6 +37,14 @@ class RecentMangaHolder(
     init {
         binding.card.setOnClickListener { adapter.delegate.onCoverClick(flexibleAdapterPosition) }
         binding.constraintLayout.setOnClickListener { adapter.delegate.onCoverClick(flexibleAdapterPosition) }
+        binding.card.setOnLongClickListener {
+            adapter.delegate.onMangaActionsClicked(flexibleAdapterPosition, binding.card)
+            true
+        }
+        binding.constraintLayout.setOnLongClickListener {
+            adapter.delegate.onMangaActionsClicked(flexibleAdapterPosition, binding.card)
+            true
+        }
         binding.removeHistory.setOnClickListener {
             adapter.delegate.onRemoveHistoryClicked(flexibleAdapterPosition)
         }
@@ -150,3 +158,27 @@ internal fun shouldShowHistoryResetButton(
     historyId: Long?,
 ): Boolean =
     viewType.isHistory && showRemoveHistory && historyId != null
+
+internal enum class RecentMangaLongPressAction {
+    AddToLibrary,
+    RemoveFromLibrary,
+    RemoveFromHistory,
+}
+
+internal fun recentMangaLongPressActions(
+    viewType: RecentsViewType,
+    isFavorite: Boolean,
+    historyId: Long?,
+): List<RecentMangaLongPressAction> =
+    buildList {
+        add(
+            if (isFavorite) {
+                RecentMangaLongPressAction.RemoveFromLibrary
+            } else {
+                RecentMangaLongPressAction.AddToLibrary
+            },
+        )
+        if (viewType.isHistory && historyId != null) {
+            add(RecentMangaLongPressAction.RemoveFromHistory)
+        }
+    }

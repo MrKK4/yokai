@@ -21,19 +21,14 @@ class GetUserSuggestionQueriesUseCaseTest {
 
     @Test
     fun `tag section key uses canonical tag not display name`() = runBlocking {
-        val affinityTags = mockk<GetUserAffinityTagsUseCase>()
-        coEvery { affinityTags.execute() } returns listOf(
-            AffinityTag(
-                name = "Love Stories",
-                canonicalTag = "romance",
-                score = 10.0,
-            ),
-        )
+        val tagProfiles = FakeTagProfileRepository()
+        tagProfiles.upsertProfile(profile("romance", recent = 10.0))
         val useCase = GetUserSuggestionQueriesUseCase(
-            getAffinityTags = affinityTags,
             savedSearchRepository = EmptySavedSearchRepository,
             preferences = stubPreferences(pinnedTags = emptySet()),
             canonicalizer = stubCanonicalizer(),
+            tagProfileRepository = tagProfiles,
+            randomProvider = { kotlin.random.Random(0) },
         )
 
         val queries = useCase.execute()
@@ -44,16 +39,19 @@ class GetUserSuggestionQueriesUseCaseTest {
 
     @Test
     fun `pinned tags rank above affinity tags and saved searches`() = runBlocking {
-        val affinityTags = mockk<GetUserAffinityTagsUseCase>()
-        coEvery { affinityTags.execute() } returns listOf(
-            AffinityTag(name = "Romance", canonicalTag = "romance", score = 10.0),
-            AffinityTag(name = "Drama", canonicalTag = "drama", score = 3.0),
+        val tagProfiles = FakeTagProfileRepository()
+        tagProfiles.upsertProfiles(
+            listOf(
+                profile("romance", recent = 10.0),
+                profile("drama", recent = 3.0),
+            ),
         )
         val useCase = GetUserSuggestionQueriesUseCase(
-            getAffinityTags = affinityTags,
             savedSearchRepository = EmptySavedSearchRepository,
             preferences = stubPreferences(pinnedTags = setOf("Mecha", "Romance")),
             canonicalizer = stubCanonicalizer(),
+            tagProfileRepository = tagProfiles,
+            randomProvider = { kotlin.random.Random(0) },
         )
 
         val queries = useCase.execute()
@@ -71,18 +69,52 @@ class GetUserSuggestionQueriesUseCaseTest {
 
     @Test
     fun `blank or whitespace pinned tags are dropped`() = runBlocking {
-        val affinityTags = mockk<GetUserAffinityTagsUseCase>()
-        coEvery { affinityTags.execute() } returns emptyList()
+        val tagProfiles = FakeTagProfileRepository()
+        tagProfiles.upsertProfile(profile("romance", recent = 10.0))
         val useCase = GetUserSuggestionQueriesUseCase(
-            getAffinityTags = affinityTags,
             savedSearchRepository = EmptySavedSearchRepository,
             preferences = stubPreferences(pinnedTags = setOf("", "   ", "Action")),
             canonicalizer = stubCanonicalizer(),
+            tagProfileRepository = tagProfiles,
+            randomProvider = { kotlin.random.Random(0) },
         )
 
         val queries = useCase.execute()
 
-        assertEquals(listOf("pinned:action"), queries.map { it.sectionKey })
+        assertTrue(queries.map { it.sectionKey }.contains("pinned:action"))
+        assertTrue(queries.none { it.sectionKey.isBlank() })
+    }
+
+    @Test
+    fun `cold start with no tag profiles returns no tag queries`() = runBlocking {
+        val useCase = GetUserSuggestionQueriesUseCase(
+            savedSearchRepository = EmptySavedSearchRepository,
+            preferences = stubPreferences(pinnedTags = setOf("Action")),
+            canonicalizer = stubCanonicalizer(),
+            tagProfileRepository = FakeTagProfileRepository(),
+            randomProvider = { kotlin.random.Random(0) },
+        )
+
+        val queries = useCase.execute()
+
+        assertTrue(queries.isEmpty())
+    }
+
+    @Test
+    fun `v1 queries use tag profiles instead of legacy affinity tags`() = runBlocking {
+        val tagProfiles = FakeTagProfileRepository()
+        tagProfiles.upsertProfile(profile("profiled", recent = 4.0))
+        val useCase = GetUserSuggestionQueriesUseCase(
+            savedSearchRepository = EmptySavedSearchRepository,
+            preferences = stubPreferences(pinnedTags = emptySet()),
+            canonicalizer = stubCanonicalizer(),
+            tagProfileRepository = tagProfiles,
+            randomProvider = { kotlin.random.Random(0) },
+        )
+
+        val queries = useCase.execute()
+
+        assertEquals(listOf("tag:profiled"), queries.map { it.sectionKey })
     }
 
     private fun stubPreferences(pinnedTags: Set<String>): PreferencesHelper {

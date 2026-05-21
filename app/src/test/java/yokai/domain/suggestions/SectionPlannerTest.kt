@@ -36,6 +36,44 @@ class SectionPlannerTest {
     }
 
     @Test
+    fun `precise profile planner excludes blacklisted and zero affinity tags`() {
+        val profiles = listOf(
+            profile("romance", recent = 10.0),
+            profile("action", recent = 8.0, state = TagState.BLACKLISTED),
+            profile("zero", recent = 0.0),
+            profile("drama", recent = 2.0),
+        )
+
+        val planned = SuggestionProfilePlanner.precise(profiles)
+
+        assertEquals(listOf("romance", "drama"), planned.map { it.canonicalTag })
+    }
+
+    @Test
+    fun `surprise profile planner mixes high and low affinity tags`() {
+        val profiles = listOf(
+            profile("one", recent = 10.0),
+            profile("two", recent = 9.0),
+            profile("three", recent = 8.0),
+            profile("four", recent = 3.0),
+            profile("five", recent = 2.0),
+            profile("six", recent = 1.0),
+        )
+
+        val planned = SuggestionProfilePlanner.surprise(
+            profiles = profiles,
+            random = kotlin.random.Random(0),
+        )
+
+        assertEquals(6, planned.size)
+        assertEquals(
+            setOf("one", "two", "three", "four", "five", "six"),
+            planned.map { it.canonicalTag }.toSet(),
+        )
+        assertTrue(planned.take(2).any { it.affinity <= 3.0 })
+    }
+
+    @Test
     fun `plan excludes blacklisted and zero affinity managed tags`() = runBlocking {
         val repository = FakeTagProfileRepository()
         val planner = SectionPlanner(repository, SuggestionsDebugLog())

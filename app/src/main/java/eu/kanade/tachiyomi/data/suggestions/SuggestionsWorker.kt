@@ -68,6 +68,9 @@ class SuggestionsWorker(
                     return@tryRun doV2Work()
                 }
 
+                val now = System.currentTimeMillis()
+                interestProfileBuilder.buildProfile(now)
+                syncLegacyTagStateForV2(now)
                 val suggestionQueries = getSuggestionQueries.execute()
                 val suggestions = feedAggregator.fetch(suggestionQueries)
                 // The user may have flipped V2 on while the network fetch was in flight.
@@ -196,6 +199,7 @@ class SuggestionsWorker(
     }
 
     private suspend fun syncLegacyTagStateForV2(now: Long) {
+        tagProfileRepository.resetBlacklistedToManaged(now)
         // Pins are V1-only and not synced to the V2 tag_profile table.
         preferences.suggestionsTagsBlacklist().get().forEach { rawTag ->
             val canonicalTag = tagCanonicalizer.canonicalize(rawTag).canonicalKey
@@ -252,6 +256,10 @@ class SuggestionsWorker(
                 ExistingWorkPolicy.REPLACE,
                 request,
             )
+        }
+
+        fun cancelManual(context: Context) {
+            WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME_MANUAL)
         }
 
         fun isRunningFlow(context: Context): Flow<Boolean> =

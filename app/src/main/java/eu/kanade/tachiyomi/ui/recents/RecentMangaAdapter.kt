@@ -103,6 +103,7 @@ class RecentMangaAdapter(val delegate: RecentsInterface) :
 
     interface RecentsInterface : GroupedDownloadInterface {
         fun onCoverClick(position: Int)
+        fun onMangaActionsClicked(position: Int, anchor: View)
         fun onRemoveHistoryClicked(position: Int)
         fun onSubChapterClicked(position: Int, chapter: Chapter, view: View)
         fun updateExpandedExtraChapters(position: Int, expanded: Boolean)

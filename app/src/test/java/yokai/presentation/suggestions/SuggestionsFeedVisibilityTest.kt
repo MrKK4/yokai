@@ -22,6 +22,7 @@ class SuggestionsFeedVisibilityTest {
             shouldShowSuggestionsGrid(
                 hasVisibleSuggestions = false,
                 hasLoadingPlannedSection = true,
+                showLoadingSkeleton = true,
             ),
         )
     }
@@ -31,6 +32,30 @@ class SuggestionsFeedVisibilityTest {
         assertTrue(
             shouldShowSuggestionsGrid(
                 hasVisibleSuggestions = true,
+                hasLoadingPlannedSection = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `v1 loading without visible suggestions shows skeleton grid`() {
+        assertTrue(
+            shouldShowLoadingSkeleton(
+                hasVisibleSuggestions = false,
+                isLoading = true,
+                isFetching = false,
+                hasLoadingPlannedSection = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `loaded suggestions do not show loading skeleton`() {
+        assertFalse(
+            shouldShowLoadingSkeleton(
+                hasVisibleSuggestions = true,
+                isLoading = true,
+                isFetching = false,
                 hasLoadingPlannedSection = false,
             ),
         )

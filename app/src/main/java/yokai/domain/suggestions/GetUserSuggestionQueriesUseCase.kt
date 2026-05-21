@@ -1,18 +1,34 @@
 package yokai.domain.suggestions
 
 import eu.kanade.tachiyomi.data.preference.PreferencesHelper
+import kotlin.random.Random
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import yokai.domain.source.browse.filter.SavedSearchRepository
 
 class GetUserSuggestionQueriesUseCase(
-    private val getAffinityTags: GetUserAffinityTagsUseCase,
     private val savedSearchRepository: SavedSearchRepository,
     private val preferences: PreferencesHelper,
     private val canonicalizer: TagCanonicalizer,
+    private val tagProfileRepository: TagProfileRepository,
+    private val randomProvider: () -> Random = { Random(System.nanoTime()) },
 ) {
     suspend fun execute(): List<SuggestionQuery> {
-        val affinityTags = getAffinityTags.execute()
+        val profileTags = SuggestionProfilePlanner.surprise(
+            profiles = tagProfileRepository.getNonBlacklistedProfiles(),
+            random = randomProvider(),
+        )
+        val affinityTags = if (profileTags.isEmpty()) {
+            emptyList()
+        } else {
+            profileTags.map { profile ->
+                AffinityTag(
+                    name = profile.displayName,
+                    canonicalTag = profile.canonicalTag,
+                    score = profile.affinity,
+                )
+            }
+        }
         val savedSearches = savedSearchRepository.findAll()
         // Pinned tags are V1-only. Resolve to canonical keys so they dedupe against the
         // history-derived affinity tag list (pin wins because PINNED_SCORE > any affinity).
@@ -27,12 +43,15 @@ class GetUserSuggestionQueriesUseCase(
         }
 
         return withContext(Dispatchers.Default) {
-            val pinnedQueries = pinnedCanonicalTags.map { canonicalTag ->
+            val hasProfileSignal = affinityTags.isNotEmpty()
+            val pinnedQueries = if (hasProfileSignal) pinnedCanonicalTags.map { canonicalTag ->
                 SuggestionQuery(
                     query = canonicalTag,
                     sectionKey = "pinned:${canonicalTag.normalizedQuery()}",
                     score = PINNED_SCORE,
                 )
+            } else {
+                emptyList()
             }
 
             val tagQueries = affinityTags.map { tag ->
@@ -43,7 +62,7 @@ class GetUserSuggestionQueriesUseCase(
                 )
             }
 
-            val savedSearchQueries = savedSearches
+            val savedSearchQueries = if (hasProfileSignal) savedSearches
                 .asSequence()
                 .mapNotNull { savedSearch -> savedSearch.query?.trim()?.takeIf { it.isUsefulSearchQuery() } }
                 .distinctBy { it.lowercase() }
@@ -56,6 +75,9 @@ class GetUserSuggestionQueriesUseCase(
                     )
                 }
                 .toList()
+            else {
+                emptyList()
+            }
 
             // Order matters: pinnedQueries first so distinctBy(query) keeps the pinned variant
             // when an affinity tag canonicalizes to the same key.

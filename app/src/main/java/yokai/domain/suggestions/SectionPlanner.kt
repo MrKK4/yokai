@@ -14,16 +14,13 @@ class SectionPlanner(
 
         // Pin functionality lives entirely in the V1 path (pref-driven queries). V2 only
         // ranks tags by inferred affinity from reading history.
-        val visibleProfiles = profiles
-            .filter { it.isManaged }
-            .sortedByDescending { it.affinity }
+        val visibleProfiles = SuggestionProfilePlanner.precise(profiles)
 
-        if (visibleProfiles.none { it.affinity > 0.0 }) {
+        if (visibleProfiles.isEmpty()) {
             return listOf(discoverySection(sortOrder, now, coldStart = true))
         }
 
         visibleProfiles
-            .filter { it.affinity > 0.0 }
             .forEachIndexed { index, profile ->
                 sections += tagSection(profile, SectionType.MANAGED_TAG, sortOrder, now)
                 debugLog.add(

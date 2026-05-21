@@ -38,4 +38,29 @@ class SuggestionsPresenterCachePolicyTest {
             ),
         )
     }
+
+    @Test
+    fun `foreground refresh with rendered suggestions does not become full page loading`() {
+        assertFalse(
+            shouldShowFullPageRefreshLoading(
+                isForegroundRefreshing = true,
+                hasRenderedSuggestions = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `foreground refresh without rendered suggestions can show loading skeleton`() {
+        assertTrue(
+            shouldShowFullPageRefreshLoading(
+                isForegroundRefreshing = true,
+                hasRenderedSuggestions = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `refresh lock timeout never shows blocking empty page message`() {
+        assertFalse(shouldShowBlockingRefreshLockMessage())
+    }
 }

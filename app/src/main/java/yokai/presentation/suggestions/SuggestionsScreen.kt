@@ -28,7 +28,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -114,11 +113,18 @@ fun SuggestionsScreen(
     }
     val hasVisibleSuggestions = visibleSuggestions.values.any { it.isNotEmpty() }
     val hasLoadingPlannedSection = displayedPlannedSections.isNotEmpty() && state.isFetchingBatch
+    val showLoadingSkeleton = shouldShowLoadingSkeleton(
+        hasVisibleSuggestions = hasVisibleSuggestions,
+        isLoading = state.isLoading,
+        isFetching = state.isFetching,
+        hasLoadingPlannedSection = hasLoadingPlannedSection,
+    )
     // V2 progressive layout: render only fetched sections plus the currently fetching one.
     val usePlannedLayout = displayedPlannedSections.isNotEmpty()
     val showGrid = shouldShowSuggestionsGrid(
         hasVisibleSuggestions = hasVisibleSuggestions,
         hasLoadingPlannedSection = hasLoadingPlannedSection,
+        showLoadingSkeleton = showLoadingSkeleton,
     )
 
     val sectionStartIndexes = remember(displayedPlannedSections, visibleSuggestions, usePlannedLayout) {
@@ -207,12 +213,21 @@ fun SuggestionsScreen(
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
-                    if (state.isLoading && !state.isForegroundRefresh) {
+                    if (showLoadingSkeleton && !usePlannedLayout) {
                         item(
-                            key = "refreshing",
+                            key = "loading-header",
                             span = { GridItemSpan(maxLineSpan) },
                         ) {
-                            RefreshingFooter()
+                            SuggestionHeader(
+                                displayName = loadingSectionTitle(state.sortOrder),
+                                hasExpandButton = false,
+                                onExpand = null,
+                            )
+                        }
+                        repeat(SKELETON_CARDS_PER_SECTION) { index ->
+                            item(key = "loading-skeleton:$index") {
+                                SuggestionSkeletonCard()
+                            }
                         }
                     }
                     if (usePlannedLayout) {
@@ -486,33 +501,18 @@ private fun EmptySuggestions(
 }
 
 @Composable
-private fun RefreshingFooter() {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(bottom = 6.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-        Text(
-            text = stringResource(MR.strings.suggestions_searching_sources),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.padding(top = 8.dp),
-        )
-    }
-}
-
-@Composable
 private fun LoadingMoreFooter() {
-    Box(
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 24.dp),
-        contentAlignment = Alignment.Center,
+            .padding(vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        CircularProgressIndicator()
+        repeat(SUGGESTION_GRID_COLUMNS) {
+            Box(modifier = Modifier.weight(1f)) {
+                SuggestionSkeletonCard()
+            }
+        }
     }
 }
 
@@ -637,8 +637,23 @@ private const val SKELETON_CARDS_PER_SECTION = 9
 internal fun shouldShowSuggestionsGrid(
     hasVisibleSuggestions: Boolean,
     hasLoadingPlannedSection: Boolean,
+    showLoadingSkeleton: Boolean = false,
 ): Boolean =
-    hasVisibleSuggestions || hasLoadingPlannedSection
+    hasVisibleSuggestions || hasLoadingPlannedSection || showLoadingSkeleton
+
+internal fun shouldShowLoadingSkeleton(
+    hasVisibleSuggestions: Boolean,
+    isLoading: Boolean,
+    isFetching: Boolean,
+    hasLoadingPlannedSection: Boolean,
+): Boolean =
+    !hasVisibleSuggestions && (isLoading || isFetching || hasLoadingPlannedSection)
+
+private fun loadingSectionTitle(sortOrder: yokai.domain.suggestions.SuggestionSortOrder): String =
+    when (sortOrder) {
+        yokai.domain.suggestions.SuggestionSortOrder.Latest -> "Latest from your sources"
+        yokai.domain.suggestions.SuggestionSortOrder.Popular -> "Popular from your sources"
+    }
 
 private fun Collection<List<Manga>>.toSectionStartIndexes(): List<Int> {
     val indexes = mutableListOf<Int>()

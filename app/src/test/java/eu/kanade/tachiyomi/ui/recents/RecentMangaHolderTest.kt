@@ -38,4 +38,39 @@ class RecentMangaHolderTest {
             ),
         )
     }
+
+    @Test
+    fun `history long press shows library and history actions`() {
+        val actions = recentMangaLongPressActions(
+            viewType = RecentsViewType.History,
+            isFavorite = false,
+            historyId = 1L,
+        )
+
+        assertTrue(RecentMangaLongPressAction.AddToLibrary in actions)
+        assertTrue(RecentMangaLongPressAction.RemoveFromHistory in actions)
+    }
+
+    @Test
+    fun `favorited history long press shows remove from library`() {
+        val actions = recentMangaLongPressActions(
+            viewType = RecentsViewType.History,
+            isFavorite = true,
+            historyId = 1L,
+        )
+
+        assertTrue(RecentMangaLongPressAction.RemoveFromLibrary in actions)
+        assertFalse(RecentMangaLongPressAction.AddToLibrary in actions)
+    }
+
+    @Test
+    fun `non history long press does not show history removal`() {
+        val actions = recentMangaLongPressActions(
+            viewType = RecentsViewType.Updates,
+            isFavorite = false,
+            historyId = 1L,
+        )
+
+        assertFalse(RecentMangaLongPressAction.RemoveFromHistory in actions)
+    }
 }
