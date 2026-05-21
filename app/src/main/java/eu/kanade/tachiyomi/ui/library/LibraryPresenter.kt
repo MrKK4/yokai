@@ -323,10 +323,14 @@ class LibraryPresenter(
 
     fun getMangaInCategories(catId: Int?): List<LibraryManga>? {
         catId ?: return null
+        // ⚡ Bolt: Convert list to sequence to enforce lazy evaluation across chained operations.
+        // This avoids intermediate collection allocations, improving memory and scrolling performance.
         return currentLibraryItems
+            .asSequence()
             .filterIsInstance<LibraryMangaItem>()
             .filter { it.header.category.id == catId }
             .map { it.manga }
+            .toList()
     }
 
     private suspend fun sectionLibrary(items: LibraryMap, freshStart: Boolean = false) {
@@ -393,9 +397,12 @@ class LibraryPresenter(
                     && item is LibraryPlaceholderItem
                     && item.type is LibraryPlaceholderItem.Type.Hidden
                 ) {
+                    // ⚡ Bolt: Convert to sequence to prevent allocating intermediate lists during chained filtering.
                     val subItems = (libraryToDisplay[key] ?: hiddenLibraryItems)
+                            .asSequence()
                             .filterIsInstance<LibraryMangaItem>()
                             .filter { it.manga.category == item.category }
+                            .toList()
                     if (subItems.isEmpty()) {
                         return@f filtersOff
                     } else {
@@ -647,7 +654,9 @@ class LibraryPresenter(
     }
 
     fun downloadedItemsFrom(items: List<LibraryItem>): List<LibraryItem> {
+        // ⚡ Bolt: Using lazy sequence to evaluate chained operations efficiently and avoid unnecessary ArrayList allocations.
         return items
+            .asSequence()
             .filterIsInstance<LibraryMangaItem>()
             .mapNotNull { item ->
                 val count = downloadManager.getDownloadCount(item.manga.manga)
@@ -660,6 +669,7 @@ class LibraryPresenter(
                 }
             }
             .sortedBy { it.manga.manga.title.lowercase() }
+            .toList()
     }
 
     private fun setUnreadBadge(itemList: List<LibraryItem>) {

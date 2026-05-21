@@ -1,0 +1,3 @@
+## 2026-05-21 - Optimize Library Filtering and Sorting with Sequences
+**Learning:** In a codebase heavily relying on large collections (like `LibraryPresenter` and `LibraryController` handling a library with hundreds or thousands of mangas), chained operations (`filterIsInstance`, `filter`, `mapNotNull`, etc.) result in hidden intermediate ArrayList allocations, harming scrolling and memory performance.
+**Action:** Use `.asSequence()` for any chain of operations on large manga lists before operations such as `.filter`, `.map`, and `.take` to process elements lazily and minimize costly allocations, resolving it with `.toList()` at the end.

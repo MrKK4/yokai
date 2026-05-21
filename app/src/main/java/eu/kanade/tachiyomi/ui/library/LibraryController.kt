@@ -529,10 +529,13 @@ open class LibraryController(
     }
 
     private fun openRandomManga(global: Boolean) {
+        // ⚡ Bolt: Added `.asSequence()` to apply filter operations lazily to the underlying list, reducing overhead.
         val items =
-            if (global) { presenter.currentLibraryItems } else { adapter.currentItems }
+            (if (global) { presenter.currentLibraryItems } else { adapter.currentItems })
+                .asSequence()
                 .filterIsInstance<LibraryMangaItem>()
                 .filter { !it.manga.manga.initialized || it.manga.unread > 0 }
+                .toList()
         if (items.isNotEmpty()) {
             val item = items.random() as LibraryMangaItem
             openManga(item.manga.manga)
