@@ -65,6 +65,8 @@ class CandidateRetriever(
         sections: List<PlannedSection>,
         pageOffset: Int = 1,
         maxPerSourceFetch: Int? = null,
+        globalSeenKeys: Set<String> = emptySet(),
+        sectionSeenKeys: Map<String, Set<String>> = emptyMap(),
     ): List<CandidateRetrievalResult> {
         val results = coroutineScope {
             val requestGate = Semaphore(SuggestionsConfig.MAX_CONCURRENT_SOURCE_REQUESTS)
@@ -72,7 +74,14 @@ class CandidateRetriever(
                 async {
                     CandidateRetrievalResult(
                         section = section,
-                        candidates = retrieveSection(section, pageOffset, requestGate, maxPerSourceFetch),
+                        candidates = retrieveSection(
+                            section = section,
+                            pageOffset = pageOffset,
+                            requestGate = requestGate,
+                            maxPerSourceFetch = maxPerSourceFetch,
+                            globalSeenKeys = globalSeenKeys,
+                            sectionSeenKeys = sectionSeenKeys[section.sectionKey].orEmpty(),
+                        ),
                     )
                 }
             }.awaitAll()
@@ -93,6 +102,8 @@ class CandidateRetriever(
         sections: List<PlannedSection>,
         pageOffset: Int = 1,
         maxPerSourceFetch: Int? = null,
+        globalSeenKeys: Set<String> = emptySet(),
+        sectionSeenKeys: Map<String, Set<String>> = emptyMap(),
         onResult: suspend (CandidateRetrievalResult) -> Unit,
     ) {
         if (sections.isEmpty()) return
@@ -110,6 +121,8 @@ class CandidateRetriever(
                             pageOffset = pageOffset,
                             requestGate = requestGate,
                             maxPerSourceFetch = maxPerSourceFetch,
+                            globalSeenKeys = globalSeenKeys,
+                            sectionSeenKeys = sectionSeenKeys[section.sectionKey].orEmpty(),
                             onSourceComplete = { batch ->
                                 partial.addAll(batch)
                                 results.trySend(
@@ -157,10 +170,13 @@ class CandidateRetriever(
         pageOffset: Int,
         requestGate: Semaphore,
         maxPerSourceFetch: Int? = null,
+        globalSeenKeys: Set<String> = emptySet(),
+        sectionSeenKeys: Set<String> = emptySet(),
         onSourceComplete: (suspend (List<SuggestionCandidate>) -> Unit)? = null,
     ): List<SuggestionCandidate> {
+        val blockedMangaKeys = globalSeenKeys + sectionSeenKeys
         if (section.isColdStartDiscovery()) {
-            return retrieveColdStartDiscoverySection(section, requestGate, onSourceComplete)
+            return retrieveColdStartDiscoverySection(section, requestGate, blockedMangaKeys, onSourceComplete)
         }
 
         val sources = activeSources(discovery = section.type == SectionType.DISCOVERY)
@@ -176,11 +192,33 @@ class CandidateRetriever(
                 val sourceFetches = when (section.type) {
                     SectionType.DISCOVERY ->
                         sources.mapIndexed { sourceIndex, source ->
-                            suspend { fetchDiscoverySource(section, source, sourceIndex, page, requestGate, countBySource, maxPerSourceFetch) }
+                            suspend {
+                                fetchDiscoverySource(
+                                    section,
+                                    source,
+                                    sourceIndex,
+                                    page,
+                                    requestGate,
+                                    countBySource,
+                                    maxPerSourceFetch,
+                                    blockedMangaKeys,
+                                )
+                            }
                         }
                     else ->
                         sources.mapIndexed { sourceIndex, source ->
-                            suspend { fetchSearchSource(section, source, sourceIndex, page, requestGate, countBySource, maxPerSourceFetch) }
+                            suspend {
+                                fetchSearchSource(
+                                    section,
+                                    source,
+                                    sourceIndex,
+                                    page,
+                                    requestGate,
+                                    countBySource,
+                                    maxPerSourceFetch,
+                                    blockedMangaKeys,
+                                )
+                            }
                         }
                 }
                 val targetCandidateCount = targetCandidateCount(section, maxPerSourceFetch)
@@ -236,10 +274,10 @@ class CandidateRetriever(
                 counter.set((savedCount - shortfall).coerceAtLeast(0))
                 val topUp = when (section.type) {
                     SectionType.DISCOVERY -> fetchDiscoverySource(
-                        section, source, sources.indexOf(source), page, requestGate, countBySource, maxPerSourceFetch,
+                        section, source, sources.indexOf(source), page, requestGate, countBySource, maxPerSourceFetch, blockedMangaKeys,
                     )
                     else -> fetchSearchSource(
-                        section, source, sources.indexOf(source), page, requestGate, countBySource, maxPerSourceFetch,
+                        section, source, sources.indexOf(source), page, requestGate, countBySource, maxPerSourceFetch, blockedMangaKeys,
                     )
                 }
                 candidates.addAll(topUp)
@@ -251,8 +289,9 @@ class CandidateRetriever(
         }
         // ──────────────────────────────────────────────────────────────────────
 
-        // Page-2 backstop
-        if (candidates.size < SuggestionsConfig.MIN_RESULTS_PER_SECTION) {
+        // Page-2 backstop. If seen/history filtering leaves the section below the
+        // visible target, give each source one bounded chance to replace filtered items.
+        if (candidates.distinctBy { it.sourceId to it.manga.url }.size < SuggestionsConfig.MAX_RESULTS_PER_SECTION) {
             val page2Candidates = fetchPageProgressive(page + 1, countBySource, onSourceComplete)
             candidates.addAll(page2Candidates)
         }
@@ -265,6 +304,7 @@ class CandidateRetriever(
     private suspend fun retrieveColdStartDiscoverySection(
         section: PlannedSection,
         requestGate: Semaphore,
+        blockedMangaKeys: Set<String>,
         onSourceComplete: (suspend (List<SuggestionCandidate>) -> Unit)?,
     ): List<SuggestionCandidate> {
         var sources = activeSources(discovery = true).shuffled()
@@ -296,6 +336,7 @@ class CandidateRetriever(
                                 page = page,
                                 requestGate = requestGate,
                                 countBySource = countBySource,
+                                blockedMangaKeys = blockedMangaKeys,
                             )
                         } catch (e: CancellationException) {
                             throw e
@@ -338,6 +379,7 @@ class CandidateRetriever(
         requestGate: Semaphore,
         countBySource: ConcurrentHashMap<Long, AtomicInteger>,
         maxPerSourceFetch: Int? = null,
+        blockedMangaKeys: Set<String> = emptySet(),
     ): List<SuggestionCandidate> {
         val pageResult = requestGate.withPermit {
             when (section.sortOrder) {
@@ -361,7 +403,16 @@ class CandidateRetriever(
                 }
         } ?: return emptyList()
 
-        val candidates = cappedCandidates(section, source.id, sourceIndex, null, pageResult.mangas, countBySource, maxPerSourceFetch)
+        val candidates = cappedCandidates(
+            section = section,
+            sourceId = source.id,
+            sourceIndex = sourceIndex,
+            searchTerm = null,
+            mangas = pageResult.mangas,
+            countBySource = countBySource,
+            maxPerSourceFetch = maxPerSourceFetch,
+            blockedMangaKeys = blockedMangaKeys,
+        )
         learnVocabulary(candidates, source.id)
         return candidates
     }
@@ -387,6 +438,7 @@ class CandidateRetriever(
         requestGate: Semaphore,
         countBySource: ConcurrentHashMap<Long, AtomicInteger>,
         maxPerSourceFetch: Int? = null,
+        blockedMangaKeys: Set<String> = emptySet(),
     ): List<SuggestionCandidate> {
         val canonicalTag = section.canonicalTag
 
@@ -432,13 +484,14 @@ class CandidateRetriever(
         // ─────────────────────────────────────────────────────────────────────────
 
         val candidates = cappedCandidates(
-            section,
-            source.id,
-            sourceIndex,
+            section = section,
+            sourceId = source.id,
+            sourceIndex = sourceIndex,
             searchTerm = query,
-            pageResult.mangas,
-            countBySource,
-            maxPerSourceFetch,
+            mangas = pageResult.mangas,
+            countBySource = countBySource,
+            maxPerSourceFetch = maxPerSourceFetch,
+            blockedMangaKeys = blockedMangaKeys,
         )
 
         // ── Phase: vocabulary learning ────────────────────────────────────────────
@@ -486,6 +539,7 @@ class CandidateRetriever(
         mangas: List<SManga>,
         countBySource: ConcurrentHashMap<Long, AtomicInteger>,
         maxPerSourceFetch: Int? = null,
+        blockedMangaKeys: Set<String> = emptySet(),
     ): List<SuggestionCandidate> {
         val counter = countBySource.getOrPut(sourceId) { AtomicInteger(0) }
         val maxPerSource = if (section.isColdStartDiscovery()) {
@@ -499,20 +553,31 @@ class CandidateRetriever(
             return emptyList()
         }
 
-        val selected = mangas.take(remaining)
+        val filteredMangas = mangas
+            .withIndex()
+            .filterNot { indexedManga -> mangaKey(sourceId, indexedManga.value.url) in blockedMangaKeys }
+        val filteredCount = mangas.size - filteredMangas.size
+        if (filteredCount > 0) {
+            debugLog.add(
+                LogType.ITEM_FILTERED,
+                "Source $sourceId filtered $filteredCount seen candidates before cap for section '${section.sectionKey}'",
+            )
+        }
+
+        val selected = filteredMangas.take(remaining)
         val newCount = counter.addAndGet(selected.size)
-        if (newCount >= maxPerSource && mangas.size > selected.size) {
+        if (newCount >= maxPerSource && filteredMangas.size > selected.size) {
             debugLog.add(LogType.SOURCE_CAP_HIT, "Source $sourceId capped at $maxPerSource candidates for section '${section.sectionKey}'")
         }
 
-        return selected.mapIndexed { index, manga ->
+        return selected.map { indexedManga ->
             SuggestionCandidate(
                 section = section,
                 sourceId = sourceId,
-                manga = manga,
+                manga = indexedManga.value,
                 searchTerm = searchTerm,
                 sourceIndex = sourceIndex,
-                position = index,
+                position = indexedManga.index,
             )
         }
     }
@@ -544,6 +609,8 @@ class CandidateRetriever(
                 SuggestionsConfig.MAX_RESULTS_PER_SECTION
             else -> SuggestionsConfig.MAX_RESULTS_PER_SECTION * 2
         }
+
+    private fun mangaKey(sourceId: Long, url: String): String = "$sourceId:$url"
 
     private suspend fun <T> sourceResult(sourceId: Long? = null, block: suspend () -> T): T? =
         try {

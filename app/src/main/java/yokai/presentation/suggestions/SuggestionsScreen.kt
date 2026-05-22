@@ -242,11 +242,15 @@ fun SuggestionsScreen(
                                 key = "header:$sectionKey",
                                 span = { GridItemSpan(maxLineSpan) },
                             ) {
-                                val query = remember(sectionKey) { presenter.extractQueryFromSection(sectionKey) }
+                                val canExpand = remember(sectionKey, state.sortOrder) { presenter.canExpandSection(sectionKey) }
                                 SuggestionHeader(
                                     displayName = state.sectionDisplayNames[sectionKey] ?: section.displayReason,
-                                    hasExpandButton = query != null,
-                                    onExpand = query?.let { { onExpandSection(sectionKey) } },
+                                    hasExpandButton = canExpand,
+                                    onExpand = if (canExpand) {
+                                        { onExpandSection(sectionKey) }
+                                    } else {
+                                        null
+                                    },
                                 )
                             }
                             if (!mangaList.isNullOrEmpty()) {
@@ -277,11 +281,15 @@ fun SuggestionsScreen(
                                 key = "header:$sectionKey",
                                 span = { GridItemSpan(maxLineSpan) },
                             ) {
-                                val query = remember(sectionKey) { presenter.extractQueryFromSection(sectionKey) }
+                                val canExpand = remember(sectionKey, state.sortOrder) { presenter.canExpandSection(sectionKey) }
                                 SuggestionHeader(
                                     displayName = state.sectionDisplayNames[sectionKey] ?: sectionKey,
-                                    hasExpandButton = query != null,
-                                    onExpand = query?.let { { onExpandSection(sectionKey) } },
+                                    hasExpandButton = canExpand,
+                                    onExpand = if (canExpand) {
+                                        { onExpandSection(sectionKey) }
+                                    } else {
+                                        null
+                                    },
                                 )
                             }
                             items(
@@ -332,15 +340,19 @@ fun SuggestionsScreen(
             val sheetSectionKey = state.sheetSectionKey
             if (sheetSectionKey != null && !state.sheetSuppressed) {
                 SuggestionsExpandedSheet(
+                    sectionKey = sheetSectionKey,
                     displayName = state.sectionDisplayNames[sheetSectionKey] ?: sheetSectionKey,
                     results = state.sheetResults,
                     isLoading = state.sheetIsLoading,
                     isLoadingMore = state.sheetIsLoadingMore,
                     hasMore = state.sheetHasMore,
                     error = state.sheetError,
+                    initialFirstVisibleItemIndex = presenter.sheetFirstVisibleItemIndex,
+                    initialFirstVisibleItemScrollOffset = presenter.sheetFirstVisibleItemScrollOffset,
                     onMangaClick = onMangaClick,
                     onRetry = { presenter.expandSection(sheetSectionKey) },
                     onDismiss = presenter::dismissExpandSheet,
+                    onScrollPositionChanged = presenter::saveSheetScrollPosition,
                     onLoadMore = presenter::loadMoreExpandedSection,
                 )
             }

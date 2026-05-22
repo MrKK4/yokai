@@ -145,7 +145,11 @@ class SuggestionsWorker(
                 cutoff = now - SuggestionsConfig.SEEN_LOG_TTL_MS,
             )
             val suggestions = suggestionRanker.rankWithContext(
-                retrievalResults = candidateRetriever.retrieve(sectionsToFetch),
+                retrievalResults = candidateRetriever.retrieve(
+                    sections = sectionsToFetch,
+                    globalSeenKeys = globalSeenKeys,
+                    sectionSeenKeys = sectionSeenKeys,
+                ),
                 context = rankingContext,
                 globalSeenKeys = globalSeenKeys,
                 sectionSeenKeys = sectionSeenKeys,

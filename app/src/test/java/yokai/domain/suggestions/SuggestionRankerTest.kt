@@ -88,6 +88,43 @@ class SuggestionRankerTest {
     }
 
     @Test
+    fun `cold-start discovery takes one manga per source before circling back`() = runBlocking {
+        val tagRepository = FakeTagProfileRepository()
+        val ranker = SuggestionRanker(
+            mangaRepository = mockk<MangaRepository>(relaxed = true),
+            tagCanonicalizer = TagCanonicalizer(tagRepository),
+            tagProfileRepository = tagRepository,
+            debugLog = SuggestionsDebugLog(),
+            random = ZeroRandom,
+        )
+
+        val section = coldStartSection()
+        val candidates = buildList {
+            repeat(20) { position ->
+                add(candidate(section = section, sourceId = 1L, sourceIndex = 0, position = position))
+            }
+            (2L..9L).forEach { sourceId ->
+                add(candidate(section = section, sourceId = sourceId, sourceIndex = sourceId.toInt() - 1))
+            }
+        }
+
+        val ranked = ranker.rankWithContext(
+            retrievalResults = listOf(CandidateRetrievalResult(section, candidates)),
+            context = RankingContext(
+                localKeys = emptySet(),
+                localTitles = emptySet(),
+                profiles = emptyMap(),
+                blacklistedTags = emptySet(),
+            ),
+            globalSeenKeys = emptySet(),
+            sectionSeenKeys = emptyMap(),
+            sessionContext = SessionContext(),
+        )
+
+        assertEquals((1L..9L).toList(), ranked.take(9).map { it.source })
+    }
+
+    @Test
     fun `ranker circles back to productive sources when other sources are thin`() = runBlocking {
         val tagRepository = FakeTagProfileRepository()
         val ranker = SuggestionRanker(
@@ -134,6 +171,16 @@ class SuggestionRankerTest {
             canonicalTag = "action",
             displayReason = "Because you read Action",
             searchTerms = listOf("action"),
+            sortOrder = SuggestionSortOrder.Popular,
+        )
+
+    private fun coldStartSection(): PlannedSection =
+        PlannedSection(
+            sectionKey = COLD_START_DISCOVERY_SECTION_KEY,
+            type = SectionType.DISCOVERY,
+            canonicalTag = null,
+            displayReason = "Popular from your sources",
+            searchTerms = emptyList(),
             sortOrder = SuggestionSortOrder.Popular,
         )
 

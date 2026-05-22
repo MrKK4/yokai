@@ -9,6 +9,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -102,19 +103,27 @@ class FeedAggregator(
         }
 
         val suggestions = withContext(Dispatchers.Default) {
-            sectionResults
+            val hits = sectionResults
                 .flatten()
                 .filterNot { hit -> hit.manga.hasBlacklistedTag(blacklistedTags) }
                 .distinctBy { it.sourceId to it.manga.url }
-                .sortedByDescending { it.relevance }
-                .capBySource(
-                    if (coldStartDiscovery) {
-                        SuggestionsConfig.COLD_START_MAX_PER_SOURCE_FETCH
-                    } else {
-                        MAX_PER_SOURCE_GLOBAL
-                    },
+
+            val selected = if (coldStartDiscovery) {
+                SourceDiversity.roundRobinBySource(
+                    items = hits,
+                    maxResults = SuggestionsConfig.COLD_START_MAX_RESULTS,
+                    sourceId = { it.sourceId },
+                    sourceIndex = { 0 },
+                    score = { it.relevance },
                 )
-                .take(if (coldStartDiscovery) SuggestionsConfig.COLD_START_MAX_RESULTS else MAX_TOTAL)
+            } else {
+                hits
+                    .sortedByDescending { it.relevance }
+                    .capBySource(MAX_PER_SOURCE_GLOBAL)
+                    .take(MAX_TOTAL)
+            }
+
+            selected
                 .mapIndexed { index, hit ->
                     hit.toSuggestion(displayRank = index.toLong())
                 }
@@ -624,6 +633,194 @@ class FeedAggregator(
         )
     }
 
+    suspend fun fetchExpandedSectionProgressively(
+        query: String,
+        seenMangaUrls: Set<String> = emptySet(),
+        sourceOffset: Int = 0,
+        sourceLimit: Int = SuggestionsConfig.EXPANDED_SOURCE_BATCH_SIZE,
+        onPage: suspend (ExpandedSectionPage) -> Unit,
+    ): ExpandedSectionPage {
+        val random = Random(System.nanoTime())
+        val localManga = mangaRepository.getMangaList()
+        val localKeys = localManga.map { it.source to it.url }.toSet()
+        val localTitles = localManga.map { it.title.normalizedTitle() }.toSet()
+        val blacklistedTags = preferences.suggestionsTagsBlacklist().get().normalizedQueries()
+        val allSources = activeNetworkSources()
+        val safeSourceLimit = sourceLimit.coerceAtLeast(1)
+        val requestGate = Semaphore(SuggestionsConfig.MAX_CONCURRENT_SOURCE_REQUESTS)
+        val sectionKey = "expanded:${query.lowercase().trim()}"
+        val suggestionQuery = SuggestionQuery(query = query, sectionKey = sectionKey, score = 0.0)
+        val page = random.nextInt(EXPANDED_PAGE_MIN, EXPANDED_PAGE_MAX)
+
+        var nextSourceOffset = sourceOffset.coerceAtLeast(0)
+        var hasMoreSources = nextSourceOffset < allSources.size
+        val emittedSuggestions = mutableListOf<SuggestedManga>()
+        while (nextSourceOffset < allSources.size) {
+            val batchOffset = nextSourceOffset
+            val batchedSources = allSources.drop(batchOffset).take(safeSourceLimit)
+            if (batchedSources.isEmpty()) break
+
+            var emittedInBatch = false
+            coroutineScope {
+                val sourceResults = Channel<List<ScoredManga>>(Channel.UNLIMITED)
+                batchedSources.forEachIndexed { index, source ->
+                    async {
+                        val hits = try {
+                            fetchPersonalizedFromSource(
+                                source = source,
+                                sourceIndex = batchOffset + index,
+                                page = page,
+                                suggestionQuery = suggestionQuery,
+                                sortOrder = preferences.suggestionsSortOrder().get(),
+                                localKeys = localKeys,
+                                localTitles = localTitles,
+                                seenMangaUrls = seenMangaUrls,
+                                blacklistedTags = blacklistedTags,
+                                requestGate = requestGate,
+                                random = random,
+                            )
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (_: Throwable) {
+                            emptyList()
+                        }
+                        sourceResults.send(hits)
+                    }
+                }
+
+                repeat(batchedSources.size) {
+                    val hits = sourceResults.receive()
+                    if (hits.isNotEmpty()) {
+                        emittedInBatch = true
+                        val suggestions = hits.bestByTitle()
+                            .take(SuggestionsConfig.EXPANDED_PAGE_SIZE)
+                            .mapIndexed { index, hit ->
+                                hit.toSuggestion(displayRank = (batchOffset * EXPANDED_DISPLAY_RANK_STRIDE + index).toLong())
+                            }
+                        emittedSuggestions.addAll(suggestions)
+                        onPage(
+                            ExpandedSectionPage(
+                                suggestions = suggestions,
+                                nextSourceOffset = batchOffset + safeSourceLimit,
+                                hasMoreSources = batchOffset + safeSourceLimit < allSources.size,
+                            ),
+                        )
+                    }
+                }
+            }
+
+            nextSourceOffset = batchOffset + safeSourceLimit
+            hasMoreSources = nextSourceOffset < allSources.size
+            if (emittedInBatch) break
+        }
+
+        return ExpandedSectionPage(
+            suggestions = emittedSuggestions,
+            nextSourceOffset = nextSourceOffset,
+            hasMoreSources = hasMoreSources,
+        )
+    }
+
+    suspend fun fetchExpandedSourceSectionProgressively(
+        sortOrder: SuggestionSortOrder,
+        seenMangaUrls: Set<String> = emptySet(),
+        sourceOffset: Int = 0,
+        sourceLimit: Int = SuggestionsConfig.EXPANDED_SOURCE_BATCH_SIZE,
+        onPage: suspend (ExpandedSectionPage) -> Unit,
+    ): ExpandedSectionPage {
+        val random = Random(System.nanoTime())
+        val localManga = mangaRepository.getMangaList()
+        val localKeys = localManga.map { it.source to it.url }.toSet()
+        val localTitles = localManga.map { it.title.normalizedTitle() }.toSet()
+        val blacklistedTags = preferences.suggestionsTagsBlacklist().get().normalizedQueries()
+        val allSources = activeNetworkSources()
+        val safeSourceLimit = sourceLimit.coerceAtLeast(1)
+        val requestGate = Semaphore(SuggestionsConfig.MAX_CONCURRENT_SOURCE_REQUESTS)
+        val page = when (sortOrder) {
+            SuggestionSortOrder.Latest -> EXPANDED_PAGE_MIN
+            SuggestionSortOrder.Popular -> random.nextInt(EXPANDED_PAGE_MIN, EXPANDED_PAGE_MAX)
+        }
+
+        var nextSourceOffset = sourceOffset.coerceAtLeast(0)
+        var hasMoreSources = nextSourceOffset < allSources.size
+        val emittedSuggestions = mutableListOf<SuggestedManga>()
+        while (nextSourceOffset < allSources.size) {
+            val batchOffset = nextSourceOffset
+            val batchedSources = allSources.drop(batchOffset).take(safeSourceLimit)
+            if (batchedSources.isEmpty()) break
+
+            var emittedInBatch = false
+            coroutineScope {
+                val sourceResults = Channel<List<ScoredManga>>(Channel.UNLIMITED)
+                batchedSources.forEachIndexed { index, source ->
+                    async {
+                        val hits = try {
+                            when (sortOrder) {
+                                SuggestionSortOrder.Latest -> fetchLatestFromSource(
+                                    source = source,
+                                    sourceIndex = batchOffset + index,
+                                    page = page,
+                                    localKeys = localKeys,
+                                    localTitles = localTitles,
+                                    seenMangaUrls = seenMangaUrls,
+                                    blacklistedTags = blacklistedTags,
+                                    requestGate = requestGate,
+                                    random = random,
+                                )
+                                SuggestionSortOrder.Popular -> fetchPopularFromSource(
+                                    source = source,
+                                    sourceIndex = batchOffset + index,
+                                    localKeys = localKeys,
+                                    localTitles = localTitles,
+                                    seenMangaUrls = seenMangaUrls,
+                                    blacklistedTags = blacklistedTags,
+                                    requestGate = requestGate,
+                                    page = page,
+                                    random = random,
+                                )
+                            }
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (_: Throwable) {
+                            emptyList()
+                        }
+                        sourceResults.send(hits)
+                    }
+                }
+
+                repeat(batchedSources.size) {
+                    val hits = sourceResults.receive()
+                    if (hits.isNotEmpty()) {
+                        emittedInBatch = true
+                        val suggestions = hits.bestByTitle()
+                            .take(SuggestionsConfig.EXPANDED_PAGE_SIZE)
+                            .mapIndexed { index, hit ->
+                                hit.toSuggestion(displayRank = (batchOffset * EXPANDED_DISPLAY_RANK_STRIDE + index).toLong())
+                            }
+                        emittedSuggestions.addAll(suggestions)
+                        onPage(
+                            ExpandedSectionPage(
+                                suggestions = suggestions,
+                                nextSourceOffset = batchOffset + safeSourceLimit,
+                                hasMoreSources = batchOffset + safeSourceLimit < allSources.size,
+                            ),
+                        )
+                    }
+                }
+            }
+
+            nextSourceOffset = batchOffset + safeSourceLimit
+            hasMoreSources = nextSourceOffset < allSources.size
+            if (emittedInBatch) break
+        }
+
+        return ExpandedSectionPage(
+            suggestions = emittedSuggestions,
+            nextSourceOffset = nextSourceOffset,
+            hasMoreSources = hasMoreSources,
+        )
+    }
+
     private suspend fun fetchPersonalizedFromSource(
         source: CatalogueSource,
         sourceIndex: Int,
@@ -870,6 +1067,7 @@ class FeedAggregator(
         private const val POPULAR_PAGE_MAX = 8        // pages 1–7
         private const val EXPANDED_PAGE_MIN = 1
         private const val EXPANDED_PAGE_MAX = 4       // pages 1–3
+        private const val EXPANDED_DISPLAY_RANK_STRIDE = 1_000
         private val WHITESPACE = Regex("\\s+")
 
         private fun mangaKey(sourceId: Long, url: String): String = "$sourceId:$url"

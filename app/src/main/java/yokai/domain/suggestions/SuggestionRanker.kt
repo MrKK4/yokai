@@ -165,14 +165,7 @@ class SuggestionRanker(
             } else {
                 maxResults
             }
-            val selected = if (coldStartDiscovery) {
-                bestByTitle.values
-                    .sortedByDescending { it.score }
-                    .capScoredBySource(SuggestionsConfig.COLD_START_MAX_PER_SOURCE_FETCH)
-                    .take(effectiveMax)
-            } else {
-                bestByTitle.values.roundRobinBySource(effectiveMax)
-            }
+            val selected = bestByTitle.values.roundRobinBySource(effectiveMax)
             selected
                 .map { it.toSuggestedManga() }
         }
@@ -243,19 +236,6 @@ class SuggestionRanker(
                 sectionKey = candidate.section.sectionKey,
                 relevanceScore = score,
             )
-    }
-
-    private fun List<ScoredCandidate>.capScoredBySource(max: Int): List<ScoredCandidate> {
-        val counts = mutableMapOf<Long, Int>()
-        return filter { scored ->
-            val count = counts.getOrDefault(scored.candidate.sourceId, 0)
-            if (count < max) {
-                counts[scored.candidate.sourceId] = count + 1
-                true
-            } else {
-                false
-            }
-        }
     }
 
     private fun Collection<ScoredCandidate>.roundRobinBySource(maxResults: Int): List<ScoredCandidate> {

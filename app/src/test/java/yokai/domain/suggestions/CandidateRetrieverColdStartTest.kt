@@ -53,6 +53,50 @@ class CandidateRetrieverColdStartTest {
     }
 
     @Test
+    fun `seen candidates are filtered before per source cap`() = runBlocking {
+        val source = FakeColdStartSource(id = 4L, titlePrefix = "SeenFiltered", resultCount = 6)
+        val retriever = retrieverWith(source)
+
+        val results = retriever.retrieve(
+            sections = listOf(normalDiscoverySection()),
+            maxPerSourceFetch = 2,
+            globalSeenKeys = setOf("4:/4/1/0", "4:/4/1/1"),
+        )
+
+        assertEquals(listOf("/4/1/2", "/4/1/3"), results.single().candidates.map { it.manga.url })
+    }
+
+    @Test
+    fun `seen-only first page does not stop source from page two top up`() = runBlocking {
+        val source = FakeColdStartSource(id = 5L, titlePrefix = "SeenFiltered", resultCount = 3)
+        val retriever = retrieverWith(source)
+
+        val results = retriever.retrieve(
+            sections = listOf(normalDiscoverySection()),
+            maxPerSourceFetch = 2,
+            globalSeenKeys = setOf("5:/5/1/0", "5:/5/1/1", "5:/5/1/2"),
+        )
+
+        assertEquals(listOf("/5/2/0", "/5/2/1"), results.single().candidates.map { it.manga.url })
+    }
+
+    @Test
+    fun `sections under display target try one page two top up after filtering`() = runBlocking {
+        val source = FakeColdStartSource(id = 6L, titlePrefix = "SeenFiltered", resultCount = 8)
+        val retriever = retrieverWith(source)
+
+        val results = retriever.retrieve(
+            sections = listOf(normalDiscoverySection()),
+            globalSeenKeys = setOf("6:/6/1/0", "6:/6/1/1", "6:/6/1/2"),
+        )
+
+        assertEquals(
+            listOf("/6/1/3", "/6/1/4", "/6/1/5", "/6/1/6", "/6/1/7", "/6/2/0"),
+            results.single().candidates.map { it.manga.url },
+        )
+    }
+
+    @Test
     fun `manual refresh tries fresh sources before recently displayed sources`() = runBlocking {
         val sources = (1L..18L)
             .map { id -> FakeColdStartSource(id = id, titlePrefix = "Source$id", resultCount = 3) }

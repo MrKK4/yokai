@@ -1,5 +1,6 @@
 package yokai.presentation.suggestions
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -29,6 +30,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -40,8 +42,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import dev.icerock.moko.resources.compose.stringResource
 import yokai.i18n.MR
@@ -303,70 +307,112 @@ private fun TagFilterRow(
     onBlockClick: () -> Unit,
     onRowClick: () -> Unit,
 ) {
-    Row(
+    val rowColor = when (mode) {
+        TagFilterMode.PINNED -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.36f)
+        TagFilterMode.BLACKLISTED -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.42f)
+        TagFilterMode.NEUTRAL -> Color.Transparent
+    }
+    val rowContentColor = when (mode) {
+        TagFilterMode.PINNED -> MaterialTheme.colorScheme.onPrimaryContainer
+        TagFilterMode.BLACKLISTED -> MaterialTheme.colorScheme.onErrorContainer
+        TagFilterMode.NEUTRAL -> MaterialTheme.colorScheme.onSurface
+    }
+    val rowBorder = when (mode) {
+        TagFilterMode.PINNED -> BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.50f))
+        TagFilterMode.BLACKLISTED -> BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.60f))
+        TagFilterMode.NEUTRAL -> null
+    }
+
+    Surface(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onRowClick)
-            .padding(horizontal = 24.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
+            .padding(horizontal = 16.dp, vertical = 3.dp),
+        shape = MaterialTheme.shapes.small,
+        color = rowColor,
+        contentColor = rowContentColor,
+        border = rowBorder,
     ) {
-        Column(
+        Row(
             modifier = Modifier
-                .weight(1f)
-                .padding(end = 8.dp),
+                .fillMaxWidth()
+                .padding(start = 16.dp, top = 6.dp, end = 8.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            Text(
-                text = tag,
-                style = MaterialTheme.typography.bodyLarge,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                color = when (mode) {
-                    TagFilterMode.BLACKLISTED -> MaterialTheme.colorScheme.error
-                    else -> MaterialTheme.colorScheme.onSurface
-                },
-            )
-            if (isCustom) {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(end = 8.dp),
+            ) {
                 Text(
-                    text = stringResource(MR.strings.custom_tag),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
+                    text = tag,
+                    style = MaterialTheme.typography.bodyLarge,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    color = rowContentColor,
+                    textDecoration = if (mode == TagFilterMode.BLACKLISTED) {
+                        TextDecoration.LineThrough
+                    } else {
+                        TextDecoration.None
+                    },
                 )
+                if (isCustom) {
+                    Text(
+                        text = stringResource(MR.strings.custom_tag),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = when (mode) {
+                            TagFilterMode.PINNED -> MaterialTheme.colorScheme.primary
+                            TagFilterMode.BLACKLISTED -> MaterialTheme.colorScheme.error
+                            TagFilterMode.NEUTRAL -> MaterialTheme.colorScheme.primary
+                        },
+                    )
+                }
             }
-        }
-        if (pinEnabled) {
+            if (pinEnabled) {
+                IconButton(
+                    onClick = onPinClick,
+                    modifier = Modifier.size(40.dp),
+                ) {
+                    Icon(
+                        imageVector = if (mode == TagFilterMode.PINNED) {
+                            Icons.Filled.PushPin
+                        } else {
+                            Icons.Outlined.PushPin
+                        },
+                        contentDescription = stringResource(MR.strings.suggestions_pin_tag),
+                        tint = if (mode == TagFilterMode.PINNED) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                }
+            }
             IconButton(
-                onClick = onPinClick,
+                onClick = onBlockClick,
                 modifier = Modifier.size(40.dp),
             ) {
                 Icon(
-                    imageVector = if (mode == TagFilterMode.PINNED) {
-                        Icons.Filled.PushPin
+                    imageVector = if (mode == TagFilterMode.BLACKLISTED) {
+                        Icons.Outlined.Close
                     } else {
-                        Icons.Outlined.PushPin
+                        Icons.Outlined.Block
                     },
-                    contentDescription = stringResource(MR.strings.suggestions_pin_tag),
-                    tint = if (mode == TagFilterMode.PINNED) {
-                        MaterialTheme.colorScheme.primary
+                    contentDescription = stringResource(
+                        if (mode == TagFilterMode.BLACKLISTED) {
+                            MR.strings.close
+                        } else {
+                            MR.strings.suggestions_block_tag
+                        },
+                    ),
+                    tint = if (mode == TagFilterMode.BLACKLISTED) {
+                        MaterialTheme.colorScheme.error
                     } else {
                         MaterialTheme.colorScheme.onSurfaceVariant
                     },
                 )
             }
-        }
-        IconButton(
-            onClick = onBlockClick,
-            modifier = Modifier.size(40.dp),
-        ) {
-            Icon(
-                imageVector = Icons.Outlined.Block,
-                contentDescription = stringResource(MR.strings.suggestions_block_tag),
-                tint = if (mode == TagFilterMode.BLACKLISTED) {
-                    MaterialTheme.colorScheme.error
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                },
-            )
         }
     }
 }

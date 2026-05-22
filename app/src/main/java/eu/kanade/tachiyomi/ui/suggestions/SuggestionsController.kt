@@ -432,7 +432,6 @@ class SuggestionsController(
                 // Suppress the expanded sheet only after the DB lookup succeeds,
                 // so the user doesn't see the sheet vanish before navigation starts.
                 presenter.suppressExpandSheet()
-                presenter.dismissExpandSheet()
                 router.pushController(MangaDetailsController(localManga, true).withFadeTransaction())
             }
         }

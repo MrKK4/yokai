@@ -11,9 +11,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -25,7 +25,9 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
@@ -41,19 +43,46 @@ import yokai.i18n.MR
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SuggestionsExpandedSheet(
+    sectionKey: String,
     displayName: String,
     results: List<Manga>,
     isLoading: Boolean,
     isLoadingMore: Boolean,
     hasMore: Boolean,
     error: String?,
+    initialFirstVisibleItemIndex: Int,
+    initialFirstVisibleItemScrollOffset: Int,
     onMangaClick: (Manga) -> Unit,
     onRetry: () -> Unit,
     onDismiss: () -> Unit,
+    onScrollPositionChanged: (index: Int, scrollOffset: Int) -> Unit,
     onLoadMore: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    val gridState = rememberLazyGridState()
+    val gridState = remember(sectionKey) {
+        LazyGridState(
+            firstVisibleItemIndex = initialFirstVisibleItemIndex,
+            firstVisibleItemScrollOffset = initialFirstVisibleItemScrollOffset,
+        )
+    }
+
+    LaunchedEffect(gridState) {
+        snapshotFlow {
+            gridState.firstVisibleItemIndex to gridState.firstVisibleItemScrollOffset
+        }
+            .distinctUntilChanged()
+            .collect { (index, scrollOffset) ->
+                onScrollPositionChanged(index, scrollOffset)
+            }
+    }
+    DisposableEffect(gridState) {
+        onDispose {
+            onScrollPositionChanged(
+                gridState.firstVisibleItemIndex,
+                gridState.firstVisibleItemScrollOffset,
+            )
+        }
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,

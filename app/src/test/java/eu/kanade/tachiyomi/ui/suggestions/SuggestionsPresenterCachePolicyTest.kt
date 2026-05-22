@@ -1,8 +1,12 @@
 package eu.kanade.tachiyomi.ui.suggestions
 
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import yokai.domain.suggestions.COLD_START_DISCOVERY_SECTION_KEY
+import yokai.domain.suggestions.SuggestionSortOrder
 
 class SuggestionsPresenterCachePolicyTest {
 
@@ -62,5 +66,36 @@ class SuggestionsPresenterCachePolicyTest {
     @Test
     fun `refresh lock timeout never shows blocking empty page message`() {
         assertFalse(shouldShowBlockingRefreshLockMessage())
+    }
+
+    @Test
+    fun `expanded sheet dismiss closes visible sheet`() {
+        assertTrue(shouldCloseExpandedSheetOnDismiss(sheetSuppressed = false))
+    }
+
+    @Test
+    fun `expanded sheet dismiss is ignored while suppressed for navigation`() {
+        assertFalse(shouldCloseExpandedSheetOnDismiss(sheetSuppressed = true))
+    }
+
+    @Test
+    fun `source sections are expandable with source list sort order`() {
+        assertEquals(
+            SuggestionSortOrder.Popular,
+            sourceSortOrderForExpandableSection("popular", SuggestionSortOrder.Latest),
+        )
+        assertEquals(
+            SuggestionSortOrder.Latest,
+            sourceSortOrderForExpandableSection("latest", SuggestionSortOrder.Popular),
+        )
+        assertEquals(
+            SuggestionSortOrder.Latest,
+            sourceSortOrderForExpandableSection("discovery", SuggestionSortOrder.Latest),
+        )
+        assertEquals(
+            SuggestionSortOrder.Popular,
+            sourceSortOrderForExpandableSection(COLD_START_DISCOVERY_SECTION_KEY, SuggestionSortOrder.Popular),
+        )
+        assertNull(sourceSortOrderForExpandableSection("tag:romance", SuggestionSortOrder.Popular))
     }
 }

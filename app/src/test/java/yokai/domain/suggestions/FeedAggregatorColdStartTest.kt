@@ -11,6 +11,7 @@ import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -92,6 +93,31 @@ class FeedAggregatorColdStartTest {
         assertEquals(setOf("latest"), page.suggestions.map { it.sectionKey }.toSet())
         assertTrue(source.latestCalls > 0)
         assertTrue(source.popularCalls > 0)
+    }
+
+    @Test
+    fun `cold start source section takes one manga per source before repeating`() = runBlocking {
+        val sources = (1L..4L)
+            .map { id ->
+                FakeCatalogueSource(
+                    id = id,
+                    titlePrefix = "Popular",
+                    supportsLatest = true,
+                )
+            }
+            .toTypedArray()
+        val aggregator = aggregatorWith(*sources)
+
+        val page = aggregator.fetchPage(
+            suggestionQueries = emptyList(),
+            usedTags = emptySet(),
+            seenMangaUrls = emptySet(),
+            currentSortOrder = SuggestionSortOrder.Popular,
+            includeSourceSection = true,
+            pageOffset = 1,
+        )
+
+        assertEquals(4, page.suggestions.take(4).map { it.source }.toSet().size)
     }
 
     @Test
@@ -235,6 +261,70 @@ class FeedAggregatorColdStartTest {
     }
 
     @Test
+    fun `expanded progressive section emits fast source results before slow source finishes`() = runBlocking {
+        val fastSource = FakeCatalogueSource(
+            id = 1L,
+            titlePrefix = "Popular",
+            supportsLatest = true,
+            searchTitlePrefix = "Fast",
+        )
+        val slowSource = FakeCatalogueSource(
+            id = 2L,
+            titlePrefix = "Popular",
+            supportsLatest = true,
+            searchTitlePrefix = "Slow",
+            searchDelayMs = 200L,
+        )
+        val aggregator = aggregatorWith(fastSource, slowSource)
+        val emitted = mutableListOf<ExpandedSectionPage>()
+
+        val summary = aggregator.fetchExpandedSectionProgressively(
+            query = "Romance",
+            sourceOffset = 0,
+            sourceLimit = 2,
+        ) { page ->
+            emitted += page
+        }
+
+        assertTrue(emitted.isNotEmpty())
+        assertEquals(setOf(1L), emitted.first().suggestions.map { it.source }.toSet())
+        assertEquals(setOf(1L, 2L), emitted.flatMap { it.suggestions }.map { it.source }.toSet())
+        assertEquals(2, summary.nextSourceOffset)
+        assertEquals(false, summary.hasMoreSources)
+    }
+
+    @Test
+    fun `expanded source section emits source list results progressively`() = runBlocking {
+        val fastSource = FakeCatalogueSource(
+            id = 21L,
+            titlePrefix = "Fast Popular",
+            supportsLatest = true,
+        )
+        val slowSource = FakeCatalogueSource(
+            id = 22L,
+            titlePrefix = "Slow Popular",
+            supportsLatest = true,
+            popularDelayMs = 200L,
+        )
+        val aggregator = aggregatorWith(fastSource, slowSource)
+        val emitted = mutableListOf<ExpandedSectionPage>()
+
+        val summary = aggregator.fetchExpandedSourceSectionProgressively(
+            sortOrder = SuggestionSortOrder.Popular,
+            sourceOffset = 0,
+            sourceLimit = 2,
+        ) { page ->
+            emitted += page
+        }
+
+        assertTrue(emitted.isNotEmpty())
+        assertEquals(setOf(21L), emitted.first().suggestions.map { it.source }.toSet())
+        assertEquals(setOf(21L, 22L), emitted.flatMap { it.suggestions }.map { it.source }.toSet())
+        assertEquals(2, summary.nextSourceOffset)
+        assertEquals(false, summary.hasMoreSources)
+    }
+
+    @Test
     fun `tag section sort injection does not retry the same source`() = runBlocking {
         val sort = object : Filter.Sort("Sort", arrayOf("Popular", "Latest Update")) {}
         val source = FakeCatalogueSource(
@@ -295,6 +385,8 @@ private class FakeCatalogueSource(
     private val latestIsEmpty: Boolean = false,
     private val searchTitlePrefix: String? = null,
     private val filters: FilterList = FilterList(),
+    private val searchDelayMs: Long = 0L,
+    private val popularDelayMs: Long = 0L,
 ) : CatalogueSource {
     var popularCalls = 0
         private set
@@ -308,6 +400,7 @@ private class FakeCatalogueSource(
 
     override suspend fun getPopularManga(page: Int): MangasPage {
         popularCalls++
+        if (popularDelayMs > 0L) delay(popularDelayMs)
         return MangasPage(mangaPage(page, titlePrefix), hasNextPage = true)
     }
 
@@ -319,6 +412,7 @@ private class FakeCatalogueSource(
 
     override suspend fun getSearchManga(page: Int, query: String, filters: FilterList): MangasPage {
         searchCalls++
+        if (searchDelayMs > 0L) delay(searchDelayMs)
         return searchTitlePrefix
             ?.let { MangasPage(mangaPage(page, it), hasNextPage = true) }
             ?: MangasPage(emptyList(), hasNextPage = false)
