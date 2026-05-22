@@ -4,6 +4,7 @@ import android.content.res.Resources
 import android.os.Bundle
 import androidx.appcompat.app.AppCompatActivity
 import eu.kanade.tachiyomi.data.preference.PreferencesHelper
+import eu.kanade.tachiyomi.ui.security.SecureActivityDelegate
 import eu.kanade.tachiyomi.util.system.getThemeWithExtras
 import eu.kanade.tachiyomi.util.system.setLocaleByAppCompat
 import eu.kanade.tachiyomi.util.system.setThemeByPref
@@ -19,6 +20,7 @@ abstract class BaseThemedActivity : AppCompatActivity() {
         updatedTheme = null
         setThemeByPref(preferences)
         super.onCreate(savedInstanceState)
+        SecureActivityDelegate.setSecure(this)
     }
 
     override fun getTheme(): Resources.Theme {
