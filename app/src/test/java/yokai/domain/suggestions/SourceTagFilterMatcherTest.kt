@@ -40,6 +40,30 @@ class SourceTagFilterMatcherTest {
         assertEquals(1, genre.state)
     }
 
+    @Test
+    fun `sort matcher applies latest sort without another filter pass`() {
+        val sort = object : Filter.Sort("Sort", arrayOf("Popular", "Latest Update")) {}
+        val filters = FilterList(sort)
+
+        val applied = filters.tryApplySuggestionSort(SuggestionSortOrder.Latest)
+
+        assertEquals(true, applied)
+        assertEquals(Filter.Sort.Selection(1, ascending = false), sort.state)
+    }
+
+    @Test
+    fun `sort matcher applies only obvious select sort filters`() {
+        val genre = object : Filter.Select<String>("Genre", arrayOf("Any", "Popular")) {}
+        val order = object : Filter.Select<String>("Order by", arrayOf("Title", "Popularity")) {}
+        val filters = FilterList(genre, order)
+
+        val applied = filters.tryApplySuggestionSort(SuggestionSortOrder.Popular)
+
+        assertEquals(true, applied)
+        assertEquals(0, genre.state)
+        assertEquals(1, order.state)
+    }
+
     private fun sourceWithFilters(filters: FilterList): CatalogueSource =
         object : CatalogueSource {
             override val id: Long = 1L

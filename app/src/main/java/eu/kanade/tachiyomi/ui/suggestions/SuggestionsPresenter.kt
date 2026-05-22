@@ -905,6 +905,9 @@ class SuggestionsPresenter(
                 )
                 nextExpandedSourceOffset = page.nextSourceOffset
                 val ranked = suggestionRanker.rankExpandedResults(page.suggestions)
+                rememberDisplayedSuggestionSources(ranked)
+                shownHistoryRepository.insertAll(ranked.map { it.source to it.url })
+                seenMangaUrls.addAll(ranked.map { it.memoryKey() })
                 val mangaList = ranked.map { suggested ->
                     MangaImpl(source = suggested.source, url = suggested.url).apply {
                         title = suggested.title
@@ -948,6 +951,9 @@ class SuggestionsPresenter(
                 )
                 nextExpandedSourceOffset = page.nextSourceOffset
                 val ranked = suggestionRanker.rankExpandedResults(page.suggestions)
+                rememberDisplayedSuggestionSources(ranked)
+                shownHistoryRepository.insertAll(ranked.map { it.source to it.url })
+                seenMangaUrls.addAll(ranked.map { it.memoryKey() })
                 val newManga = ranked.map { suggested ->
                     MangaImpl(source = suggested.source, url = suggested.url).apply {
                         title = suggested.title
@@ -1098,6 +1104,7 @@ class SuggestionsPresenter(
 
         val suggestions = page.suggestions.withDisplayRanks(startRank = 0L)
         seenMangaUrls.addAll(suggestions.map { it.memoryKey() })
+        rememberDisplayedSuggestionSources(suggestions)
         _state.update { it.copy(
             hasReachedEnd = page.hasReachedEnd,
             endMessage = endOfFeedMessage().takeIf { page.hasReachedEnd },
@@ -1161,7 +1168,8 @@ class SuggestionsPresenter(
         val existing = suggestionsRepository.getSuggestions()
         if (generation != feedGeneration.get()) return
         var renderedSectionKeys = existing.map { it.sectionKey }.toSet()
-        if (existing.isNotEmpty()) {
+        val shouldReRankStoredRows = refreshTargetSectionKey == null
+        if (existing.isNotEmpty() && shouldReRankStoredRows) {
             // Build a map of sectionKey → list of existing candidates for that section.
             val bySectionKey = existing.groupBy { it.sectionKey }
             val reRanked = plannedSections.flatMapIndexed { sectionIndex, section ->
@@ -1189,9 +1197,27 @@ class SuggestionsPresenter(
         val refreshTargetSection = refreshTargetSectionKey
             ?.let { key -> plannedSections.firstOrNull { it.sectionKey == key } }
             ?: plannedSections.firstOrNull().takeIf { refreshTargetSectionKey != null }
-        if (refreshTargetSection != null) {
-            sectionLastFetchedAt.remove(refreshTargetSection.sectionKey)
+        val discoverySection = plannedSections.firstOrNull { it.type == SectionType.DISCOVERY }
+        val refreshTargetSections = if (refreshTargetSectionKey != null) {
+            buildList {
+                discoverySection?.let(::add)
+                refreshTargetSection?.let { target ->
+                    if (none { it.sectionKey == target.sectionKey }) {
+                        add(target)
+                    }
+                }
+            }
+        } else {
+            emptyList()
         }
+        refreshTargetSections.forEach { section ->
+            sectionLastFetchedAt.remove(section.sectionKey)
+        }
+        val lazyRefreshStartIndex = refreshTargetSections
+            .mapNotNull { target -> plannedSections.indexOfFirst { it.sectionKey == target.sectionKey }.takeIf { it >= 0 } }
+            .maxOrNull()
+            ?.plus(1)
+            ?.coerceAtMost(plannedSections.size)
         val staleSections = if (refreshTargetSection == null) {
             plannedSections.filter { !isSectionCacheFresh(it, now) }
         } else {
@@ -1206,9 +1232,11 @@ class SuggestionsPresenter(
         _state.update { it.copy(
             plannedSections = plannedSections,
             sectionDisplayNames = displayNames,
-            nextBatchStartIndex = if (refreshTargetSection != null) loadedPrefixSize else 0,
+            nextBatchStartIndex = lazyRefreshStartIndex ?: if (refreshTargetSection != null) loadedPrefixSize else 0,
             isFetchingBatch = false,
-            allSectionsLoaded = if (refreshTargetSection != null) {
+            allSectionsLoaded = if (lazyRefreshStartIndex != null) {
+                lazyRefreshStartIndex >= plannedSections.size
+            } else if (refreshTargetSection != null) {
                 loadedPrefixSize >= plannedSections.size
             } else {
                 staleSections.isEmpty()
@@ -1219,16 +1247,20 @@ class SuggestionsPresenter(
         )}
 
         // Step 5: Refresh the target section, or fall back to expired-section repair.
-        if (refreshTargetSection != null && generation == feedGeneration.get()) {
+        if (refreshTargetSections.isNotEmpty() && generation == feedGeneration.get()) {
             val rankingContext = suggestionRanker.buildRankingContext()
-            val inserted = refreshV2SingleSection(
-                section = refreshTargetSection,
-                generation = generation,
-                pageOffset = pageOffset,
-                refreshId = refreshId,
-                rankingContext = rankingContext,
-                now = now,
-            )
+            var inserted = 0
+            for (section in refreshTargetSections) {
+                if (generation != feedGeneration.get()) return
+                inserted += refreshV2SingleSection(
+                    section = section,
+                    generation = generation,
+                    pageOffset = pageOffset,
+                    refreshId = refreshId,
+                    rankingContext = rankingContext,
+                    now = now,
+                )
+            }
             if (inserted == 0 && suggestionsRepository.count() > 0L) {
                 pendingRefreshMessage = context.getString(MR.strings.suggestions_up_to_date)
             }
@@ -1301,13 +1333,6 @@ class SuggestionsPresenter(
                 if (fullResult.candidates.isNotEmpty() && fullPreview.size >= shallowPreview.size) {
                     resultToCommit = fullResult
                 }
-            }
-
-            val fetchedSourceIds = resultToCommit.candidates
-                .map { it.sourceId.toString() }
-                .toSet()
-            if (fetchedSourceIds.isNotEmpty()) {
-                preferences.lastFetchedSuggestionsSourceIds().set(fetchedSourceIds)
             }
 
             return appendSectionResult(
@@ -1546,12 +1571,10 @@ class SuggestionsPresenter(
             )
             // ─────────────────────────────────────────────────────────────────────────
 
-            val fetchedSourceIds = mutableSetOf<String>()
             val accumulatedCandidates = mutableMapOf<String, MutableList<SuggestionCandidate>>()
 
             candidateRetriever.retrieveProgressively(sectionsToFetch, pageOffset) { result ->
                 if (generation == feedGeneration.get()) {
-                    result.candidates.map { it.sourceId.toString() }.toCollection(fetchedSourceIds)
                     val sectionKey = result.section.sectionKey
                     val acc = accumulatedCandidates.getOrPut(sectionKey) { mutableListOf() }
                     acc.addAll(result.candidates)
@@ -1584,10 +1607,6 @@ class SuggestionsPresenter(
                         )
                     }
                 }
-            }
-
-            if (generation == feedGeneration.get() && fetchedSourceIds.isNotEmpty()) {
-                preferences.lastFetchedSuggestionsSourceIds().set(fetchedSourceIds)
             }
         } finally {
             val nextIndex = (batchStartIndex + batch.size).coerceAtMost(state.plannedSections.size)
@@ -1715,6 +1734,7 @@ class SuggestionsPresenter(
         renderStoredSuggestions()
         shownHistoryRepository.insertAll(suggestions.map { it.source to it.url })
         seenMangaUrls.addAll(suggestions.map { it.memoryKey() })
+        rememberDisplayedSuggestionSources(suggestions)
         // Batch insert all seen-log entries in one transaction instead of N individual writes.
         suggestionSeenLogRepository.insertSeenBatch(
             suggestions.map { suggestion ->
@@ -1859,6 +1879,15 @@ class SuggestionsPresenter(
 
     private fun SuggestedManga.memoryKey(): String =
         "$source:$url"
+
+    private fun rememberDisplayedSuggestionSources(suggestions: List<SuggestedManga>) {
+        val displayedSourceIds = suggestions
+            .map { it.source.toString() }
+            .toSet()
+        if (displayedSourceIds.isNotEmpty()) {
+            preferences.lastFetchedSuggestionsSourceIds().set(displayedSourceIds)
+        }
+    }
 
     private fun List<SuggestedManga>.dbSignature(): Long =
         fold(size.toLong()) { hash, suggestion ->

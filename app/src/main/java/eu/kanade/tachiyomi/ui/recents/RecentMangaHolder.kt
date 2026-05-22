@@ -35,16 +35,19 @@ class RecentMangaHolder(
     private val binding = MangaGridItemBinding.bind(view)
 
     init {
+        val showActions = View.OnLongClickListener {
+            adapter.delegate.onMangaActionsClicked(flexibleAdapterPosition, binding.card)
+            true
+        }
         binding.card.setOnClickListener { adapter.delegate.onCoverClick(flexibleAdapterPosition) }
         binding.constraintLayout.setOnClickListener { adapter.delegate.onCoverClick(flexibleAdapterPosition) }
-        binding.card.setOnLongClickListener {
-            adapter.delegate.onMangaActionsClicked(flexibleAdapterPosition, binding.card)
-            true
-        }
-        binding.constraintLayout.setOnLongClickListener {
-            adapter.delegate.onMangaActionsClicked(flexibleAdapterPosition, binding.card)
-            true
-        }
+        binding.root.setOnLongClickListener(showActions)
+        binding.constraintLayout.setOnLongClickListener(showActions)
+        binding.card.setOnLongClickListener(showActions)
+        binding.coverConstraint.setOnLongClickListener(showActions)
+        binding.coverThumbnail.setOnLongClickListener(showActions)
+        binding.textLayout.setOnLongClickListener(showActions)
+        binding.title.setOnLongClickListener(showActions)
         binding.removeHistory.setOnClickListener {
             adapter.delegate.onRemoveHistoryClicked(flexibleAdapterPosition)
         }

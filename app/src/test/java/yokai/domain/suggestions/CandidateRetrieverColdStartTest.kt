@@ -52,10 +52,31 @@ class CandidateRetrieverColdStartTest {
         assertEquals(setOf(3L), results.single().candidates.map { it.sourceId }.toSet())
     }
 
-    private fun retrieverWith(vararg sources: CatalogueSource): CandidateRetriever {
+    @Test
+    fun `manual refresh tries fresh sources before recently displayed sources`() = runBlocking {
+        val sources = (1L..18L)
+            .map { id -> FakeColdStartSource(id = id, titlePrefix = "Source$id", resultCount = 3) }
+            .toTypedArray()
+        val retriever = retrieverWith(
+            *sources,
+            lastFetchedSourceIds = (1L..8L).map { it.toString() }.toSet(),
+        )
+
+        val results = retriever.retrieve(
+            sections = listOf(normalDiscoverySection()),
+            maxPerSourceFetch = 2,
+        )
+
+        assertEquals((9L..16L).toSet(), results.single().candidates.map { it.sourceId }.toSet())
+    }
+
+    private fun retrieverWith(
+        vararg sources: CatalogueSource,
+        lastFetchedSourceIds: Set<String> = emptySet(),
+    ): CandidateRetriever {
         return CandidateRetriever(
             sourceManager = mockk(),
-            preferences = suggestionsPreferences(),
+            preferences = suggestionsPreferences(lastFetchedSourceIds),
             debugLog = SuggestionsDebugLog(),
             tagCanonicalizer = mockk(relaxed = true),
             tagProfileRepository = FakeTagProfileRepository(),
@@ -64,13 +85,13 @@ class CandidateRetrieverColdStartTest {
         )
     }
 
-    private fun suggestionsPreferences(): PreferencesHelper {
+    private fun suggestionsPreferences(lastFetchedSourceIds: Set<String> = emptySet()): PreferencesHelper {
         val preferences = mockk<PreferencesHelper>()
         every { preferences.enabledLanguages() } returns CandidateRetrieverPreference(setOf("all", "en"))
         every { preferences.hiddenSources() } returns CandidateRetrieverPreference(emptySet())
         every { preferences.pinnedCatalogues() } returns CandidateRetrieverPreference(emptySet())
         every { preferences.recentlyUsedSourceIds() } returns CandidateRetrieverPreference(emptySet())
-        every { preferences.lastFetchedSuggestionsSourceIds() } returns CandidateRetrieverPreference(emptySet())
+        every { preferences.lastFetchedSuggestionsSourceIds() } returns CandidateRetrieverPreference(lastFetchedSourceIds)
         return preferences
     }
 
@@ -101,7 +122,7 @@ private class FakeColdStartSource(
     private val delayMs: Long = 0L,
     private val resultCount: Int = 3,
 ) : CatalogueSource {
-    override val name: String = "Source $id"
+    override val name: String = "Source ${id.toString().padStart(3, '0')}"
     override val lang: String = "en"
     override val supportsLatest: Boolean = true
 

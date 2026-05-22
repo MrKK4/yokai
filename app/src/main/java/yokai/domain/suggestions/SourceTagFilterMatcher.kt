@@ -55,9 +55,106 @@ internal suspend fun CatalogueSource.tryIncludeTagFilter(
     return if (filterInjected) filters else null
 }
 
+internal fun FilterList.tryApplySuggestionSort(sortOrder: SuggestionSortOrder): Boolean {
+    var sortApplied = false
+    forEach { filter ->
+        if (filter.tryApplySuggestionSort(sortOrder)) {
+            sortApplied = true
+        }
+    }
+    return sortApplied
+}
+
+private fun Filter<*>.tryApplySuggestionSort(sortOrder: SuggestionSortOrder): Boolean {
+    return when (this) {
+        is Filter.Sort -> {
+            val matchIndex = values.indexOfFirst { value ->
+                value.matchesSortOrder(sortOrder)
+            }
+            if (matchIndex >= 0) {
+                state = Filter.Sort.Selection(matchIndex, ascending = false)
+                true
+            } else {
+                false
+            }
+        }
+        is Filter.Select<*> -> {
+            if (!name.isSortSelectName()) return false
+            val matchIndex = values.indexOfFirst { value ->
+                value.toString().matchesSortOrder(sortOrder)
+            }
+            if (matchIndex >= 0) {
+                state = matchIndex
+                true
+            } else {
+                false
+            }
+        }
+        is Filter.Group<*> -> {
+            var sortApplied = false
+            state.forEach { item ->
+                if (item is Filter<*> && item.tryApplySuggestionSort(sortOrder)) {
+                    sortApplied = true
+                }
+            }
+            sortApplied
+        }
+        else -> false
+    }
+}
+
 private suspend fun TagCanonicalizer.matchesCanonicalTag(
     rawTag: String,
     canonicalTag: String,
     sourceId: Long,
 ): Boolean =
     canonicalizeToLookupKey(rawTag, sourceId) == canonicalTag
+
+private fun String.isSortSelectName(): Boolean {
+    val normalized = normalizedSortText()
+    return normalized.contains("sort") ||
+        normalized.contains("order") ||
+        normalized.contains("ranking")
+}
+
+private fun String.matchesSortOrder(sortOrder: SuggestionSortOrder): Boolean {
+    val normalized = normalizedSortText()
+    val terms = when (sortOrder) {
+        SuggestionSortOrder.Latest -> LATEST_SORT_TERMS
+        SuggestionSortOrder.Popular -> POPULAR_SORT_TERMS
+    }
+    return terms.any { term ->
+        normalized == term || normalized.contains(term)
+    }
+}
+
+private fun String.normalizedSortText(): String =
+    lowercase()
+        .replace(SORT_PUNCTUATION, " ")
+        .replace(WHITESPACE, " ")
+        .trim()
+
+private val SORT_PUNCTUATION = Regex("[^a-z0-9]+")
+private val WHITESPACE = Regex("\\s+")
+private val LATEST_SORT_TERMS = listOf(
+    "latest",
+    "last update",
+    "updated",
+    "update",
+    "newest",
+    "new",
+    "date added",
+    "created",
+)
+private val POPULAR_SORT_TERMS = listOf(
+    "popular",
+    "popularity",
+    "most viewed",
+    "views",
+    "view count",
+    "follow",
+    "follows",
+    "rating",
+    "score",
+    "rank",
+)

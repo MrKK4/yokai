@@ -3,6 +3,7 @@ package yokai.domain.suggestions
 import eu.kanade.tachiyomi.core.preference.Preference
 import eu.kanade.tachiyomi.data.preference.PreferencesHelper
 import eu.kanade.tachiyomi.source.CatalogueSource
+import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.SManga
@@ -198,6 +199,68 @@ class FeedAggregatorColdStartTest {
         assertEquals(16, secondPage.nextSourceOffset)
     }
 
+    @Test
+    fun `expanded section skips dry source batches before showing empty results`() = runBlocking {
+        val drySources = (1L..8L)
+            .map { id ->
+                FakeCatalogueSource(
+                    id = id,
+                    titlePrefix = "Popular",
+                    supportsLatest = true,
+                    searchTitlePrefix = null,
+                )
+            }
+        val productiveSources = (9L..12L)
+            .map { id ->
+                FakeCatalogueSource(
+                    id = id,
+                    titlePrefix = "Popular",
+                    supportsLatest = true,
+                    searchTitlePrefix = "Expanded",
+                )
+            }
+        val sources = (drySources + productiveSources).toTypedArray()
+        val aggregator = aggregatorWith(*sources)
+
+        val page = aggregator.fetchExpandedSection(
+            query = "Romance",
+            sourceOffset = 0,
+            sourceLimit = 8,
+        )
+
+        assertTrue(page.suggestions.isNotEmpty())
+        assertEquals(setOf(9L, 10L, 11L, 12L), page.suggestions.map { it.source }.toSet())
+        assertEquals(16, page.nextSourceOffset)
+        assertEquals(false, page.hasMoreSources)
+    }
+
+    @Test
+    fun `tag section sort injection does not retry the same source`() = runBlocking {
+        val sort = object : Filter.Sort("Sort", arrayOf("Popular", "Latest Update")) {}
+        val source = FakeCatalogueSource(
+            id = 13L,
+            titlePrefix = "Popular",
+            supportsLatest = true,
+            searchTitlePrefix = "Sorted",
+            filters = FilterList(sort),
+        )
+        val aggregator = aggregatorWith(source)
+
+        aggregator.fetchPage(
+            suggestionQueries = listOf(
+                SuggestionQuery(query = "Romance", sectionKey = "tag:romance", score = 10.0),
+            ),
+            usedTags = emptySet(),
+            seenMangaUrls = emptySet(),
+            currentSortOrder = SuggestionSortOrder.Latest,
+            includeSourceSection = false,
+            pageOffset = 1,
+        )
+
+        assertEquals(1, source.searchCalls)
+        assertEquals(Filter.Sort.Selection(1, ascending = false), sort.state)
+    }
+
     private fun aggregatorWith(vararg sources: CatalogueSource): FeedAggregator {
         val mangaRepository = mockk<MangaRepository>()
         coEvery { mangaRepository.getMangaList() } returns emptyList()
@@ -231,6 +294,7 @@ private class FakeCatalogueSource(
     override val supportsLatest: Boolean,
     private val latestIsEmpty: Boolean = false,
     private val searchTitlePrefix: String? = null,
+    private val filters: FilterList = FilterList(),
 ) : CatalogueSource {
     var popularCalls = 0
         private set
@@ -239,7 +303,7 @@ private class FakeCatalogueSource(
     var searchCalls = 0
         private set
 
-    override val name: String = "Source $id"
+    override val name: String = "Source ${id.toString().padStart(3, '0')}"
     override val lang: String = "en"
 
     override suspend fun getPopularManga(page: Int): MangasPage {
@@ -260,13 +324,13 @@ private class FakeCatalogueSource(
             ?: MangasPage(emptyList(), hasNextPage = false)
     }
 
-    override fun getFilterList(): FilterList = FilterList()
+    override fun getFilterList(): FilterList = filters
 
     private fun mangaPage(page: Int, prefix: String): List<SManga> =
         (0 until 6).map { index ->
             SManga.create().apply {
                 url = "/$id/$page/$index"
-                title = "$prefix $page-$index"
+                title = "$prefix $id-$page-$index"
                 thumbnail_url = null
                 initialized = true
             }

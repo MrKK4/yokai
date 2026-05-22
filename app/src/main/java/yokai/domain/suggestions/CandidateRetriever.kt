@@ -183,30 +183,36 @@ class CandidateRetriever(
                             suspend { fetchSearchSource(section, source, sourceIndex, page, requestGate, countBySource, maxPerSourceFetch) }
                         }
                 }
-                val sourceResults = Channel<List<SuggestionCandidate>>(Channel.UNLIMITED)
-                sourceFetches.forEach { fetch ->
-                    launch {
-                        // Defend against non-Exception throwables (OOM, NoClassDefFoundError,
-                        // ExceptionInInitializerError from a corrupt extension). Without this
-                        // any sibling source failing with a Throwable would propagate up the
-                        // coroutineScope and cancel every other in-flight source fetch,
-                        // killing the whole section instead of just the bad source.
-                        val batch = try {
-                            fetch()
-                        } catch (e: CancellationException) {
-                            throw e
-                        } catch (_: Throwable) {
-                            emptyList()
+                val targetCandidateCount = targetCandidateCount(section, maxPerSourceFetch)
+                for (chunk in sourceFetches.chunked(SuggestionsConfig.MAX_CONCURRENT_SOURCE_REQUESTS)) {
+                    val sourceResults = Channel<List<SuggestionCandidate>>(Channel.UNLIMITED)
+                    chunk.forEach { fetch ->
+                        launch {
+                            // Defend against non-Exception throwables (OOM, NoClassDefFoundError,
+                            // ExceptionInInitializerError from a corrupt extension). Without this
+                            // any sibling source failing with a Throwable would propagate up the
+                            // coroutineScope and cancel every other in-flight source fetch,
+                            // killing the whole section instead of just the bad source.
+                            val batch = try {
+                                fetch()
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (_: Throwable) {
+                                emptyList()
+                            }
+                            sourceResults.send(batch)
                         }
-                        sourceResults.send(batch)
                     }
-                }
-                repeat(sourceFetches.size) {
-                    val batch = sourceResults.receive()
-                    if (batch.isNotEmpty() && emit != null) {
-                        emit(batch)
+                    repeat(chunk.size) {
+                        val batch = sourceResults.receive()
+                        if (batch.isNotEmpty() && emit != null) {
+                            emit(batch)
+                        }
+                        allCandidates.addAll(batch)
                     }
-                    allCandidates.addAll(batch)
+                    if (allCandidates.distinctBy { it.sourceId to it.manga.url }.size >= targetCandidateCount) {
+                        break
+                    }
                 }
                 allCandidates
             }
@@ -391,23 +397,21 @@ class CandidateRetriever(
             }
         }
 
-        val pageResult = if (injectedFilters != null) {
+        val query: String
+        val filters = if (injectedFilters != null) {
             // SUCCESS: source has a native tag/genre filter for this tag - empty query, filter checked.
             debugLog.add(
                 LogType.SECTION_SELECTED,
                 "Source ${source.id} (${source.name}): tag filter injected for '$canonicalTag'",
             )
-            requestGate.withPermit {
-                sourceResult(sourceId = source.id) {
-                    source.getSearchManga(page, query = "", injectedFilters)
-                }
-            }
+            query = ""
+            injectedFilters
         } else {
             // FALLBACK: no native tag checkbox - use source vocabulary, then aliases, then canonical key.
             val exactTerm = canonicalTag?.let {
                 tagProfileRepository.getExactTermForSource(it, source.id)
             }
-            val query = exactTerm
+            query = exactTerm
                 ?: section.searchTerms.firstOrNull()
                 ?: canonicalTag
                 ?: return emptyList()
@@ -417,10 +421,12 @@ class CandidateRetriever(
                     "Source ${source.id} (${source.name}): no tag filter for '$canonicalTag' - text search with '$query'",
                 )
             }
-            requestGate.withPermit {
-                sourceResult(sourceId = source.id) {
-                    source.getSearchManga(page, query, freshFilterList(source))
-                }
+            freshFilterList(source)
+        }
+        filters.tryApplySuggestionSort(section.sortOrder)
+        val pageResult = requestGate.withPermit {
+            sourceResult(sourceId = source.id) {
+                source.getSearchManga(page, query, filters)
             }
         } ?: return emptyList()
         // ─────────────────────────────────────────────────────────────────────────
@@ -429,7 +435,7 @@ class CandidateRetriever(
             section,
             source.id,
             sourceIndex,
-            searchTerm = injectedFilters?.let { "" } ?: (section.searchTerms.firstOrNull() ?: canonicalTag),
+            searchTerm = query,
             pageResult.mangas,
             countBySource,
             maxPerSourceFetch,
@@ -512,7 +518,7 @@ class CandidateRetriever(
     }
 
     private fun activeSources(discovery: Boolean): List<CatalogueSource> =
-        activeNetworkSources(discovery, freshSourceFirst = !discovery)
+        activeNetworkSources(discovery, freshSourceFirst = true)
 
     private fun activeNetworkSources(discovery: Boolean = false, freshSourceFirst: Boolean = false): List<CatalogueSource> =
         SuggestionSourceSelector.activeNetworkSources(
@@ -530,6 +536,14 @@ class CandidateRetriever(
             recentSourceIds = preferences.recentlyUsedSourceIds().get(),
             lastFetchedSourceIds = preferences.lastFetchedSuggestionsSourceIds().get(),
         )
+
+    private fun targetCandidateCount(section: PlannedSection, maxPerSourceFetch: Int?): Int =
+        when {
+            section.isColdStartDiscovery() -> SuggestionsConfig.COLD_START_EARLY_BAILOUT_CANDIDATES
+            maxPerSourceFetch != null && maxPerSourceFetch <= SuggestionsConfig.MANUAL_REFRESH_MAX_PER_SOURCE_FETCH ->
+                SuggestionsConfig.MAX_RESULTS_PER_SECTION
+            else -> SuggestionsConfig.MAX_RESULTS_PER_SECTION * 2
+        }
 
     private suspend fun <T> sourceResult(sourceId: Long? = null, block: suspend () -> T): T? =
         try {

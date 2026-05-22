@@ -16,7 +16,6 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -91,13 +90,22 @@ fun SuggestionsExpandedSheet(
 
             when {
                 isLoading -> {
-                    Box(
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(SUGGESTION_GRID_COLUMNS),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(200.dp),
-                        contentAlignment = Alignment.Center,
+                            .fillMaxHeight(0.85f),
+                        contentPadding = PaddingValues(
+                            start = 16.dp,
+                            end = 16.dp,
+                            bottom = 24.dp,
+                        ),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp),
                     ) {
-                        CircularProgressIndicator()
+                        items(SKELETON_CARDS) {
+                            SuggestionSkeletonCard()
+                        }
                     }
                 }
                 error != null -> {
@@ -159,15 +167,8 @@ fun SuggestionsExpandedSheet(
                             )
                         }
                         if (isLoadingMore) {
-                            item {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(80.dp),
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    CircularProgressIndicator()
-                                }
+                            items(SUGGESTION_GRID_COLUMNS) {
+                                SuggestionSkeletonCard()
                             }
                         }
                     }
@@ -193,3 +194,4 @@ fun SuggestionsExpandedSheet(
 }
 
 private const val SUGGESTION_GRID_COLUMNS = 3
+private const val SKELETON_CARDS = 9

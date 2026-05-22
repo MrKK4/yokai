@@ -606,7 +606,7 @@ internal fun SuggestionItem(manga: Manga, onClick: () -> Unit) {
 }
 
 @Composable
-private fun SuggestionSkeletonCard() {
+internal fun SuggestionSkeletonCard() {
     val transition = rememberInfiniteTransition(label = "skeleton")
     val alpha by transition.animateFloat(
         initialValue = 0.35f,

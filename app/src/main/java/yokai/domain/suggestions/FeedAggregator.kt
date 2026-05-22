@@ -268,7 +268,13 @@ class FeedAggregator(
             }
         }
 
-        val results = fetch(task.sources, task.pageOffset).toMutableList()
+        val results = mutableListOf<ScoredManga>()
+        for (chunk in task.sources.chunked(SuggestionsConfig.MAX_CONCURRENT_SOURCE_REQUESTS)) {
+            results.addAll(fetch(chunk, task.pageOffset))
+            if (results.bestByTitle().size >= SuggestionsConfig.MAX_RESULTS_PER_SECTION) {
+                break
+            }
+        }
         val quota = SuggestionsConfig.MIN_RESULTS_PER_SECTION
 
         // Backfill with fallback sources if primary yielded < 12
@@ -455,6 +461,7 @@ class FeedAggregator(
                             sourceIndex = sourceIndex,
                             page = page,
                             suggestionQuery = suggestionQuery,
+                            sortOrder = task.sortOrder,
                             localKeys = localKeys,
                             localTitles = localTitles,
                             seenMangaUrls = seenMangaUrls,
@@ -560,31 +567,41 @@ class FeedAggregator(
         val localTitles = localManga.map { it.title.normalizedTitle() }.toSet()
         val blacklistedTags = preferences.suggestionsTagsBlacklist().get().normalizedQueries()
         val allSources = activeNetworkSources()
-        val batchedSources = allSources.drop(sourceOffset).take(sourceLimit)
-        val hasMoreSources = (sourceOffset + sourceLimit) < allSources.size
+        val safeSourceLimit = sourceLimit.coerceAtLeast(1)
         val requestGate = Semaphore(SuggestionsConfig.MAX_CONCURRENT_SOURCE_REQUESTS)
         val sectionKey = "expanded:${query.lowercase().trim()}"
         val suggestionQuery = SuggestionQuery(query = query, sectionKey = sectionKey, score = 0.0)
         val page = random.nextInt(EXPANDED_PAGE_MIN, EXPANDED_PAGE_MAX)
 
-        val hits = coroutineScope {
-            batchedSources.mapIndexed { index, source ->
-                async {
-                    fetchPersonalizedFromSource(
-                        source = source,
-                        sourceIndex = sourceOffset + index,
-                        page = page,
-                        suggestionQuery = suggestionQuery,
-                        localKeys = localKeys,
-                        localTitles = localTitles,
-                        seenMangaUrls = seenMangaUrls,
-                        blacklistedTags = blacklistedTags,
-                        requestGate = requestGate,
-                        random = random,
-                    )
-                }
-            }.awaitAll().flatten()
+        var nextSourceOffset = sourceOffset.coerceAtLeast(0)
+        var batchedSources = emptyList<CatalogueSource>()
+        var hits = emptyList<ScoredManga>()
+        while (nextSourceOffset < allSources.size && hits.isEmpty()) {
+            val batchOffset = nextSourceOffset
+            batchedSources = allSources.drop(batchOffset).take(safeSourceLimit)
+            if (batchedSources.isEmpty()) break
+            hits = coroutineScope {
+                batchedSources.mapIndexed { index, source ->
+                    async {
+                        fetchPersonalizedFromSource(
+                            source = source,
+                            sourceIndex = batchOffset + index,
+                            page = page,
+                            suggestionQuery = suggestionQuery,
+                            sortOrder = preferences.suggestionsSortOrder().get(),
+                            localKeys = localKeys,
+                            localTitles = localTitles,
+                            seenMangaUrls = seenMangaUrls,
+                            blacklistedTags = blacklistedTags,
+                            requestGate = requestGate,
+                            random = random,
+                        )
+                    }
+                }.awaitAll().flatten()
+            }
+            nextSourceOffset = batchOffset + safeSourceLimit
         }
+        val hasMoreSources = nextSourceOffset < allSources.size
 
         val results = withContext(Dispatchers.Default) {
             val sourceIndexById = batchedSources
@@ -602,7 +619,7 @@ class FeedAggregator(
 
         return ExpandedSectionPage(
             suggestions = results,
-            nextSourceOffset = sourceOffset + sourceLimit,
+            nextSourceOffset = nextSourceOffset,
             hasMoreSources = hasMoreSources,
         )
     }
@@ -612,6 +629,7 @@ class FeedAggregator(
         sourceIndex: Int,
         page: Int = 1,
         suggestionQuery: SuggestionQuery,
+        sortOrder: SuggestionSortOrder,
         localKeys: Set<Pair<Long, String>>,
         localTitles: Set<String>,
         seenMangaUrls: Set<String>,
@@ -630,10 +648,13 @@ class FeedAggregator(
                 ?.let { tagProfileRepository.getExactTermForSource(it, source.id) }
                 ?: suggestionQuery.query
         }
+        val filters = (injectedFilters ?: source.getFilterList()).apply {
+            tryApplySuggestionSort(sortOrder)
+        }
 
         return requestGate.withPermit {
             sourceResult {
-                source.getSearchManga(page, query, injectedFilters ?: source.getFilterList())
+                source.getSearchManga(page, query, filters)
             }
         }
             ?.mangas
@@ -655,14 +676,19 @@ class FeedAggregator(
 
     private suspend fun activeSources(random: Random): SourceSelection {
         return withContext(Dispatchers.Default) {
-            val selectedSources = activeNetworkSources()
-                .shuffled(random)
+            val lastFetchedSourceIds = preferences.lastFetchedSuggestionsSourceIds().get()
+            val (freshSources, recentlyDisplayedSources) = activeNetworkSources()
+                .partition { it.id.toString() !in lastFetchedSourceIds }
+            val selectedSources = freshSources.shuffled(random) + recentlyDisplayedSources.shuffled(random)
             preferences.recentlyUsedSourceIds().set(
-                selectedSources.map { it.id.toString() }.toSet(),
+                selectedSources
+                    .take(SuggestionsConfig.MAX_CONCURRENT_SOURCE_REQUESTS)
+                    .map { it.id.toString() }
+                    .toSet(),
             )
             SourceSelection(
                 latestSources = selectedSources,
-                mixedSources = selectedSources.shuffled(random),
+                mixedSources = selectedSources,
             )
         }
     }

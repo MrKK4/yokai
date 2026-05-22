@@ -29,7 +29,12 @@
       "Bash(xargs -I {} echo {})",
       "Bash(grep -E \"^\\(\\\\*\\\\.png|test.*png|\\\\*\\\\.jpg\\)$\" .gitignore)",
       "Bash(git add *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(./gradlew :app:compileDevReleaseKotlin)",
+      "Bash(tasklist)",
+      "Bash(findstr -i java)",
+      "Bash(./gradlew :app:compileStandardReleaseKotlin :app:compileStandardBetaKotlin :app:compileDevBetaKotlin :app:compileDevNightlyKotlin :app:test)",
+      "Bash(./gradlew :app:test :domain:test)"
     ]
   }
 }
