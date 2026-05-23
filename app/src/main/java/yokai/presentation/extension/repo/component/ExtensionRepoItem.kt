@@ -30,8 +30,10 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.icerock.moko.resources.compose.stringResource as mokoStringResource
 import eu.kanade.tachiyomi.util.compose.textHint
 import yokai.domain.extension.repo.model.ExtensionRepo
+import yokai.i18n.MR
 import yokai.presentation.component.Gap
 import yokai.presentation.theme.Size
 
@@ -77,7 +79,7 @@ fun ExtensionRepoItem(
         IconButton(onClick = { onDeleteClick(extensionRepo.baseUrl) }) {
             Icon(
                 imageVector = Icons.Filled.Delete,
-                contentDescription = null,
+                contentDescription = mokoStringResource(MR.strings.delete),
                 tint = MaterialTheme.colorScheme.onBackground,
             )
         }
@@ -141,7 +143,7 @@ fun ExtensionRepoInput(
             if (!isLoading)
                 Icon(
                     imageVector = Icons.Filled.Check,
-                    contentDescription = null,
+                    contentDescription = mokoStringResource(MR.strings.add),
                     tint = MaterialTheme.colorScheme.secondary,
                 )
             else
