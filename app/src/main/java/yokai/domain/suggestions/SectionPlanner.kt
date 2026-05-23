@@ -12,21 +12,15 @@ class SectionPlanner(
         val sections = mutableListOf<PlannedSection>()
         sections += discoverySection(sortOrder, now)
 
-        val visibleProfiles = profiles
-            .filterNot { it.isBlacklisted }
-            .sortedByDescending { it.affinity }
+        // Pin functionality lives entirely in the V1 path (pref-driven queries). V2 only
+        // ranks tags by inferred affinity from reading history.
+        val visibleProfiles = SuggestionProfilePlanner.precise(profiles)
 
-        val pinned = visibleProfiles
-            .filter { it.isPinned }
-            .sortedWith(compareBy<TagProfile> { it.pinnedAt ?: Long.MAX_VALUE }.thenBy { it.canonicalTag })
-
-        pinned.forEach { profile ->
-            sections += tagSection(profile, SectionType.PINNED_TAG, sortOrder, now)
-            debugLog.add(LogType.SECTION_SELECTED, "Tag '${profile.canonicalTag}' chosen as pinned")
+        if (visibleProfiles.isEmpty()) {
+            return listOf(discoverySection(sortOrder, now, coldStart = true))
         }
 
         visibleProfiles
-            .filter { it.isManaged && it.affinity > 0.0 }
             .forEachIndexed { index, profile ->
                 sections += tagSection(profile, SectionType.MANAGED_TAG, sortOrder, now)
                 debugLog.add(
@@ -38,16 +32,20 @@ class SectionPlanner(
         return sections.mapIndexed { index, section -> section.copy(rank = index.toLong()) }
     }
 
-    private fun discoverySection(sortOrder: SuggestionSortOrder, now: Long): PlannedSection {
-        val reason = when (sortOrder) {
+    private fun discoverySection(
+        sortOrder: SuggestionSortOrder,
+        now: Long,
+        coldStart: Boolean = false,
+    ): PlannedSection {
+        val displayReason = when (sortOrder) {
             SuggestionSortOrder.Latest -> "Latest from your sources"
             SuggestionSortOrder.Popular -> "Popular from your sources"
         }
         return PlannedSection(
-            sectionKey = "discovery",
+            sectionKey = if (coldStart) COLD_START_DISCOVERY_SECTION_KEY else "discovery",
             type = SectionType.DISCOVERY,
             canonicalTag = null,
-            displayReason = reason,
+            displayReason = displayReason,
             searchTerms = emptyList(),
             sortOrder = sortOrder,
             plannedAt = now,
@@ -68,24 +66,18 @@ class SectionPlanner(
             sectionKey = "tag:${profile.canonicalTag}",
             type = sectionType,
             canonicalTag = profile.canonicalTag,
-            displayReason = reasonFor(profile, sectionType),
+            displayReason = reasonFor(profile),
             searchTerms = searchTerms,
             sortOrder = sortOrder,
             plannedAt = now,
         )
     }
 
-    private fun reasonFor(profile: TagProfile, sectionType: SectionType): String =
-        when (sectionType) {
-            SectionType.PINNED_TAG -> "Pinned: ${profile.displayName}"
-            SectionType.MANAGED_TAG ->
-                when {
-                    profile.affinity > HIGH_AFFINITY_THRESHOLD -> "Because you love ${profile.displayName}"
-                    profile.affinity > MID_AFFINITY_THRESHOLD -> "Because you often read ${profile.displayName}"
-                    else -> "Because you read ${profile.displayName}"
-                }
-            SectionType.DISCOVERY -> profile.displayName
-        }
+    private fun reasonFor(profile: TagProfile): String = when {
+        profile.affinity > HIGH_AFFINITY_THRESHOLD -> "Because you love ${profile.displayName}"
+        profile.affinity > MID_AFFINITY_THRESHOLD -> "Because you often read ${profile.displayName}"
+        else -> "Because you read ${profile.displayName}"
+    }
 
     private companion object {
         private const val HIGH_AFFINITY_THRESHOLD = 5.0

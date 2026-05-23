@@ -11,6 +11,7 @@ import android.view.MenuItem
 import android.view.RoundedCorner
 import android.view.View
 import android.view.ViewGroup
+import androidx.appcompat.widget.PopupMenu
 import androidx.activity.BackEventCompat
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.HistoryToggleOff
@@ -57,7 +58,9 @@ import eu.kanade.tachiyomi.ui.main.TabbedInterface
 import eu.kanade.tachiyomi.ui.manga.MangaDetailsController
 import eu.kanade.tachiyomi.ui.reader.ReaderActivity
 import eu.kanade.tachiyomi.ui.recents.options.TabbedRecentsOptionsSheet
+import eu.kanade.tachiyomi.source.SourceManager
 import eu.kanade.tachiyomi.ui.source.browse.ProgressItem
+import eu.kanade.tachiyomi.util.addOrRemoveToFavorites
 import eu.kanade.tachiyomi.util.chapter.updateTrackChapterMarkedAsRead
 import eu.kanade.tachiyomi.util.system.addCheckBoxPrompt
 import eu.kanade.tachiyomi.util.system.dpToPx
@@ -66,12 +69,14 @@ import eu.kanade.tachiyomi.util.system.getResourceColor
 import eu.kanade.tachiyomi.util.system.ignoredSystemInsets
 import eu.kanade.tachiyomi.util.system.isLTR
 import eu.kanade.tachiyomi.util.system.isPromptChecked
+import eu.kanade.tachiyomi.util.system.launchIO
 import eu.kanade.tachiyomi.util.system.launchUI
 import eu.kanade.tachiyomi.util.system.materialAlertDialog
 import eu.kanade.tachiyomi.util.system.rootWindowInsetsCompat
 import eu.kanade.tachiyomi.util.system.setCustomTitleAndMessage
 import eu.kanade.tachiyomi.util.system.spToPx
 import eu.kanade.tachiyomi.util.system.toInt
+import eu.kanade.tachiyomi.util.system.withUIContext
 import eu.kanade.tachiyomi.util.view.activityBinding
 import eu.kanade.tachiyomi.util.view.collapse
 import eu.kanade.tachiyomi.util.view.compatToolTipText
@@ -96,6 +101,8 @@ import eu.kanade.tachiyomi.util.view.withFadeTransaction
 import java.util.Locale
 import kotlin.math.max
 import kotlinx.coroutines.launch
+import uy.kohesive.injekt.Injekt
+import uy.kohesive.injekt.api.get
 import yokai.i18n.MR
 import yokai.util.lang.getString
 import android.R as AR
@@ -705,8 +712,63 @@ class RecentsController(bundle: Bundle? = null) :
         router.pushController(MangaDetailsController(manga).withFadeTransaction())
     }
 
+    override fun onMangaActionsClicked(position: Int, anchor: View) {
+        val item = adapter.getItem(position) as? RecentMangaItem ?: return
+        val manga = item.mch.manga
+        val actions = recentMangaLongPressActions(
+            viewType = presenter.viewType,
+            isFavorite = manga.favorite,
+            historyId = item.mch.history.id,
+        )
+        if (actions.isEmpty()) return
+
+        val popup = PopupMenu(anchor.context, anchor)
+        actions.forEach { action ->
+            when (action) {
+                RecentMangaLongPressAction.AddToLibrary ->
+                    popup.menu.add(0, RECENTS_ACTION_LIBRARY, 0, anchor.context.getString(MR.strings.add_to_library))
+                RecentMangaLongPressAction.RemoveFromLibrary ->
+                    popup.menu.add(0, RECENTS_ACTION_LIBRARY, 0, anchor.context.getString(MR.strings.remove_from_library))
+                RecentMangaLongPressAction.RemoveFromHistory ->
+                    popup.menu.add(0, RECENTS_ACTION_REMOVE_HISTORY, 1, anchor.context.getString(MR.strings.reset_chapter_history))
+            }
+        }
+        popup.setOnMenuItemClickListener { menuItem ->
+            when (menuItem.itemId) {
+                RECENTS_ACTION_LIBRARY -> toggleMangaFavoriteFromRecents(manga)
+                RECENTS_ACTION_REMOVE_HISTORY -> showRemoveHistoryDialog(item.mch.manga, item.mch.history, item.mch.chapter)
+            }
+            true
+        }
+        popup.show()
+    }
+
     override fun onRemoveHistoryClicked(position: Int) {
         onItemLongClick(position)
+    }
+
+    private fun toggleMangaFavoriteFromRecents(manga: Manga) {
+        val activity = activity ?: return
+        val view = view ?: return
+        viewScope.launchIO {
+            withUIContext { snack?.dismiss() }
+            snack = manga.addOrRemoveToFavorites(
+                preferences = presenter.preferences,
+                view = view,
+                activity = activity,
+                sourceManager = Injekt.get<SourceManager>(),
+                controller = this@RecentsController,
+                onMangaAdded = { refresh() },
+                onMangaMoved = { refresh() },
+                onMangaDeleted = { refresh() },
+                scope = viewScope,
+            )
+            if (snack?.duration == Snackbar.LENGTH_INDEFINITE) {
+                withUIContext {
+                    (activity as? MainActivity)?.setUndoSnackBar(snack)
+                }
+            }
+        }
     }
 
     override fun onSubChapterClicked(position: Int, chapter: Chapter, view: View) {
@@ -736,12 +798,14 @@ class RecentsController(bundle: Bundle? = null) :
         activityBinding?.mainTabs?.run { selectTab(getTabAt(viewType.mainValue)) }
         (activity as? MainActivity)?.reEnableBackPressedCallBack()
         updateTitleAndMenu()
+        activity?.invalidateOptionsMenu()
     }
 
     private fun setViewType(viewType: RecentsViewType) {
         if (viewType != presenter.viewType) {
             presenter.toggleGroupRecents(viewType)
             updateTitleAndMenu()
+            activity?.invalidateOptionsMenu()
         }
     }
 
@@ -832,6 +896,17 @@ class RecentsController(bundle: Bundle? = null) :
         }
     }
 
+    fun confirmClearHistory() {
+        val activity = activity ?: return
+        activity.materialAlertDialog()
+            .setMessage(activity.getString(MR.strings.clear_history_confirmation))
+            .setPositiveButton(MR.strings.clear) { _, _ ->
+                presenter.deleteAllHistory()
+            }
+            .setNegativeButton(AR.string.cancel, null)
+            .show()
+    }
+
     override fun markAsRead(position: Int) {
         val preferences = presenter.preferences
         val item = adapter.getItem(position) as? RecentMangaItem ?: return
@@ -905,6 +980,11 @@ class RecentsController(bundle: Bundle? = null) :
             }
             true
         }
+    }
+
+    override fun onPrepareOptionsMenu(menu: Menu) {
+        super.onPrepareOptionsMenu(menu)
+        menu.findItem(R.id.action_clear_history)?.isVisible = presenter.viewType.isHistory
     }
 
     override fun onChangeStarted(handler: ControllerChangeHandler, type: ControllerChangeType) {
@@ -995,16 +1075,21 @@ class RecentsController(bundle: Bundle? = null) :
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
-        when (item.itemId) {
+        return when (item.itemId) {
             R.id.display_options -> {
                 displaySheet = TabbedRecentsOptionsSheet(
                     this,
                     (presenter.viewType.mainValue - 1).coerceIn(0, 2),
                 )
                 displaySheet?.show()
+                true
             }
+            R.id.action_clear_history -> {
+                confirmClearHistory()
+                true
+            }
+            else -> super.onOptionsItemSelected(item)
         }
-        return super.onOptionsItemSelected(item)
     }
 
     override fun noMoreLoad(newItemsSize: Int) {}
@@ -1032,5 +1117,10 @@ class RecentsController(bundle: Bundle? = null) :
         adapter.onLoadMoreComplete(null)
         progressItem = ProgressItem()
         adapter.setEndlessScrollListener(this, progressItem!!)
+    }
+
+    private companion object {
+        const val RECENTS_ACTION_LIBRARY = 1
+        const val RECENTS_ACTION_REMOVE_HISTORY = 2
     }
 }

@@ -539,7 +539,13 @@ open class MainActivity : BaseActivity<MainActivityBinding>() {
             continueSwitchingTabs = false
             val currentRoot = router.backstack.firstOrNull()
             if (id == R.id.nav_suggestions) {
-                setRoot(eu.kanade.tachiyomi.ui.suggestions.SuggestionsController(), id)
+                if (currentRoot?.tag()?.toIntOrNull() == id && router.backstackSize == 1) {
+                    val controller =
+                        router.getControllerWithTag(id.toString()) as? BottomSheetController
+                    controller?.toggleSheet()
+                } else {
+                    setRoot(eu.kanade.tachiyomi.ui.suggestions.SuggestionsController(), id)
+                }
                 return@setOnItemSelectedListener true
             }
             if (currentRoot?.tag()?.toIntOrNull() != id) {

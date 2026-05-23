@@ -213,7 +213,9 @@ class PreferencesHelper(val context: Context, val preferenceStore: PreferenceSto
 
     fun suggestionsLastHardRefreshAt() = preferenceStore.getLong("suggestions_last_hard_refresh_at", 0L)
 
-    fun suggestionsV2Enabled() = preferenceStore.getBoolean("suggestions_v2_enabled", false)
+    fun suggestionsV2Enabled() = preferenceStore.getBoolean("suggestions_v2_enabled", true)
+
+    fun suggestionsResultVersion() = preferenceStore.getInt("suggestions_result_version", 0)
 
     fun suggestionsTotalRefreshCount() = preferenceStore.getInt("suggestions_total_refresh_count", 0)
 
@@ -226,9 +228,18 @@ class PreferencesHelper(val context: Context, val preferenceStore: PreferenceSto
     /** Bug 8b: written by [SuggestionsWorker] when it exhausts all retries. Epoch millis. */
     fun suggestionsWorkerLastFailedAt() = preferenceStore.getLong("suggestions_worker_last_failed_at", 0L)
 
+    /**
+     * Set true at the start of refreshV2 and cleared in finally. If still true on next launch,
+     * the previous refresh was killed mid-flight (Doze / low memory / force-stop) and the on-disk
+     * suggestions table may hold a partially-replaced result set — recover by forcing a hard refresh.
+     */
+    fun suggestionsRefreshInFlight() = preferenceStore.getBoolean("suggestions_refresh_in_flight", false)
+
     fun usedSuggestionTags() = preferenceStore.getStringSet("used_suggestion_tags", emptySet())
 
     fun recentlyUsedSourceIds() = preferenceStore.getStringSet("recently_used_source_ids", emptySet())
+
+    fun lastFetchedSuggestionsSourceIds() = preferenceStore.getStringSet("last_fetched_suggestions_source_ids", emptySet())
 
     fun removeAfterReadSlots() = preferenceStore.getInt(Keys.removeAfterReadSlots, -1)
 

@@ -35,8 +35,22 @@ class RecentMangaHolder(
     private val binding = MangaGridItemBinding.bind(view)
 
     init {
+        val showActions = View.OnLongClickListener {
+            adapter.delegate.onMangaActionsClicked(flexibleAdapterPosition, binding.card)
+            true
+        }
         binding.card.setOnClickListener { adapter.delegate.onCoverClick(flexibleAdapterPosition) }
         binding.constraintLayout.setOnClickListener { adapter.delegate.onCoverClick(flexibleAdapterPosition) }
+        binding.root.setOnLongClickListener(showActions)
+        binding.constraintLayout.setOnLongClickListener(showActions)
+        binding.card.setOnLongClickListener(showActions)
+        binding.coverConstraint.setOnLongClickListener(showActions)
+        binding.coverThumbnail.setOnLongClickListener(showActions)
+        binding.textLayout.setOnLongClickListener(showActions)
+        binding.title.setOnLongClickListener(showActions)
+        binding.removeHistory.setOnClickListener {
+            adapter.delegate.onRemoveHistoryClicked(flexibleAdapterPosition)
+        }
         
         binding.compactTitle.isVisible = false
         binding.gradient.isVisible = false
@@ -62,6 +76,29 @@ class RecentMangaHolder(
 
         binding.subtitle.text = ""
         binding.subtitle.isVisible = false
+        binding.removeHistory.isVisible = shouldShowHistoryResetButton(
+            viewType = adapter.viewType,
+            showRemoveHistory = adapter.showRemoveHistory,
+            historyId = item.mch.history.id,
+        )
+
+        if (adapter.uniformCovers) {
+            binding.constraintLayout.layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            )
+            binding.coverThumbnail.maxHeight = Int.MAX_VALUE
+            binding.coverThumbnail.minimumHeight = 0
+            binding.constraintLayout.minHeight = 0
+            binding.coverThumbnail.scaleType = android.widget.ImageView.ScaleType.CENTER_CROP
+            binding.coverThumbnail.adjustViewBounds = false
+            binding.coverThumbnail.updateLayoutParams<ConstraintLayout.LayoutParams> {
+                height = ConstraintLayout.LayoutParams.MATCH_CONSTRAINT
+                dimensionRatio = "2:3"
+            }
+        } else {
+            setFreeformCoverRatio(item.mch.manga, adapter.recyclerView as? AutofitRecyclerView)
+        }
 
         binding.coverThumbnail.dispose()
         setCover(item.mch.manga)
@@ -75,12 +112,12 @@ class RecentMangaHolder(
         if ((adapter.recyclerView.context as? Activity)?.isDestroyed == true) return
         binding.coverThumbnail.loadManga(manga) {
             val hasRatio = binding.coverThumbnail.layoutParams.height != ViewGroup.LayoutParams.WRAP_CONTENT
-            if (!hasRatio) {
+            if (!adapter.uniformCovers && !hasRatio) {
                 scale(Scale.FIT)
             }
             listener(
                 onSuccess = { _, _ ->
-                    if (!hasRatio && MangaCoverMetadata.getRatio(manga) != null) {
+                    if (!adapter.uniformCovers && !hasRatio && MangaCoverMetadata.getRatio(manga) != null) {
                         setFreeformCoverRatio(manga)
                     }
                 },
@@ -117,3 +154,34 @@ class RecentMangaHolder(
         }
     }
 }
+
+internal fun shouldShowHistoryResetButton(
+    viewType: RecentsViewType,
+    showRemoveHistory: Boolean,
+    historyId: Long?,
+): Boolean =
+    viewType.isHistory && showRemoveHistory && historyId != null
+
+internal enum class RecentMangaLongPressAction {
+    AddToLibrary,
+    RemoveFromLibrary,
+    RemoveFromHistory,
+}
+
+internal fun recentMangaLongPressActions(
+    viewType: RecentsViewType,
+    isFavorite: Boolean,
+    historyId: Long?,
+): List<RecentMangaLongPressAction> =
+    buildList {
+        add(
+            if (isFavorite) {
+                RecentMangaLongPressAction.RemoveFromLibrary
+            } else {
+                RecentMangaLongPressAction.AddToLibrary
+            },
+        )
+        if (viewType.isHistory && historyId != null) {
+            add(RecentMangaLongPressAction.RemoveFromHistory)
+        }
+    }

@@ -20,6 +20,12 @@
         app:showAsAction="ifRoom" />
 
     <item
+        android:id="@+id/action_downloaded"
+        android:icon="@drawable/ic_download_24dp"
+        android:title="@string/downloaded"
+        app:showAsAction="ifRoom" />
+
+    <item
         android:id="@+id/action_more"
         android:icon="@drawable/ic_more_vert_24dp"
         android:title="@string/more"

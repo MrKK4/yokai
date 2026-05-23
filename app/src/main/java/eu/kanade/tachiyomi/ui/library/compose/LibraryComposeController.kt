@@ -15,6 +15,7 @@ import eu.kanade.tachiyomi.data.preference.PreferencesHelper
 import eu.kanade.tachiyomi.databinding.LibraryControllerBinding
 import eu.kanade.tachiyomi.ui.base.controller.BaseCoroutineController
 import eu.kanade.tachiyomi.ui.library.models.LibraryItem
+import kotlinx.collections.immutable.toImmutableList
 import eu.kanade.tachiyomi.ui.main.BottomSheetController
 import eu.kanade.tachiyomi.ui.main.FloatingSearchInterface
 import eu.kanade.tachiyomi.ui.main.RootSearchInterface
@@ -77,7 +78,7 @@ class LibraryComposeController(
         val state by presenter.state.collectAsState()
         LibraryContent(
             modifier = Modifier.nestedScroll(nestedScrollInterop),
-            items = (0..50).map { LibraryItem.Blank(it) },
+            items = (0..50).map { LibraryItem.Blank(it) }.toImmutableList(),
             columns = 3,
         )
     }

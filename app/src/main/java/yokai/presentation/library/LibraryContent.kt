@@ -5,6 +5,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import eu.kanade.tachiyomi.ui.library.models.LibraryItem
+import kotlinx.collections.immutable.ImmutableList
 import yokai.presentation.AppBarType
 import yokai.presentation.YokaiScaffold
 import yokai.presentation.library.components.LazyLibraryGrid
@@ -12,7 +13,7 @@ import yokai.presentation.library.components.LazyLibraryGrid
 @Composable
 fun LibraryContent(
     modifier: Modifier = Modifier,
-    items: List<LibraryItem>,
+    items: ImmutableList<LibraryItem>,
     columns: Int,
 ) {
     YokaiScaffold(
@@ -26,6 +27,13 @@ fun LibraryContent(
         ) {
             items(
                 items = items,
+                key = { item ->
+                    when (item) {
+                        is LibraryItem.Blank -> "blank"
+                        is LibraryItem.Hidden -> "hidden_${item.title}"
+                        is LibraryItem.Manga -> item.libraryManga.manga.id.toString()
+                    }
+                },
                 contentType = { "library_grid_item" }
             ) { item ->
                 when (item) {

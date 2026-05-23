@@ -12,6 +12,29 @@ import java.util.Locale
  */
 object LocaleHelper {
 
+    private val flagIdCache = mutableMapOf<String, Int?>()
+
+    fun getFlagResId(context: Context, lang: String): Int? {
+        if (flagIdCache.containsKey(lang)) return flagIdCache[lang]
+
+        var flagId = context.resources.getIdentifier(
+            "ic_flag_${lang.replace("-", "_")}",
+            "drawable",
+            context.packageName,
+        ).takeIf { it != 0 }
+
+        if (flagId == null && lang.contains("-")) {
+            flagId = context.resources.getIdentifier(
+                "ic_flag_${lang.split("-").first()}",
+                "drawable",
+                context.packageName,
+            ).takeIf { it != 0 }
+        }
+
+        flagIdCache[lang] = flagId
+        return flagId
+    }
+
     /**
      * Returns Display name of a string language code
      */

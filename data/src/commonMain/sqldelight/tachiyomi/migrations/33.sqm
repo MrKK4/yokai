@@ -1,0 +1,7 @@
+ALTER TABLE suggestions ADD COLUMN section_key TEXT NOT NULL DEFAULT '';
+
+-- Suggestions are a cache. Rows created before section_key used the human-facing
+-- reason text as identity, which is not stable across tag/display wording changes.
+-- Do not migrate those rows into blank or reason-derived section keys; let the
+-- app rebuild fresh suggestions with stable canonical section keys.
+DELETE FROM suggestions;

@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="utf-8"?>
+<animated-vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt">
+    <aapt:attr name="android:drawable">
+        <vector
+            android:width="24dp"
+            android:height="24dp"
+            android:viewportWidth="24"
+            android:viewportHeight="24">
+            <path
+                android:name="outline_large"
+                android:fillColor="#00000000"
+                android:pathData="M12,2L14,10L22,10L16,15L18,23L12,18L6,23L8,15L2,10L10,10Z"
+                android:strokeColor="#FF000000"
+                android:strokeWidth="1.5" />
+            <path
+                android:name="outline_top"
+                android:fillColor="#00000000"
+                android:pathData="M19,2L20,5L23,5L21,7L22,10L19,8L16,10L17,7L15,5L18,5Z"
+                android:strokeColor="#FF000000"
+                android:strokeWidth="1.5" />
+            <path
+                android:name="outline_bottom"
+                android:fillColor="#00000000"
+                android:pathData="M20,14L21,16L23,16L21.5,17.5L22,20L20,18.5L18,20L18.5,17.5L17,16L19,16Z"
+                android:strokeColor="#FF000000"
+                android:strokeWidth="1.5" />
+            <path
+                android:name="filled_large"
+                android:fillAlpha="0"
+                android:fillColor="#FF000000"
+                android:pathData="M12,2L14,10L22,10L16,15L18,23L12,18L6,23L8,15L2,10L10,10Z" />
+            <path
+                android:name="filled_top"
+                android:fillAlpha="0"
+                android:fillColor="#FF000000"
+                android:pathData="M19,2L20,5L23,5L21,7L22,10L19,8L16,10L17,7L15,5L18,5Z" />
+            <path
+                android:name="filled_bottom"
+                android:fillAlpha="0"
+                android:fillColor="#FF000000"
+                android:pathData="M20,14L21,16L23,16L21.5,17.5L22,20L20,18.5L18,20L18.5,17.5L17,16L19,16Z" />
+        </vector>
+    </aapt:attr>
+    <target android:name="outline_large">
+        <aapt:attr name="android:animation">
+            <objectAnimator
+                android:duration="150"
+                android:interpolator="@android:interpolator/accelerate_decelerate"
+                android:propertyName="strokeAlpha"
+                android:valueFrom="1"
+                android:valueTo="0"
+                android:valueType="floatType" />
+        </aapt:attr>
+    </target>
+    <target android:name="outline_top">
+        <aapt:attr name="android:animation">
+            <objectAnimator
+                android:duration="150"
+                android:interpolator="@android:interpolator/accelerate_decelerate"
+                android:propertyName="strokeAlpha"
+                android:valueFrom="1"
+                android:valueTo="0"
+                android:valueType="floatType" />
+        </aapt:attr>
+    </target>
+    <target android:name="outline_bottom">
+        <aapt:attr name="android:animation">
+            <objectAnimator
+                android:duration="150"
+                android:interpolator="@android:interpolator/accelerate_decelerate"
+                android:propertyName="strokeAlpha"
+                android:valueFrom="1"
+                android:valueTo="0"
+                android:valueType="floatType" />
+        </aapt:attr>
+    </target>
+    <target android:name="filled_large">
+        <aapt:attr name="android:animation">
+            <objectAnimator
+                android:duration="150"
+                android:interpolator="@android:interpolator/accelerate_decelerate"
+                android:propertyName="fillAlpha"
+                android:valueFrom="0"
+                android:valueTo="1"
+                android:valueType="floatType" />
+        </aapt:attr>
+    </target>
+    <target android:name="filled_top">
+        <aapt:attr name="android:animation">
+            <objectAnimator
+                android:duration="150"
+                android:interpolator="@android:interpolator/accelerate_decelerate"
+                android:propertyName="fillAlpha"
+                android:valueFrom="0"
+                android:valueTo="1"
+                android:valueType="floatType" />
+        </aapt:attr>
+    </target>
+    <target android:name="filled_bottom">
+        <aapt:attr name="android:animation">
+            <objectAnimator
+                android:duration="150"
+                android:interpolator="@android:interpolator/accelerate_decelerate"
+                android:propertyName="fillAlpha"
+                android:valueFrom="0"
+                android:valueTo="1"
+                android:valueType="floatType" />
+        </aapt:attr>
+    </target>
+</animated-vector>

@@ -16,7 +16,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import yokai.i18n.MR
 import yokai.util.lang.getString
 
@@ -70,7 +69,7 @@ class SourceManager(
 
     fun getOrStub(sourceKey: Long): Source {
         return sourcesMapFlow.value[sourceKey] ?: stubSourcesMap.getOrPut(sourceKey) {
-            runBlocking { StubSource(sourceKey) }
+            StubSource(sourceKey)
         }
     }
 

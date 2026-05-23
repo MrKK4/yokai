@@ -13,6 +13,12 @@
         app:showAsAction="collapseActionView|ifRoom" />
 
     <item
+        android:id="@+id/action_toggle_v2"
+        android:title="Suggestions version"
+        app:actionViewClass="eu.kanade.tachiyomi.ui.suggestions.SuggestionsVersionActionView"
+        app:showAsAction="always" />
+
+    <item
         android:id="@+id/action_sort"
         android:icon="@drawable/ic_sort_24dp"
         android:title="@string/sort"

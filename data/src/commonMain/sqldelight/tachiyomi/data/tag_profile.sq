@@ -71,12 +71,21 @@ DO UPDATE SET
     updated_at = excluded.updated_at;
 
 updateState:
+INSERT INTO tag_profile(canonical_tag, display_name, state, pinned_at, updated_at)
+VALUES (:canonicalTag, :canonicalTag, :state, :pinnedAt, :updatedAt)
+ON CONFLICT(canonical_tag)
+DO UPDATE SET
+    state = excluded.state,
+    pinned_at = excluded.pinned_at,
+    updated_at = excluded.updated_at;
+
+resetBlacklistedToManaged:
 UPDATE tag_profile
 SET
-    state = :state,
-    pinned_at = :pinnedAt,
+    state = 'MANAGED',
+    pinned_at = NULL,
     updated_at = :updatedAt
-WHERE canonical_tag = :canonicalTag;
+WHERE state = 'BLACKLISTED';
 
 deleteAllProfiles:
 DELETE FROM tag_profile;

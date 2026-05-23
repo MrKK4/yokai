@@ -10,6 +10,7 @@ import eu.kanade.tachiyomi.R
 data class DownloadHeaderItem(
     val id: Long,
     val name: String,
+    val subtitle: String,
     val size: Int,
 ) : AbstractExpandableHeaderItem<DownloadHeaderHolder, DownloadItem>() {
 

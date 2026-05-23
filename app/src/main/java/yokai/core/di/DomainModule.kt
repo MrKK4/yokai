@@ -55,6 +55,7 @@ import yokai.domain.suggestions.CandidateRetriever
 import yokai.domain.suggestions.InterestProfileBuilder
 import yokai.domain.suggestions.SectionPlanner
 import yokai.domain.suggestions.SessionContext
+import yokai.domain.suggestions.SuggestionMetadataVerifier
 import yokai.domain.suggestions.SuggestionRanker
 import yokai.domain.suggestions.SuggestionsDebugLog
 import yokai.domain.suggestions.TagCanonicalizer
@@ -65,12 +66,13 @@ import yokai.domain.track.interactor.InsertTrack
 
 fun domainModule() = module {
     factory { TrustExtension(get(), get()) }
-    factory { GetUserAffinityTagsUseCase(get(), get(), get(), get()) }
-    factory { GetUserSuggestionQueriesUseCase(get(), get()) }
-    factory { FeedAggregator(get(), get(), get()) }
+    factory { GetUserAffinityTagsUseCase(get(), get(), get(), get(), get()) }
+    factory { GetUserSuggestionQueriesUseCase(get(), get(), get(), get()) }
+    factory { FeedAggregator(get(), get(), get(), get(), get(), get()) }
     single { SuggestionsDebugLog() }
     single { SessionContext() }
     single { TagCanonicalizer(get()) }
+    single { SuggestionMetadataVerifier(get(), get(), get()) }
     factory { InterestProfileBuilder(get(), get(), get(), get(), get(), get()) }
     factory { SectionPlanner(get(), get()) }
     factory { CandidateRetriever(get(), get(), get(), get(), get()) }

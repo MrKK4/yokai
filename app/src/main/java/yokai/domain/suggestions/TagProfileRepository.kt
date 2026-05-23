@@ -7,6 +7,8 @@ interface TagProfileRepository {
     suspend fun upsertProfile(profile: TagProfile)
     suspend fun upsertProfiles(profiles: List<TagProfile>)
     suspend fun setTagState(canonicalTag: String, state: TagState, now: Long = System.currentTimeMillis())
+    /** Resets all BLACKLISTED profiles back to MANAGED so un-blacklisting a tag takes effect. */
+    suspend fun resetBlacklistedToManaged(now: Long = System.currentTimeMillis())
 
     suspend fun findAlias(rawKey: String, sourceId: Long? = null): TagAlias?
     suspend fun getSearchTerms(canonicalTag: String): List<String>
@@ -22,6 +24,7 @@ interface TagProfileRepository {
      * understands. No-op if the mapping already exists.
      */
     suspend fun recordSourceVocabulary(rawTag: String, canonicalTag: String, sourceId: Long)
+    suspend fun recordSourceVocabularyBatch(entries: List<Triple<String, String, Long>>)
     suspend fun aliasOrProfileExists(key: String): Boolean
     suspend fun aliasCount(): Long
     suspend fun seedAliases(aliases: List<TagAlias>)

@@ -51,6 +51,7 @@ class SuggestionRanker(
         globalSeenKeys: Set<String>,
         sectionSeenKeys: Map<String, Set<String>>,
         sessionContext: SessionContext,
+        maxResults: Int = SuggestionsConfig.MAX_RESULTS_PER_SECTION,
     ): List<SuggestedManga> {
         val recentSessionTags = sessionContext.getRecentTags()
         val rankedBySection = retrievalResults.flatMap { result ->
@@ -63,9 +64,30 @@ class SuggestionRanker(
                 profiles = context.profiles,
                 blacklistedTags = context.blacklistedTags,
                 recentSessionTags = recentSessionTags,
+                maxResults = maxResults,
             )
         }
         return rankedBySection.mapIndexed { index, suggestion -> suggestion.copy(displayRank = index.toLong()) }
+    }
+
+    /**
+     * Rank expanded "view more" results fetched by [FeedAggregator].
+     * Applies title dedup (best score wins) and source diversity (round-robin).
+     * Library/seen-URL/blacklisted-tag filtering is already done by FeedAggregator.
+     */
+    fun rankExpandedResults(
+        results: List<SuggestedManga>,
+        maxResults: Int = SuggestionsConfig.EXPANDED_MAX_RESULTS,
+    ): List<SuggestedManga> {
+        val bestByTitle = linkedMapOf<String, SuggestedManga>()
+        for (manga in results) {
+            val titleKey = manga.title.normalizedTitle()
+            val existing = bestByTitle[titleKey]
+            if (existing == null || manga.relevanceScore > existing.relevanceScore) {
+                bestByTitle[titleKey] = manga
+            }
+        }
+        return bestByTitle.values.roundRobinBySourceSuggested(maxResults)
     }
 
     /** Legacy overload — fetches context from DB on every call. Use [rankWithContext] in batch flows. */
@@ -74,9 +96,10 @@ class SuggestionRanker(
         globalSeenKeys: Set<String>,
         sectionSeenKeys: Map<String, Set<String>>,
         sessionContext: SessionContext,
+        maxResults: Int = SuggestionsConfig.MAX_RESULTS_PER_SECTION,
     ): List<SuggestedManga> {
         val context = buildRankingContext()
-        return rankWithContext(retrievalResults, context, globalSeenKeys, sectionSeenKeys, sessionContext)
+        return rankWithContext(retrievalResults, context, globalSeenKeys, sectionSeenKeys, sessionContext, maxResults)
     }
 
     private suspend fun rankSection(
@@ -88,8 +111,10 @@ class SuggestionRanker(
         profiles: Map<String, TagProfile>,
         blacklistedTags: Set<String>,
         recentSessionTags: Set<String>,
+        maxResults: Int = SuggestionsConfig.MAX_RESULTS_PER_SECTION,
     ): List<SuggestedManga> {
 
+        val coldStartDiscovery = result.section.isColdStartDiscovery()
         val bestByTitle = linkedMapOf<String, ScoredCandidate>()
         for (candidate in result.candidates) {
             val mangaKey = candidate.mangaKey()
@@ -99,11 +124,11 @@ class SuggestionRanker(
                     debugLog.add(LogType.ITEM_FILTERED, "[$mangaKey] filtered - already in library")
                     continue
                 }
-                mangaKey in globalSeenKeys -> {
+                !coldStartDiscovery && mangaKey in globalSeenKeys -> {
                     debugLog.add(LogType.ITEM_FILTERED, "[$mangaKey] filtered - seen globally")
                     continue
                 }
-                mangaKey in sectionSeenKeys -> {
+                !coldStartDiscovery && mangaKey in sectionSeenKeys -> {
                     debugLog.add(LogType.ITEM_FILTERED, "[$mangaKey] filtered - seen in section '${result.section.sectionKey}'")
                     continue
                 }
@@ -135,22 +160,13 @@ class SuggestionRanker(
         }
 
         return withContext(Dispatchers.Default) {
-            val activeSourceCount = bestByTitle.values
-                .map { it.candidate.sourceId }
-                .distinct()
-                .size
-            // Adaptive cap: raise per-source limit when fewer sources are available so
-            // sections can still reach MIN_RESULTS_PER_SECTION (10) with a small source pool.
-            val effectivePerSourceCap = when (activeSourceCount) {
-                1    -> SuggestionsConfig.MAX_RESULTS_PER_SECTION // single source gets all slots
-                2    -> 5
-                3    -> 4
-                else -> SuggestionsConfig.MAX_PER_SOURCE_PER_SECTION // standard cap
+            val effectiveMax = if (coldStartDiscovery) {
+                SuggestionsConfig.COLD_START_MAX_RESULTS
+            } else {
+                maxResults
             }
-            bestByTitle.values
-                .sortedByDescending { it.score }
-                .capScoredBySource(effectivePerSourceCap)
-                .take(SuggestionsConfig.MAX_RESULTS_PER_SECTION)
+            val selected = bestByTitle.values.roundRobinBySource(effectiveMax)
+            selected
                 .map { it.toSuggestedManga() }
         }
     }
@@ -179,15 +195,19 @@ class SuggestionRanker(
             .mapNotNull { profiles[it] }
             .maxByOrNull { it.affinity }
 
+        if (candidate.section.isColdStartDiscovery()) {
+            return random.nextDouble()
+        }
+
         val tagAffinityScore = bestProfile?.affinity ?: 0.0
-        val freshnessScore = if (candidate.mangaKey() in globalSeenKeys) 0.5 else 1.0
-        val sessionBoost = if (candidateTags.any { it in recentSessionTags }) 0.15 else 0.0
+        val freshnessScore = if (candidate.mangaKey() in globalSeenKeys) FRESHNESS_SEEN_PENALTY else 1.0
+        val sessionBoost = if (candidateTags.any { it in recentSessionTags }) SESSION_BOOST else 0.0
         val velocityBoost = ((bestProfile?.velocity ?: 0.0).coerceAtLeast(0.0)) * SuggestionsConfig.VELOCITY_WEIGHT
-        val explorationNoise = random.nextDouble() * 0.05
+        val explorationNoise = random.nextDouble() * EXPLORATION_NOISE_CEILING
         val sourcePenalty = candidate.sourceIndex * SOURCE_PENALTY + candidate.position * POSITION_PENALTY
 
-        return tagAffinityScore * 0.50 +
-            freshnessScore * 0.20 +
+        return tagAffinityScore * TAG_AFFINITY_WEIGHT +
+            freshnessScore * FRESHNESS_WEIGHT +
             sessionBoost +
             velocityBoost +
             explorationNoise -
@@ -213,27 +233,40 @@ class SuggestionRanker(
                 url = candidate.manga.url,
                 title = candidate.manga.title,
                 thumbnailUrl = candidate.manga.thumbnail_url,
-                reason = candidate.section.displayReason,
+                sectionKey = candidate.section.sectionKey,
                 relevanceScore = score,
             )
     }
 
-    private fun List<ScoredCandidate>.capScoredBySource(max: Int): List<ScoredCandidate> {
-        val counts = mutableMapOf<Long, Int>()
-        return filter { scored ->
-            val count = counts.getOrDefault(scored.candidate.sourceId, 0)
-            if (count < max) {
-                counts[scored.candidate.sourceId] = count + 1
-                true
-            } else {
-                false
-            }
-        }
+    private fun Collection<ScoredCandidate>.roundRobinBySource(maxResults: Int): List<ScoredCandidate> {
+        return SourceDiversity.roundRobinBySource(
+            items = this,
+            maxResults = maxResults,
+            sourceId = { it.candidate.sourceId },
+            sourceIndex = { it.candidate.sourceIndex },
+            score = { it.score },
+        )
+    }
+
+    private fun Collection<SuggestedManga>.roundRobinBySourceSuggested(maxResults: Int): List<SuggestedManga> {
+        return SourceDiversity.roundRobinBySource(
+            items = this,
+            maxResults = maxResults,
+            sourceId = { it.source },
+            sourceIndex = { 0 }, // no source index available; all treated equally
+            score = { it.relevanceScore },
+        )
     }
 
     private companion object {
         private const val SOURCE_PENALTY = 0.001
         private const val POSITION_PENALTY = 0.01
+        // Scoring weights for compositeScore()
+        private const val TAG_AFFINITY_WEIGHT = 0.50
+        private const val FRESHNESS_WEIGHT = 0.20
+        private const val FRESHNESS_SEEN_PENALTY = 0.5   // score when manga was seen in this session
+        private const val SESSION_BOOST = 0.15            // boost when a tag was recently opened
+        private const val EXPLORATION_NOISE_CEILING = 0.05
         private val TITLE_PUNCTUATION = Regex("[\\p{Punct}]")
         private val WHITESPACE = Regex("\\s+")
     }

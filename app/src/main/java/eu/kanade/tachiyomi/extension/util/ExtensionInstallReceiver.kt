@@ -11,13 +11,10 @@ import eu.kanade.tachiyomi.extension.model.Extension
 import eu.kanade.tachiyomi.extension.model.LoadResult
 import eu.kanade.tachiyomi.util.system.launchNow
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.CoroutineStart
-import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Broadcast receiver that listens for the system's packages installed, updated or removed, and only
@@ -104,11 +101,10 @@ internal class ExtensionInstallReceiver(private val listener: Listener) :
      * @param context The application context.
      * @param intent The intent containing the package name of the extension.
      */
-    @OptIn(DelicateCoroutinesApi::class)
     private suspend fun getExtensionFromIntent(context: Context, intent: Intent?): LoadResult {
         val pkgName = getPackageNameFromIntent(intent)
             ?: return LoadResult.Error
-        return GlobalScope.async(Dispatchers.Default, CoroutineStart.DEFAULT) { ExtensionLoader.loadExtensionFromPkgName(context, pkgName) }.await()
+        return withContext(Dispatchers.Default) { ExtensionLoader.loadExtensionFromPkgName(context, pkgName) }
     }
 
     /**

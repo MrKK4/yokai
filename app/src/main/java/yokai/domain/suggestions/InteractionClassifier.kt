@@ -49,11 +49,12 @@ object InteractionClassifier {
 
 data class AffinityTag(
     val name: String,
+    val canonicalTag: String,
     val score: Double,
 )
 
 data class SuggestionQuery(
     val query: String,
-    val reason: String,
+    val sectionKey: String,
     val score: Double,
 )

@@ -84,6 +84,7 @@ import eu.kanade.tachiyomi.ui.library.LibraryGroup.BY_TAG
 import eu.kanade.tachiyomi.ui.library.LibraryGroup.BY_TRACK_STATUS
 import eu.kanade.tachiyomi.ui.library.LibraryGroup.UNGROUPED
 import eu.kanade.tachiyomi.ui.library.display.TabbedLibraryDisplaySheet
+import eu.kanade.tachiyomi.ui.library.FilteredLibraryController
 import eu.kanade.tachiyomi.ui.library.filter.FilterBottomSheet
 import eu.kanade.tachiyomi.ui.main.BottomSheetController
 import eu.kanade.tachiyomi.ui.main.FloatingSearchInterface
@@ -166,6 +167,13 @@ open class LibraryController(
         setHasOptionsMenu(true)
         retainViewMode = RetainViewMode.RETAIN_DETACH
     }
+
+    private enum class LibraryMode {
+        LIBRARY,
+        DOWNLOADS,
+    }
+
+    private var libraryMode = LibraryMode.LIBRARY
 
     /**
      * Position of the active category.
@@ -597,6 +605,8 @@ open class LibraryController(
 
         binding.swipeRefresh.setStyle()
 
+        setupLibraryModeTabs()
+
         binding.recyclerCover.setOnClickListener {
             showCategories(false)
         }
@@ -713,6 +723,43 @@ open class LibraryController(
                     else -> updateLibrary()
                 }
             }
+        }
+    }
+
+    private fun setupLibraryModeTabs() {
+        binding.libraryModeTabs.removeAllTabs()
+        binding.libraryModeTabs.addTab(
+            binding.libraryModeTabs.newTab().setText(activity?.getString(MR.strings.library)),
+        )
+        binding.libraryModeTabs.addTab(
+            binding.libraryModeTabs.newTab().setText("Downloads"),
+        )
+        binding.libraryModeTabs.addOnTabSelectedListener(
+            object : com.google.android.material.tabs.TabLayout.OnTabSelectedListener {
+                override fun onTabSelected(tab: com.google.android.material.tabs.TabLayout.Tab) {
+                    val nextMode = if (tab.position == 0) LibraryMode.LIBRARY else LibraryMode.DOWNLOADS
+                    if (libraryMode != nextMode) {
+                        libraryMode = nextMode
+                        updateLibraryMode()
+                    }
+                }
+
+                override fun onTabUnselected(tab: com.google.android.material.tabs.TabLayout.Tab) = Unit
+                override fun onTabReselected(tab: com.google.android.material.tabs.TabLayout.Tab) = Unit
+            },
+        )
+    }
+
+    private fun updateLibraryMode() {
+        destroyActionModeIfNeeded()
+        adapter.isLongPressDragEnabled = libraryMode == LibraryMode.LIBRARY && canDrag()
+        presenter.updateLibrary()
+    }
+
+    private fun itemsForCurrentMode(items: List<LibraryItem>): List<LibraryItem> {
+        return when (libraryMode) {
+            LibraryMode.LIBRARY -> items
+            LibraryMode.DOWNLOADS -> presenter.downloadedItemsFrom(items)
         }
     }
 
@@ -1129,7 +1176,8 @@ open class LibraryController(
         }
         view ?: return
         destroyActionModeIfNeeded()
-        if (mangaMap.isNotEmpty()) {
+        val displayItems = itemsForCurrentMode(mangaMap)
+        if (displayItems.isNotEmpty()) {
             if (!binding.progress.isVisible) {
                 (activity as? MainActivity)?.showNotificationPermissionPrompt()
             }
@@ -1137,12 +1185,14 @@ open class LibraryController(
         } else {
             binding.emptyView.show(
                 Icons.Filled.HeartBroken,
-                if (hasActiveFilters) {
+                if (libraryMode == LibraryMode.DOWNLOADS) {
+                    MR.strings.no_downloaded_manga
+                } else if (hasActiveFilters) {
                     MR.strings.no_matches_for_filters
                 } else {
                     MR.strings.library_is_empty_add_from_browse
                 },
-                if (!hasActiveFilters) {
+                if (libraryMode != LibraryMode.DOWNLOADS && !hasActiveFilters) {
                     listOf(
                         EmptyView.Action(MR.strings.getting_started_guide) {
                             activity?.openInBrowser("https://tachiyomi.org/docs/guides/getting-started#_2-adding-sources")
@@ -1153,7 +1203,7 @@ open class LibraryController(
                 },
             )
         }
-        adapter.setItems(mangaMap)
+        adapter.setItems(displayItems)
         if (binding.libraryGridRecycler.recycler.translationX != 0f) {
             val time = binding.root.resources.getInteger(
                 AR.integer.config_shortAnimTime,
@@ -1587,6 +1637,7 @@ open class LibraryController(
      * @param position the position of the element clicked.
      */
     override fun onItemLongClick(position: Int) {
+        if (libraryMode == LibraryMode.DOWNLOADS) return
         val item = adapter.getItem(position)
         if (item !is LibraryMangaItem) return
         snack?.dismiss()
@@ -1978,6 +2029,14 @@ open class LibraryController(
                 } else {
                     showDisplayOptions()
                 }
+            }
+            R.id.action_downloaded -> {
+                router.pushController(
+                    FilteredLibraryController(
+                        view?.context?.getString(MR.strings.downloaded).orEmpty(),
+                        filterDownloaded = FilterBottomSheet.STATE_INCLUDE,
+                    ).withFadeTransaction(),
+                )
             }
             else -> return super.onOptionsItemSelected(item)
         }

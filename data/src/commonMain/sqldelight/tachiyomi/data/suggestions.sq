@@ -4,7 +4,7 @@ CREATE TABLE suggestions(
     url TEXT NOT NULL,
     title TEXT NOT NULL,
     thumbnail_url TEXT,
-    reason TEXT NOT NULL,
+    section_key TEXT NOT NULL DEFAULT '',
     relevance_score REAL NOT NULL DEFAULT 0.0,
     display_rank INTEGER NOT NULL DEFAULT 0,
     fetched_at INTEGER NOT NULL DEFAULT 0,
@@ -20,13 +20,13 @@ FROM suggestions
 ORDER BY display_rank ASC;
 
 insert:
-INSERT INTO suggestions(source, url, title, thumbnail_url, reason, relevance_score, display_rank, fetched_at)
-VALUES(:source, :url, :title, :thumbnailUrl, :reason, :relevanceScore, :displayRank, :fetchedAt)
+INSERT INTO suggestions(source, url, title, thumbnail_url, section_key, relevance_score, display_rank, fetched_at)
+VALUES(:source, :url, :title, :thumbnailUrl, :sectionKey, :relevanceScore, :displayRank, :fetchedAt)
 ON CONFLICT(source, url)
 DO UPDATE SET
     title = excluded.title,
     thumbnail_url = excluded.thumbnail_url,
-    reason = excluded.reason,
+    section_key = excluded.section_key,
     relevance_score = excluded.relevance_score,
     display_rank = excluded.display_rank,
     fetched_at = excluded.fetched_at;
@@ -34,8 +34,15 @@ DO UPDATE SET
 deleteAll:
 DELETE FROM suggestions;
 
-deleteByReason:
-DELETE FROM suggestions WHERE reason = :reason;
+deleteBySectionKey:
+DELETE FROM suggestions WHERE section_key = :sectionKey;
+
+deleteOrphanedByPlan:
+-- Removes V2 suggestions whose section_key no longer maps to a planned section. V1 must NOT
+-- call this — V1 doesn't populate suggestion_planned_section so every V1 row would be wiped.
+DELETE FROM suggestions
+WHERE section_key NOT IN (SELECT section_key FROM suggestion_planned_section)
+  AND section_key != '';
 
 count:
 SELECT COUNT(*) FROM suggestions;

@@ -249,6 +249,38 @@
 
     <!-- Suggestions -->
     <string name="suggestions">Suggestions</string>
+    <string name="suggestions_for_you">For you</string>
+    <string name="suggestions_surprise_me">Surprise me</string>
+    <string name="suggestions_for_you_activated">For you enabled</string>
+    <string name="suggestions_surprise_me_activated">Surprise me enabled</string>
+    <string name="suggestions_filter_all">All suggestions</string>
+    <string name="suggestions_filter_title">Filter suggestions</string>
+    <string name="suggestions_filter_by_section">Filter by section</string>
+    <string name="suggestions_exclude_tags">Exclude tags</string>
+    <string name="suggestions_filter_tags">Filter tags</string>
+    <string name="suggestions_filter_legend">Pin tags to boost them, block to exclude. Tap a row to cycle.</string>
+    <string name="suggestions_pin_tag">Pin tag</string>
+    <string name="suggestions_block_tag">Block tag</string>
+    <string name="suggestions_sort_title">Sort suggestions</string>
+    <string name="suggestions_refreshing">Refreshing suggestions</string>
+    <string name="suggestions_searching_sources">Looking for manga from your sources.</string>
+    <string name="suggestions_no_matching">No matching suggestions</string>
+    <string name="suggestions_try_another_filter">Try another suggestion filter.</string>
+    <string name="suggestions_none_found">No suggestions found</string>
+    <string name="suggestions_read_to_build">Read or favorite some manga in your library to build personal suggestions.</string>
+    <string name="suggestions_empty_library">Add some manga to your library to get personal suggestions.</string>
+    <string name="suggestions_end_of_feed">Read more manga to get more suggestions.</string>
+    <string name="suggestions_caught_up">You are caught up for now.</string>
+    <string name="suggestions_up_to_date">Suggestions are up to date.</string>
+    <string name="suggestions_no_matches">No new matches came back from your active sources.</string>
+    <string name="suggestions_refresh_error">Could not refresh suggestions. Check your connection and source extensions.</string>
+    <string name="suggestions_load_more_error">Could not load more suggestions. Check your connection and source extensions.</string>
+    <string name="suggestions_waiting_for_sources">Waiting for source extensions to load. If none are installed, add or enable a source first.</string>
+    <string name="suggestions_refresh_in_progress">Another refresh is still running. Try again in a moment.</string>
+    <string name="suggestions_expand_error">Could not load results. Check your connection.</string>
+    <string name="suggestions_open_error">Could not open this manga. The source may be unavailable.</string>
+    <string name="suggestions_background_refresh_failed">Suggestions background refresh has been failing. Check your connection.</string>
+    <string name="suggestions_expand_content_description">Expand %1$s</string>
 
     <!-- Recents -->
     <string name="recents">Recents</string>
@@ -569,6 +601,7 @@
     <string name="newest_first">Newest to oldest</string>
     <string name="oldest_first">Oldest to newest</string>
     <string name="add_tag">Add tag</string>
+    <string name="custom_tag">Custom</string>
     <string name="clear_tags">Clear tags</string>
     <string name="reset_tags">Reset tags</string>
     <string name="reset_cover">Reset cover</string>
@@ -950,6 +983,7 @@
     <string name="cancel_all_for_series">Cancel all for this series</string>
     <string name="downloaded">Downloaded</string>
     <string name="not_downloaded">Not downloaded</string>
+    <string name="no_downloaded_manga">No downloaded manga</string>
     <string name="downloading">Downloading</string>
     <string name="download">Download</string>
     <string name="start_downloading_now">Start downloading now</string>

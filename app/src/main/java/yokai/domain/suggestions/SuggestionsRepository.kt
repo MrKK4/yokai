@@ -18,8 +18,11 @@ interface SuggestionsRepository {
     suspend fun getSuggestions(): List<SuggestedManga>
     suspend fun insertSuggestions(suggestions: List<SuggestedManga>)
     suspend fun replaceAll(suggestions: List<SuggestedManga>)
+    suspend fun replaceSection(sectionKey: String, suggestions: List<SuggestedManga>)
     suspend fun deleteAll()
-    suspend fun deleteByReason(reason: String)
+    suspend fun deleteBySectionKey(sectionKey: String)
+    /** Deletes rows whose section_key is no longer present in `suggestion_planned_section`. V2-only. */
+    suspend fun deleteOrphanedByPlan()
     suspend fun count(): Long
 }
 
@@ -29,7 +32,7 @@ data class SuggestedManga(
     val url: String,
     val title: String,
     val thumbnailUrl: String?,
-    val reason: String,
+    val sectionKey: String,
     val relevanceScore: Double,
     val displayRank: Long = 0L,
     val fetchedAt: Long = System.currentTimeMillis(),

@@ -75,7 +75,7 @@ object ChapterRecognition {
      */
     private fun getChapterNumberFromMatch(match: MatchResult): Float {
         return match.let {
-            val initial = it.groups[1]?.value?.toFloat()!!
+            val initial = it.groups[1]?.value?.toFloat() ?: return 0f
             val subChapterDecimal = it.groups[2]?.value
             val subChapterAlpha = it.groups[3]?.value
             val addition = checkForDecimal(subChapterDecimal, subChapterAlpha)

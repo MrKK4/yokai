@@ -31,6 +31,11 @@ class LibraryMangaItem(
     var unreadType = 2
     var sourceLanguage: String? = null
 
+    var isDownloadsMode = false
+    var downloadedChapterCount = 0
+    var activeDownloadCount = 0
+    var downloadSubtitle: String? = null
+
     override fun getLayoutRes(): Int {
         return if (libraryLayout == LAYOUT_LIST) {
             R.layout.manga_list_item

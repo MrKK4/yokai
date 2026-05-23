@@ -18,20 +18,27 @@ class GetUserAffinityTagsUseCase(
     private val historyRepository: HistoryRepository,
     private val chapterRepository: ChapterRepository,
     private val preferences: PreferencesHelper,
+    private val canonicalizer: TagCanonicalizer,
 ) {
     suspend fun execute(): List<AffinityTag> {
         val mangaList = mangaRepository.getMangaList()
         if (mangaList.isEmpty()) return emptyList()
         val histories = historyRepository.getAll()
         val chapters = chapterRepository.getAll()
-        val blacklistedTags = preferences.suggestionsTagsBlacklist().get().normalizedTagKeys()
+        val blacklistedTags = preferences.suggestionsTagsBlacklist().get().canonicalTagKeys()
+        val taggedManga = mutableMapOf<Manga, List<NormalizedTag>>()
+        for (manga in mangaList) {
+            taggedManga[manga] = manga.tags(blacklistedTags)
+        }
+        val historySignalCount = histories.size + chapters.count { it.read || it.last_page_read > 0 }
+        if (historySignalCount < SuggestionsConfig.COLD_START_HISTORY_THRESHOLD) return emptyList()
 
         // Small-library fast path: IDF is meaningless with very few titles,
         // so just return raw tag frequency ranking instead.
         if (mangaList.size < MIN_CORPUS_SIZE) {
             return withContext(Dispatchers.Default) {
-                mangaList
-                    .flatMap { manga -> manga.tags(blacklistedTags) }
+                taggedManga.values
+                    .flatten()
                     .groupingBy { it.key }
                     .eachCount()
                     .entries
@@ -39,7 +46,8 @@ class GetUserAffinityTagsUseCase(
                     .take(TOP_N)
                     .map { (key, count) ->
                         AffinityTag(
-                            name = key.toDisplayTag(),
+                            name = taggedManga.displayNameFor(key),
+                            canonicalTag = key,
                             score = count.toDouble(),
                         )
                     }
@@ -48,15 +56,15 @@ class GetUserAffinityTagsUseCase(
 
         return withContext(Dispatchers.Default) {
             val tagNames = mutableMapOf<String, String>()
-            val tagFrequency = mangaList
+            val tagFrequency = taggedManga.values
                 .asSequence()
-                .map { manga -> manga.tags(blacklistedTags).map { it.key }.distinct() }
+                .map { tags -> tags.map { it.key }.distinct() }
                 .flatten()
                 .onEach { key -> tagNames.putIfAbsent(key, key.toDisplayTag()) }
                 .groupingBy { it }
                 .eachCount()
 
-            val totalDocs = mangaList.count { it.tags(blacklistedTags).isNotEmpty() }.coerceAtLeast(1)
+            val totalDocs = taggedManga.values.count { it.isNotEmpty() }.coerceAtLeast(1)
             val scoreMap = mutableMapOf<String, Double>()
             val historyByMangaId = histories.groupBy(
                 keySelector = { it.mangaId },
@@ -70,7 +78,7 @@ class GetUserAffinityTagsUseCase(
                 )
 
             for (manga in mangaList) {
-                val tags = manga.tags(blacklistedTags)
+                val tags = taggedManga[manga].orEmpty()
                 if (tags.isEmpty()) continue
                 tags.forEach { tagNames.putIfAbsent(it.key, it.name) }
 
@@ -114,7 +122,7 @@ class GetUserAffinityTagsUseCase(
                     lastReadAt = lastReadAt,
                 )
                 if (interaction == InteractionType.DROPPED_EARLY) {
-                    manga.tags(blacklistedTags).forEach { tag ->
+                    taggedManga[manga].orEmpty().forEach { tag ->
                         scoreMap[tag.key] = (scoreMap[tag.key] ?: 0.0) * DROPPED_TAG_PENALTY
                     }
                 }
@@ -125,7 +133,13 @@ class GetUserAffinityTagsUseCase(
                 .entries
                 .sortedByDescending { it.value }
                 .take(TOP_N)
-                .map { AffinityTag(name = tagNames[it.key] ?: it.key.toDisplayTag(), score = it.value) }
+                .map {
+                    AffinityTag(
+                        name = tagNames[it.key] ?: it.key.toDisplayTag(),
+                        canonicalTag = it.key,
+                        score = it.value,
+                    )
+                }
         }
     }
 
@@ -185,30 +199,32 @@ class GetUserAffinityTagsUseCase(
     private fun idf(tagFrequency: Int, totalDocs: Int): Double =
         ln(totalDocs.toDouble() / (1.0 + tagFrequency)).coerceAtLeast(MIN_IDF)
 
-    private fun Manga.tags(blacklistedTags: Set<String>): List<NormalizedTag> =
+    private suspend fun Manga.tags(blacklistedTags: Set<String>): List<NormalizedTag> =
         genre
             ?.split(",")
             ?.mapNotNull { raw ->
-                val tag = raw.trim()
-                tag.takeIf { it.isNotBlank() }?.let { NormalizedTag(name = it, key = it.normalizedTagKey()) }
+                val canonicalTag = canonicalizer.canonicalize(raw)
+                canonicalTag.canonicalKey
+                    .takeIf { it.isNotBlank() }
+                    ?.let { key -> NormalizedTag(name = canonicalTag.displayName, key = key) }
             }
             ?.filterNot { it.key in blacklistedTags }
             ?.distinctBy { it.key }
             .orEmpty()
 
-    private fun Set<String>.normalizedTagKeys(): Set<String> =
-        map { it.normalizedTagKey() }
+    private suspend fun Set<String>.canonicalTagKeys(): Set<String> =
+        map { canonicalizer.canonicalize(it).canonicalKey }
             .filter { it.isNotBlank() }
             .toSet()
-
-    private fun String.normalizedTagKey(): String =
-        lowercase().trim().replace(WHITESPACE, " ")
 
     private fun String.toDisplayTag(): String =
         split(" ")
             .joinToString(" ") { word ->
                 word.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
             }
+
+    private fun Map<Manga, List<NormalizedTag>>.displayNameFor(key: String): String =
+        values.flatten().firstOrNull { it.key == key }?.name ?: key.toDisplayTag()
 
     private data class NormalizedTag(
         val name: String,
@@ -225,6 +241,5 @@ class GetUserAffinityTagsUseCase(
         private const val MIN_CORPUS_SIZE = 15
         /** Multiply tag scores by this when the manga was dropped early (not zeroed — other reads may still signal the tag). */
         private const val DROPPED_TAG_PENALTY = 0.4
-        private val WHITESPACE = Regex("\\s+")
     }
 }

@@ -22,10 +22,20 @@ class InterestProfileBuilder(
 ) {
     suspend fun buildProfile(now: Long = System.currentTimeMillis()): List<TagProfile> {
         val mangaList = mangaRepository.getMangaList()
-        if (mangaList.isEmpty()) return emptyList()
+        if (mangaList.isEmpty()) {
+            clearManagedProfiles(now)
+            debugLog.add(LogType.PROFILE_UPDATE, "Profile rebuild skipped - empty library")
+            return tagProfileRepository.getAllProfiles()
+        }
 
         val histories = historyRepository.getAll()
         val chapters = chapterRepository.getAll()
+        val historySignalCount = histories.size + chapters.count { it.read || it.last_page_read > 0 }
+        if (historySignalCount < SuggestionsConfig.COLD_START_HISTORY_THRESHOLD) {
+            clearManagedProfiles(now)
+            debugLog.add(LogType.PROFILE_UPDATE, "Profile rebuild skipped - only $historySignalCount reading signals")
+            return tagProfileRepository.getAllProfiles()
+        }
         val historyByMangaId = histories.groupBy(
             keySelector = { it.mangaId },
             valueTransform = { it.history },
@@ -144,13 +154,26 @@ class InterestProfileBuilder(
     }
 
     private fun signalWeight(interaction: InteractionType): Double =
-        when (interaction) {
-            InteractionType.DROPPED_EARLY -> -0.5
-            InteractionType.SAMPLED -> 1.0
-            InteractionType.READ -> 2.0
-            InteractionType.COMPLETED -> 3.0
-            InteractionType.FAVORITED -> 4.0
-        }
+        InteractionClassifier.baseWeight(interaction)
+
+    private suspend fun clearManagedProfiles(now: Long) {
+        // Only zero managed (history-derived) profiles. Blacklisted state is preserved so the
+        // user's explicit hide selections survive a library wipe / cold-start condition.
+        val clearedProfiles = tagProfileRepository.getAllProfiles()
+            .filter { it.isManaged && it.affinity > 0.0 }
+            .map { profile ->
+                profile.copy(
+                    longTermCount = 0.0,
+                    recentCount = 0.0,
+                    velocity = 0.0,
+                    currentWeekCount = 0.0,
+                    previousWeekCount = 0.0,
+                    lastSeenAt = 0L,
+                    updatedAt = now,
+                )
+            }
+        tagProfileRepository.upsertProfiles(clearedProfiles)
+    }
 
     private fun recencyDecay(daysSince: Double): Double =
         exp(-LN_2 / SuggestionsConfig.STM_HALF_LIFE_DAYS * daysSince)

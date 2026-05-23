@@ -5,43 +5,84 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import dev.icerock.moko.resources.compose.stringResource
 import eu.kanade.tachiyomi.domain.manga.models.Manga
+import yokai.i18n.MR
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SuggestionsExpandedSheet(
-    reason: String,
+    sectionKey: String,
+    displayName: String,
     results: List<Manga>,
     isLoading: Boolean,
+    isLoadingMore: Boolean,
+    hasMore: Boolean,
     error: String?,
+    initialFirstVisibleItemIndex: Int,
+    initialFirstVisibleItemScrollOffset: Int,
     onMangaClick: (Manga) -> Unit,
+    onRetry: () -> Unit,
     onDismiss: () -> Unit,
+    onScrollPositionChanged: (index: Int, scrollOffset: Int) -> Unit,
+    onLoadMore: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val gridState = remember(sectionKey) {
+        LazyGridState(
+            firstVisibleItemIndex = initialFirstVisibleItemIndex,
+            firstVisibleItemScrollOffset = initialFirstVisibleItemScrollOffset,
+        )
+    }
+
+    LaunchedEffect(gridState) {
+        snapshotFlow {
+            gridState.firstVisibleItemIndex to gridState.firstVisibleItemScrollOffset
+        }
+            .distinctUntilChanged()
+            .collect { (index, scrollOffset) ->
+                onScrollPositionChanged(index, scrollOffset)
+            }
+    }
+    DisposableEffect(gridState) {
+        onDispose {
+            onScrollPositionChanged(
+                gridState.firstVisibleItemIndex,
+                gridState.firstVisibleItemScrollOffset,
+            )
+        }
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -61,7 +102,7 @@ fun SuggestionsExpandedSheet(
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Text(
-                    text = reason,
+                    text = displayName,
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.weight(1f),
@@ -71,20 +112,29 @@ fun SuggestionsExpandedSheet(
                 IconButton(onClick = onDismiss) {
                     Icon(
                         imageVector = Icons.Outlined.Close,
-                        contentDescription = "Close",
+                        contentDescription = stringResource(MR.strings.close),
                     )
                 }
             }
 
             when {
                 isLoading -> {
-                    Box(
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(SUGGESTION_GRID_COLUMNS),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(200.dp),
-                        contentAlignment = Alignment.Center,
+                            .fillMaxHeight(0.85f),
+                        contentPadding = PaddingValues(
+                            start = 16.dp,
+                            end = 16.dp,
+                            bottom = 24.dp,
+                        ),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp),
                     ) {
-                        CircularProgressIndicator()
+                        items(SKELETON_CARDS) {
+                            SuggestionSkeletonCard()
+                        }
                     }
                 }
                 error != null -> {
@@ -95,11 +145,16 @@ fun SuggestionsExpandedSheet(
                             .padding(24.dp),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Text(
-                            text = error,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.error,
-                        )
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                text = error,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                            TextButton(onClick = onRetry) {
+                                Text(text = stringResource(MR.strings.retry))
+                            }
+                        }
                     }
                 }
                 results.isEmpty() -> {
@@ -110,7 +165,7 @@ fun SuggestionsExpandedSheet(
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
-                            text = "No results found.",
+                            text = stringResource(MR.strings.no_results_found),
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -118,10 +173,11 @@ fun SuggestionsExpandedSheet(
                 }
                 else -> {
                     LazyVerticalGrid(
-                        columns = GridCells.Adaptive(104.dp),
+                        state = gridState,
+                        columns = GridCells.Fixed(SUGGESTION_GRID_COLUMNS),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(max = 600.dp),
+                            .fillMaxHeight(0.85f),
                         contentPadding = PaddingValues(
                             start = 16.dp,
                             end = 16.dp,
@@ -136,16 +192,35 @@ fun SuggestionsExpandedSheet(
                         ) { manga ->
                             SuggestionItem(
                                 manga = manga,
-                                onClick = {
-                                    onMangaClick(manga)
-                                    // Don't dismiss — presenter state is preserved while the
-                                    // controller is in the backstack. Sheet will reconstruct on return.
-                                },
+                                onClick = { onMangaClick(manga) },
                             )
                         }
+                        if (isLoadingMore) {
+                            items(SUGGESTION_GRID_COLUMNS) {
+                                SuggestionSkeletonCard()
+                            }
+                        }
+                    }
+
+                    // Trigger load-more reactively via snapshotFlow so it fires at most once
+                    // per threshold-crossing instead of on every recomposition.
+                    LaunchedEffect(gridState, hasMore, isLoadingMore) {
+                        if (!hasMore || isLoadingMore) return@LaunchedEffect
+                        snapshotFlow {
+                            val info = gridState.layoutInfo
+                            val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+                            val total = info.totalItemsCount
+                            total > 0 && lastVisible >= total - 4
+                        }
+                            .distinctUntilChanged()
+                            .filter { it }
+                            .collect { onLoadMore() }
                     }
                 }
             }
         }
     }
 }
+
+private const val SUGGESTION_GRID_COLUMNS = 3
+private const val SKELETON_CARDS = 9

@@ -2,7 +2,6 @@ package yokai.domain.suggestions
 
 enum class SectionType {
     DISCOVERY,
-    PINNED_TAG,
     MANAGED_TAG,
 }
 
@@ -17,3 +16,8 @@ data class PlannedSection(
     val rank: Long = 0L,
     val plannedAt: Long = System.currentTimeMillis(),
 )
+
+fun PlannedSection.isColdStartDiscovery(): Boolean =
+    type == SectionType.DISCOVERY && sectionKey == COLD_START_DISCOVERY_SECTION_KEY
+
+const val COLD_START_DISCOVERY_SECTION_KEY = "discovery:cold-start"

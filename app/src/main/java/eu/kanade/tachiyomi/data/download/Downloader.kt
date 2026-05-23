@@ -49,7 +49,6 @@ import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.flow.transformLatest
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.supervisorScope
 import nl.adaptivity.xmlutil.serialization.XML
 import okhttp3.Response
@@ -200,7 +199,7 @@ class Downloader(
                         .groupBy { it.source }
                         .toList()
                         // Concurrently download from 5 different sources
-                        .take(5)
+                        .take(MAX_CONCURRENT_SOURCE_DOWNLOADS)
                         .map { (_, downloads) -> downloads.first() }
                     emit(activeDownloads)
 
@@ -376,7 +375,7 @@ class Downloader(
             // Start downloading images, consider we can have downloaded images already
             // Concurrently do 2 pages at a time
             pageList.asFlow()
-                .flatMapMerge(concurrency = 2) { page ->
+                .flatMapMerge(concurrency = MAX_CONCURRENT_PAGE_DOWNLOADS) { page ->
                     flow {
                         withIOContext { getOrDownloadImage(page, download, tmpDir) }
                         emit(page)
@@ -623,17 +622,14 @@ class Downloader(
      * @param chapter the chapter.
      * @param chapterUrl the resolved URL for the chapter.
      */
-    private fun createComicInfoFile(
+    private suspend fun createComicInfoFile(
         dir: UniFile,
         manga: Manga,
         chapter: Chapter,
         source: HttpSource,
     ) {
         val categories = manga.id?.let { mangaId ->
-            // FIXME: Don't do blocking
-            runBlocking {
-                getCategories.awaitByMangaId(mangaId)
-            }
+            getCategories.awaitByMangaId(mangaId)
         }
             .orEmpty()
             .map { it.name.trim() }
@@ -741,6 +737,9 @@ class Downloader(
         const val TMP_DIR_SUFFIX = "_tmp"
         const val CHAPTERS_PER_SOURCE_QUEUE_WARNING_THRESHOLD = 15
         private const val DOWNLOADS_QUEUED_WARNING_THRESHOLD = 30
+        // Concurrency caps
+        private const val MAX_CONCURRENT_SOURCE_DOWNLOADS = 5  // simultaneous sources in the download queue
+        private const val MAX_CONCURRENT_PAGE_DOWNLOADS = 2    // simultaneous page fetches per chapter
 
         // Arbitrary minimum required space to start a download: 200 MB
         const val MIN_DISK_SPACE = 200 * 1024 * 1024

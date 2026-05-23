@@ -12,13 +12,14 @@ class TagProfileRepositoryImpl(
 ) : TagProfileRepository {
 
     override suspend fun getAllProfiles(): List<TagProfile> =
-        handler.awaitList { tag_profileQueries.findAll(::mapTagProfile) }
+        handler.awaitList { tag_profileQueries.findAll(::mapTagProfile) }.filter { it.isValid() }
 
     override suspend fun getNonBlacklistedProfiles(): List<TagProfile> =
-        handler.awaitList { tag_profileQueries.findNonBlacklisted(::mapTagProfile) }
+        handler.awaitList { tag_profileQueries.findNonBlacklisted(::mapTagProfile) }.filter { it.isValid() }
 
     override suspend fun getProfile(canonicalTag: String): TagProfile? =
         handler.awaitOneOrNull { tag_profileQueries.findByCanonicalTag(canonicalTag, ::mapTagProfile) }
+            ?.takeIf { it.isValid() }
 
     override suspend fun upsertProfile(profile: TagProfile) {
         handler.await {
@@ -56,14 +57,21 @@ class TagProfileRepositoryImpl(
     }
 
     override suspend fun setTagState(canonicalTag: String, state: TagState, now: Long) {
-        val pinnedAt = if (state == TagState.PINNED) now else null
+        // pinned_at column is retained in the schema for backward compatibility but is no
+        // longer written — pin functionality is V1-only and reads the preference directly.
         handler.await {
             tag_profileQueries.updateState(
                 state = state.name,
-                pinnedAt = pinnedAt,
+                pinnedAt = null,
                 updatedAt = now,
                 canonicalTag = canonicalTag,
             )
+        }
+    }
+
+    override suspend fun resetBlacklistedToManaged(now: Long) {
+        handler.await {
+            tag_profileQueries.resetBlacklistedToManaged(updatedAt = now)
         }
     }
 
@@ -100,6 +108,23 @@ class TagProfileRepositoryImpl(
                 sourceId = sourceId,
                 sourceKey = sourceId,
             )
+        }
+    }
+
+    override suspend fun recordSourceVocabularyBatch(entries: List<Triple<String, String, Long>>) {
+        if (entries.isEmpty()) return
+        handler.await(inTransaction = true) {
+            entries.forEach { (rawTag, canonicalTag, sourceId) ->
+                val rawKey = rawTag.trim().lowercase()
+                if (rawKey.isBlank() || canonicalTag.isBlank()) return@forEach
+                tag_aliasQueries.insertOrIgnoreAlias(
+                    rawTag = rawTag.trim(),
+                    rawKey = rawKey,
+                    canonicalTag = canonicalTag,
+                    sourceId = sourceId,
+                    sourceKey = sourceId,
+                )
+            }
         }
     }
 
@@ -142,6 +167,13 @@ class TagProfileRepositoryImpl(
     override suspend fun bestDisplayName(canonicalTag: String): String? =
         handler.awaitOneOrNull { tag_variantQueries.findBestDisplayName(canonicalTag) }
 
+    /**
+     * SQLDelight-generated callbacks require non-null returns, so the mapper itself never
+     * fails — instead we coerce a missing display_name to canonical_tag and post-filter
+     * blank canonical_tag via [isValid] after the list returns. This way one malformed row
+     * (e.g. introduced by a buggy raw migration) doesn't fail buildProfile and leave the
+     * user with an empty feed forever.
+     */
     private fun mapTagProfile(
         canonicalTag: String,
         displayName: String,
@@ -154,20 +186,21 @@ class TagProfileRepositoryImpl(
         state: String,
         pinnedAt: Long?,
         updatedAt: Long,
-    ): TagProfile =
-        TagProfile(
-            canonicalTag = canonicalTag,
-            displayName = displayName,
-            longTermCount = longTermCount,
-            recentCount = recentCount,
-            velocity = velocity,
-            currentWeekCount = currentWeekCount,
-            previousWeekCount = previousWeekCount,
-            lastSeenAt = lastSeenAt,
-            state = state.toTagState(),
-            pinnedAt = pinnedAt,
-            updatedAt = updatedAt,
-        )
+    ): TagProfile = TagProfile(
+        canonicalTag = canonicalTag,
+        displayName = displayName.ifBlank { canonicalTag },
+        longTermCount = longTermCount,
+        recentCount = recentCount,
+        velocity = velocity,
+        currentWeekCount = currentWeekCount,
+        previousWeekCount = previousWeekCount,
+        lastSeenAt = lastSeenAt,
+        state = state.toTagState(),
+        pinnedAt = pinnedAt,
+        updatedAt = updatedAt,
+    )
+
+    private fun TagProfile.isValid(): Boolean = canonicalTag.isNotBlank()
 
     private fun mapTagAlias(
         rawTag: String,
