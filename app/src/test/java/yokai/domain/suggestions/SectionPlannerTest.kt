@@ -272,6 +272,8 @@ internal fun profile(
     )
 
 internal class FakeTagProfileRepository : TagProfileRepository {
+    override suspend fun getExactTermForSource(canonicalTag: String, sourceId: Long): String? = null
+    override suspend fun recordSourceVocabulary(rawTag: String, canonicalTag: String, sourceId: Long) {}
     private val profiles = linkedMapOf<String, TagProfile>()
     private val aliases = linkedMapOf<Pair<String, Long>, TagAlias>()
     private val variantCounts = linkedMapOf<Pair<String, String>, Int>()
