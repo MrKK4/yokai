@@ -227,22 +227,7 @@ class LibraryHeaderHolder(val view: View, val adapter: LibraryCategoryAdapter) :
 
     @SuppressLint("DiscouragedApi")
     fun getFlagIcon(lang: String): Int? {
-        val flagId = itemView.resources.getIdentifier(
-            "ic_flag_${lang.replace("-", "_")}",
-            "drawable",
-            itemView.context.packageName,
-        ).takeIf { it != 0 } ?: (
-            if (lang.contains("-")) {
-                itemView.resources.getIdentifier(
-                    "ic_flag_${lang.split("-").first()}",
-                    "drawable",
-                    itemView.context.packageName,
-                ).takeIf { it != 0 }
-            } else {
-                null
-            }
-            )
-        return flagId
+        return eu.kanade.tachiyomi.util.system.LocaleHelper.getFlagResId(itemView.context, lang)
     }
 
     fun setRefreshing(refreshing: Boolean) {
