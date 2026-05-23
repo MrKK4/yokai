@@ -19,6 +19,7 @@ import androidx.compose.ui.platform.LocalContext
 import dev.icerock.moko.resources.compose.stringResource
 import eu.kanade.tachiyomi.data.preference.PreferencesHelper
 import eu.kanade.tachiyomi.ui.main.MainActivity
+import eu.kanade.tachiyomi.ui.security.SecureActivityDelegate
 import eu.kanade.tachiyomi.util.CrashLogUtil
 import eu.kanade.tachiyomi.util.system.setThemeByPref
 import kotlinx.coroutines.launch
@@ -33,6 +34,7 @@ class CrashActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        SecureActivityDelegate.setSecure(this)
         setThemeByPref(preferences)
 
         val exception = GlobalExceptionHandler.getThrowableFromIntent(intent)
