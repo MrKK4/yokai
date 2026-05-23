@@ -29,6 +29,7 @@ import yokai.domain.suggestions.SectionBatcher
 import yokai.domain.suggestions.SectionPlanner
 import yokai.domain.suggestions.SessionContext
 import yokai.domain.suggestions.ShownMangaHistoryRepository
+import yokai.domain.suggestions.SuggestionMetadataVerifier
 import yokai.domain.suggestions.SuggestedManga
 import yokai.domain.suggestions.SuggestionRanker
 import yokai.domain.suggestions.SuggestionSeenLogRepository
@@ -59,6 +60,7 @@ class SuggestionsWorker(
     private val sessionContext: SessionContext = Injekt.get()
     private val tagCanonicalizer: TagCanonicalizer = Injekt.get()
     private val tagProfileRepository: TagProfileRepository = Injekt.get()
+    private val metadataVerifier: SuggestionMetadataVerifier = Injekt.get()
 
     override suspend fun doWork(): Result {
         return try {
@@ -144,25 +146,46 @@ class SuggestionsWorker(
                 sectionKeys = sectionsToFetch.map { it.sectionKey },
                 cutoff = now - SuggestionsConfig.SEEN_LOG_TTL_MS,
             )
+            val retrievalResults = candidateRetriever.retrieve(
+                sections = sectionsToFetch,
+                globalSeenKeys = globalSeenKeys,
+                sectionSeenKeys = sectionSeenKeys,
+            )
+                .map { result ->
+                    if (rankingContext.blacklistedTags.isEmpty()) {
+                        result
+                    } else {
+                        result.copy(
+                            candidates = metadataVerifier.filterCandidates(
+                                candidates = result.candidates,
+                                blacklistedTags = rankingContext.blacklistedTags,
+                            ),
+                        )
+                    }
+                }
             val suggestions = suggestionRanker.rankWithContext(
-                retrievalResults = candidateRetriever.retrieve(
-                    sections = sectionsToFetch,
-                    globalSeenKeys = globalSeenKeys,
-                    sectionSeenKeys = sectionSeenKeys,
-                ),
+                retrievalResults = retrievalResults,
                 context = rankingContext,
                 globalSeenKeys = globalSeenKeys,
                 sectionSeenKeys = sectionSeenKeys,
                 sessionContext = sessionContext,
             )
-            if (suggestions.isNotEmpty()) {
+            val filledSuggestions = fillWorkerSections(
+                baseResults = retrievalResults,
+                currentSuggestions = suggestions,
+                rankingContext = rankingContext,
+                globalSeenKeys = globalSeenKeys,
+                sectionSeenKeys = sectionSeenKeys,
+                sessionContext = sessionContext,
+            )
+            if (filledSuggestions.isNotEmpty()) {
                 fetchedAny = true
                 if (committedRefreshId == null) {
                     committedRefreshId = preferences.suggestionsTotalRefreshCount().get() + 1L
                     preferences.suggestionsTotalRefreshCount().set(committedRefreshId.toInt())
                 }
                 persistV2Batch(
-                    suggestions = suggestions,
+                    suggestions = filledSuggestions,
                     sectionsToFetch = sectionsToFetch,
                     refreshId = committedRefreshId,
                     now = now,
@@ -176,6 +199,64 @@ class SuggestionsWorker(
         return if (fetchedAny || hasRetainedSuggestions) Result.success() else retryOrFailure()
     }
 
+    private suspend fun fillWorkerSections(
+        baseResults: List<yokai.domain.suggestions.CandidateRetrievalResult>,
+        currentSuggestions: List<SuggestedManga>,
+        rankingContext: yokai.domain.suggestions.RankingContext,
+        globalSeenKeys: Set<String>,
+        sectionSeenKeys: Map<String, Set<String>>,
+        sessionContext: SessionContext,
+    ): List<SuggestedManga> {
+        val filledBySection = currentSuggestions.groupBy { it.sectionKey }.toMutableMap()
+        for (result in baseResults) {
+            var sectionSuggestions = filledBySection[result.section.sectionKey].orEmpty()
+            if (sectionSuggestions.size >= SuggestionsConfig.MAX_RESULTS_PER_SECTION) continue
+
+            var combinedResult = result
+            var nextPage = 3
+            var attempts = 0
+            while (
+                sectionSuggestions.size < SuggestionsConfig.MAX_RESULTS_PER_SECTION &&
+                attempts < SuggestionsConfig.SECTION_FILL_EXTRA_PAGE_LIMIT
+            ) {
+                val extraResult = candidateRetriever.retrieve(
+                    sections = listOf(result.section),
+                    pageOffset = nextPage,
+                    globalSeenKeys = globalSeenKeys,
+                    sectionSeenKeys = sectionSeenKeys,
+                ).singleOrNull() ?: break
+                val verifiedExtra = if (rankingContext.blacklistedTags.isEmpty()) {
+                    extraResult
+                } else {
+                    extraResult.copy(
+                        candidates = metadataVerifier.filterCandidates(
+                            candidates = extraResult.candidates,
+                            blacklistedTags = rankingContext.blacklistedTags,
+                        ),
+                    )
+                }
+                val combinedCandidates = (combinedResult.candidates + verifiedExtra.candidates)
+                    .distinctBy { it.sourceId to it.manga.url }
+                if (combinedCandidates.size <= combinedResult.candidates.size) break
+                combinedResult = combinedResult.copy(candidates = combinedCandidates)
+                val ranked = suggestionRanker.rankWithContext(
+                    retrievalResults = listOf(combinedResult),
+                    context = rankingContext,
+                    globalSeenKeys = globalSeenKeys,
+                    sectionSeenKeys = sectionSeenKeys,
+                    sessionContext = sessionContext,
+                )
+                if (ranked.size > sectionSuggestions.size) {
+                    sectionSuggestions = ranked
+                    filledBySection[result.section.sectionKey] = ranked
+                }
+                nextPage++
+                attempts++
+            }
+        }
+        return filledBySection.values.flatten()
+    }
+
     private suspend fun persistV2Batch(
         suggestions: List<SuggestedManga>,
         sectionsToFetch: List<PlannedSection>,
@@ -186,8 +267,7 @@ class SuggestionsWorker(
         suggestions
             .groupBy { it.sectionKey }
             .forEach { (sectionKey, sectionSuggestions) ->
-                suggestionsRepository.deleteBySectionKey(sectionKey)
-                suggestionsRepository.insertSuggestions(sectionSuggestions)
+                suggestionsRepository.replaceSection(sectionKey, sectionSuggestions)
             }
         shownMangaHistoryRepository.insertAll(suggestions.map { it.source to it.url })
         suggestionSeenLogRepository.insertSeenBatch(

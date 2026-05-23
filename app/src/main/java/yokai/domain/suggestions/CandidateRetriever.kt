@@ -261,23 +261,26 @@ class CandidateRetriever(
         val candidates = fetchPageProgressive(page, countBySource, onSourceComplete).toMutableList()
 
         // ── Source-rotation backfill ───────────────────────────────────────────
-        if (candidates.size < SuggestionsConfig.MIN_RESULTS_PER_SECTION) {
+        val canOverfillSourceCap = maxPerSourceFetch == null ||
+            maxPerSourceFetch > SuggestionsConfig.MANUAL_REFRESH_MAX_PER_SOURCE_FETCH
+        if (canOverfillSourceCap && candidates.size < SuggestionsConfig.MAX_RESULTS_PER_SECTION) {
             val drySources = sources.filter { s ->
                 (countBySource[s.id]?.get() ?: 0) == 0
             }.toSet()
             val backfillSources = sources.filterNot { it in drySources }
             for (source in backfillSources) {
-                val shortfall = SuggestionsConfig.MIN_RESULTS_PER_SECTION - candidates.size
+                val shortfall = SuggestionsConfig.MAX_RESULTS_PER_SECTION - candidates.size
                 if (shortfall <= 0) break
+                val currentBlockedMangaKeys = blockedMangaKeys + candidates.map { mangaKey(it.sourceId, it.manga.url) }
                 val counter = countBySource.getOrPut(source.id) { AtomicInteger(0) }
                 val savedCount = counter.get()
                 counter.set((savedCount - shortfall).coerceAtLeast(0))
                 val topUp = when (section.type) {
                     SectionType.DISCOVERY -> fetchDiscoverySource(
-                        section, source, sources.indexOf(source), page, requestGate, countBySource, maxPerSourceFetch, blockedMangaKeys,
+                        section, source, sources.indexOf(source), page, requestGate, countBySource, maxPerSourceFetch, currentBlockedMangaKeys,
                     )
                     else -> fetchSearchSource(
-                        section, source, sources.indexOf(source), page, requestGate, countBySource, maxPerSourceFetch, blockedMangaKeys,
+                        section, source, sources.indexOf(source), page, requestGate, countBySource, maxPerSourceFetch, currentBlockedMangaKeys,
                     )
                 }
                 candidates.addAll(topUp)

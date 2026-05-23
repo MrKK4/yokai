@@ -23,6 +23,7 @@ class FeedAggregator(
     private val preferences: PreferencesHelper,
     private val tagCanonicalizer: TagCanonicalizer,
     private val tagProfileRepository: TagProfileRepository,
+    private val metadataVerifier: SuggestionMetadataVerifier? = null,
     private val catalogueSourcesProvider: () -> List<CatalogueSource> = sourceManager::getCatalogueSources,
 ) {
     suspend fun fetch(suggestionQueries: List<SuggestionQuery>): List<SuggestedManga> {
@@ -51,7 +52,7 @@ class FeedAggregator(
             localManga.map { it.source to it.url }.toSet() to
                 localManga.map { it.title.normalizedTitle() }.toSet()
         }
-        val blacklistedTags = preferences.suggestionsTagsBlacklist().get().normalizedQueries()
+        val blacklistedTags = currentBlacklistedTags()
         val normalizedSeenMangaUrls = if (coldStartDiscovery) emptySet() else seenMangaUrls
         val querySelection = if (includeSourceSection) {
             QuerySelection(
@@ -284,9 +285,9 @@ class FeedAggregator(
                 break
             }
         }
-        val quota = SuggestionsConfig.MIN_RESULTS_PER_SECTION
+        val quota = SuggestionsConfig.MAX_RESULTS_PER_SECTION
 
-        // Backfill with fallback sources if primary yielded < 12
+        // Backfill with fallback sources if primary yielded fewer than the visible target.
         if (results.size < quota && task.fallbackSources.isNotEmpty()) {
             for (source in task.fallbackSources) {
                 results.addAll(fetch(listOf(source), task.pageOffset))
@@ -294,8 +295,8 @@ class FeedAggregator(
             }
         }
 
-        // Backfill with page 2 of primary sources if still < 12
-        if (results.size < quota) {
+        // Backfill with page 2 of primary sources if still under the visible target.
+        if (results.isNotEmpty() && results.size < quota) {
             results.addAll(fetch(task.sources.take(3), task.pageOffset + 1))
         }
 
@@ -514,7 +515,7 @@ class FeedAggregator(
             }
         } ?: return emptyList()
 
-        return pageResult.mangas
+        val scored = pageResult.mangas
             .asSequence()
             .filterAllowed(source.id, localKeys, localTitles, seenMangaUrls, blacklistedTags)
             .mapIndexed { index, manga ->
@@ -528,6 +529,7 @@ class FeedAggregator(
                 )
             }
             .toList()
+        return filterScoredByMetadata(scored, blacklistedTags)
     }
 
     private suspend fun fetchPopularFromSource(
@@ -542,7 +544,7 @@ class FeedAggregator(
         random: Random = Random.Default,
     ): List<ScoredManga> {
         val requestPage = page ?: random.nextInt(POPULAR_PAGE_MIN, POPULAR_PAGE_MAX)
-        return requestGate.withPermit {
+        val scored = requestGate.withPermit {
             sourceResult {
                 source.getPopularManga(requestPage)
             }
@@ -562,25 +564,27 @@ class FeedAggregator(
             }
             ?.toList()
             .orEmpty()
+        return filterScoredByMetadata(scored, blacklistedTags)
     }
 
     suspend fun fetchExpandedSection(
         query: String,
         seenMangaUrls: Set<String> = emptySet(),
         sourceOffset: Int = 0,
+        sourcePage: Int = EXPANDED_PAGE_MIN,
         sourceLimit: Int = SuggestionsConfig.EXPANDED_SOURCE_BATCH_SIZE,
     ): ExpandedSectionPage {
         val random = Random(System.nanoTime())
         val localManga = mangaRepository.getMangaList()
         val localKeys = localManga.map { it.source to it.url }.toSet()
         val localTitles = localManga.map { it.title.normalizedTitle() }.toSet()
-        val blacklistedTags = preferences.suggestionsTagsBlacklist().get().normalizedQueries()
+        val blacklistedTags = currentBlacklistedTags()
         val allSources = activeNetworkSources()
         val safeSourceLimit = sourceLimit.coerceAtLeast(1)
         val requestGate = Semaphore(SuggestionsConfig.MAX_CONCURRENT_SOURCE_REQUESTS)
         val sectionKey = "expanded:${query.lowercase().trim()}"
         val suggestionQuery = SuggestionQuery(query = query, sectionKey = sectionKey, score = 0.0)
-        val page = random.nextInt(EXPANDED_PAGE_MIN, EXPANDED_PAGE_MAX)
+        val page = sourcePage.coerceAtLeast(EXPANDED_PAGE_MIN)
 
         var nextSourceOffset = sourceOffset.coerceAtLeast(0)
         var batchedSources = emptyList<CatalogueSource>()
@@ -629,6 +633,7 @@ class FeedAggregator(
         return ExpandedSectionPage(
             suggestions = results,
             nextSourceOffset = nextSourceOffset,
+            nextSourcePage = if (!hasMoreSources && results.isNotEmpty()) page + 1 else page,
             hasMoreSources = hasMoreSources,
         )
     }
@@ -637,6 +642,7 @@ class FeedAggregator(
         query: String,
         seenMangaUrls: Set<String> = emptySet(),
         sourceOffset: Int = 0,
+        sourcePage: Int = EXPANDED_PAGE_MIN,
         sourceLimit: Int = SuggestionsConfig.EXPANDED_SOURCE_BATCH_SIZE,
         onPage: suspend (ExpandedSectionPage) -> Unit,
     ): ExpandedSectionPage {
@@ -644,13 +650,13 @@ class FeedAggregator(
         val localManga = mangaRepository.getMangaList()
         val localKeys = localManga.map { it.source to it.url }.toSet()
         val localTitles = localManga.map { it.title.normalizedTitle() }.toSet()
-        val blacklistedTags = preferences.suggestionsTagsBlacklist().get().normalizedQueries()
+        val blacklistedTags = currentBlacklistedTags()
         val allSources = activeNetworkSources()
         val safeSourceLimit = sourceLimit.coerceAtLeast(1)
         val requestGate = Semaphore(SuggestionsConfig.MAX_CONCURRENT_SOURCE_REQUESTS)
         val sectionKey = "expanded:${query.lowercase().trim()}"
         val suggestionQuery = SuggestionQuery(query = query, sectionKey = sectionKey, score = 0.0)
-        val page = random.nextInt(EXPANDED_PAGE_MIN, EXPANDED_PAGE_MAX)
+        val page = sourcePage.coerceAtLeast(EXPANDED_PAGE_MIN)
 
         var nextSourceOffset = sourceOffset.coerceAtLeast(0)
         var hasMoreSources = nextSourceOffset < allSources.size
@@ -702,6 +708,7 @@ class FeedAggregator(
                             ExpandedSectionPage(
                                 suggestions = suggestions,
                                 nextSourceOffset = batchOffset + safeSourceLimit,
+                                nextSourcePage = page,
                                 hasMoreSources = batchOffset + safeSourceLimit < allSources.size,
                             ),
                         )
@@ -711,13 +718,26 @@ class FeedAggregator(
 
             nextSourceOffset = batchOffset + safeSourceLimit
             hasMoreSources = nextSourceOffset < allSources.size
+            if (emittedInBatch) {
+                onPage(
+                    ExpandedSectionPage(
+                        suggestions = emptyList(),
+                        nextSourceOffset = nextSourceOffset,
+                        nextSourcePage = page,
+                        hasMoreSources = hasMoreSources,
+                        batchComplete = true,
+                    ),
+                )
+            }
             if (emittedInBatch) break
         }
+        val shouldAdvancePage = !hasMoreSources && emittedSuggestions.isNotEmpty()
 
         return ExpandedSectionPage(
             suggestions = emittedSuggestions,
-            nextSourceOffset = nextSourceOffset,
-            hasMoreSources = hasMoreSources,
+            nextSourceOffset = if (shouldAdvancePage) 0 else nextSourceOffset,
+            nextSourcePage = if (shouldAdvancePage) page + 1 else page,
+            hasMoreSources = hasMoreSources || shouldAdvancePage,
         )
     }
 
@@ -725,6 +745,7 @@ class FeedAggregator(
         sortOrder: SuggestionSortOrder,
         seenMangaUrls: Set<String> = emptySet(),
         sourceOffset: Int = 0,
+        sourcePage: Int = EXPANDED_PAGE_MIN,
         sourceLimit: Int = SuggestionsConfig.EXPANDED_SOURCE_BATCH_SIZE,
         onPage: suspend (ExpandedSectionPage) -> Unit,
     ): ExpandedSectionPage {
@@ -732,13 +753,13 @@ class FeedAggregator(
         val localManga = mangaRepository.getMangaList()
         val localKeys = localManga.map { it.source to it.url }.toSet()
         val localTitles = localManga.map { it.title.normalizedTitle() }.toSet()
-        val blacklistedTags = preferences.suggestionsTagsBlacklist().get().normalizedQueries()
+        val blacklistedTags = currentBlacklistedTags()
         val allSources = activeNetworkSources()
         val safeSourceLimit = sourceLimit.coerceAtLeast(1)
         val requestGate = Semaphore(SuggestionsConfig.MAX_CONCURRENT_SOURCE_REQUESTS)
         val page = when (sortOrder) {
-            SuggestionSortOrder.Latest -> EXPANDED_PAGE_MIN
-            SuggestionSortOrder.Popular -> random.nextInt(EXPANDED_PAGE_MIN, EXPANDED_PAGE_MAX)
+            SuggestionSortOrder.Latest -> sourcePage.coerceAtLeast(EXPANDED_PAGE_MIN)
+            SuggestionSortOrder.Popular -> sourcePage.coerceAtLeast(EXPANDED_PAGE_MIN)
         }
 
         var nextSourceOffset = sourceOffset.coerceAtLeast(0)
@@ -802,6 +823,7 @@ class FeedAggregator(
                             ExpandedSectionPage(
                                 suggestions = suggestions,
                                 nextSourceOffset = batchOffset + safeSourceLimit,
+                                nextSourcePage = page,
                                 hasMoreSources = batchOffset + safeSourceLimit < allSources.size,
                             ),
                         )
@@ -811,13 +833,26 @@ class FeedAggregator(
 
             nextSourceOffset = batchOffset + safeSourceLimit
             hasMoreSources = nextSourceOffset < allSources.size
+            if (emittedInBatch) {
+                onPage(
+                    ExpandedSectionPage(
+                        suggestions = emptyList(),
+                        nextSourceOffset = nextSourceOffset,
+                        nextSourcePage = page,
+                        hasMoreSources = hasMoreSources,
+                        batchComplete = true,
+                    ),
+                )
+            }
             if (emittedInBatch) break
         }
+        val shouldAdvancePage = !hasMoreSources && emittedSuggestions.isNotEmpty()
 
         return ExpandedSectionPage(
             suggestions = emittedSuggestions,
-            nextSourceOffset = nextSourceOffset,
-            hasMoreSources = hasMoreSources,
+            nextSourceOffset = if (shouldAdvancePage) 0 else nextSourceOffset,
+            nextSourcePage = if (shouldAdvancePage) page + 1 else page,
+            hasMoreSources = hasMoreSources || shouldAdvancePage,
         )
     }
 
@@ -849,7 +884,7 @@ class FeedAggregator(
             tryApplySuggestionSort(sortOrder)
         }
 
-        return requestGate.withPermit {
+        val scored = requestGate.withPermit {
             sourceResult {
                 source.getSearchManga(page, query, filters)
             }
@@ -869,6 +904,7 @@ class FeedAggregator(
             }
             ?.toList()
             .orEmpty()
+        return filterScoredByMetadata(scored, blacklistedTags)
     }
 
     private suspend fun activeSources(random: Random): SourceSelection {
@@ -938,6 +974,24 @@ class FeedAggregator(
             ?.any { tag -> tag.normalizedQuery() in blacklistedTags }
             ?: false
     }
+
+    private suspend fun currentBlacklistedTags(): Set<String> {
+        val rawTags = preferences.suggestionsTagsBlacklist().get()
+        return metadataVerifier?.canonicalizeBlacklist(rawTags)
+            ?: rawTags.normalizedQueries()
+    }
+
+    private suspend fun filterScoredByMetadata(
+        hits: List<ScoredManga>,
+        blacklistedTags: Set<String>,
+    ): List<ScoredManga> =
+        metadataVerifier?.filterByBlacklist(
+            items = hits,
+            blacklistedTags = blacklistedTags,
+            sourceId = { it.sourceId },
+            manga = { it.manga },
+            context = { "section '${it.sectionKey}'" },
+        ) ?: hits
 
     private fun Set<String>.normalizedQueries(): Set<String> =
         map { it.normalizedQuery() }
@@ -1054,7 +1108,7 @@ class FeedAggregator(
         private const val MAX_TOTAL = MAX_SOURCE_SECTION_TOTAL + (PAGE_TAG_COUNT * MAX_PER_AFFINITY_SECTION)
         // Source diversity caps
         private const val MAX_PER_SOURCE_PER_SECTION = SuggestionsConfig.EXPANDED_MAX_PER_SOURCE_FETCH
-        private const val MAX_PER_SOURCE_GLOBAL = 8        // across the entire feed page
+        private const val MAX_PER_SOURCE_GLOBAL = SuggestionsConfig.MAX_RESULTS_PER_SECTION
         private const val BASE_RELEVANCE = 1_000_000.0
         private const val SOURCE_PENALTY = 0.001
         private const val POSITION_PENALTY = 0.01
@@ -1077,5 +1131,7 @@ class FeedAggregator(
 data class ExpandedSectionPage(
     val suggestions: List<SuggestedManga>,
     val nextSourceOffset: Int,
+    val nextSourcePage: Int = 1,
     val hasMoreSources: Boolean,
+    val batchComplete: Boolean = false,
 )

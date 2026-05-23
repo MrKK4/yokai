@@ -289,8 +289,9 @@ class FeedAggregatorColdStartTest {
         assertTrue(emitted.isNotEmpty())
         assertEquals(setOf(1L), emitted.first().suggestions.map { it.source }.toSet())
         assertEquals(setOf(1L, 2L), emitted.flatMap { it.suggestions }.map { it.source }.toSet())
-        assertEquals(2, summary.nextSourceOffset)
-        assertEquals(false, summary.hasMoreSources)
+        assertEquals(0, summary.nextSourceOffset)
+        assertEquals(2, summary.nextSourcePage)
+        assertEquals(true, summary.hasMoreSources)
     }
 
     @Test
@@ -320,12 +321,13 @@ class FeedAggregatorColdStartTest {
         assertTrue(emitted.isNotEmpty())
         assertEquals(setOf(21L), emitted.first().suggestions.map { it.source }.toSet())
         assertEquals(setOf(21L, 22L), emitted.flatMap { it.suggestions }.map { it.source }.toSet())
-        assertEquals(2, summary.nextSourceOffset)
-        assertEquals(false, summary.hasMoreSources)
+        assertEquals(0, summary.nextSourceOffset)
+        assertEquals(2, summary.nextSourcePage)
+        assertEquals(true, summary.hasMoreSources)
     }
 
     @Test
-    fun `tag section sort injection does not retry the same source`() = runBlocking {
+    fun `tag section sort injection keeps sort while filling the section`() = runBlocking {
         val sort = object : Filter.Sort("Sort", arrayOf("Popular", "Latest Update")) {}
         val source = FakeCatalogueSource(
             id = 13L,
@@ -336,7 +338,7 @@ class FeedAggregatorColdStartTest {
         )
         val aggregator = aggregatorWith(source)
 
-        aggregator.fetchPage(
+        val page = aggregator.fetchPage(
             suggestionQueries = listOf(
                 SuggestionQuery(query = "Romance", sectionKey = "tag:romance", score = 10.0),
             ),
@@ -347,7 +349,8 @@ class FeedAggregatorColdStartTest {
             pageOffset = 1,
         )
 
-        assertEquals(1, source.searchCalls)
+        assertEquals(SuggestionsConfig.MAX_RESULTS_PER_SECTION, page.suggestions.size)
+        assertEquals(2, source.searchCalls)
         assertEquals(Filter.Sort.Selection(1, ascending = false), sort.state)
     }
 

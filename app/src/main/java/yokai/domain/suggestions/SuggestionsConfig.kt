@@ -25,6 +25,7 @@ object SuggestionsConfig {
     const val MAX_CONCURRENT_SOURCE_REQUESTS = 8
     const val SOURCE_REQUEST_TIMEOUT_MS = 15_000L
     const val SECTION_TIMEOUT_MS = 22_000L
+    const val SECTION_FILL_EXTRA_PAGE_LIMIT = 2
     const val MAX_CANDIDATES_PER_SECTION = 500
     const val MAX_PER_SOURCE_FETCH = 6
     const val MANUAL_REFRESH_MAX_PER_SOURCE_FETCH = 2

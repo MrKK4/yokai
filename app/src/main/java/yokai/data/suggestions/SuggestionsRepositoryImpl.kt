@@ -47,6 +47,24 @@ class SuggestionsRepositoryImpl(private val handler: DatabaseHandler) : Suggesti
         }
     }
 
+    override suspend fun replaceSection(sectionKey: String, suggestions: List<SuggestedManga>) {
+        handler.await(inTransaction = true) {
+            suggestionsQueries.deleteBySectionKey(sectionKey)
+            suggestions.forEach {
+                suggestionsQueries.insert(
+                    source = it.source,
+                    url = it.url,
+                    title = it.title,
+                    thumbnailUrl = it.thumbnailUrl,
+                    sectionKey = it.sectionKey,
+                    relevanceScore = it.relevanceScore,
+                    displayRank = it.displayRank,
+                    fetchedAt = it.fetchedAt,
+                )
+            }
+        }
+    }
+
     override suspend fun deleteAll() {
         handler.await { suggestionsQueries.deleteAll() }
     }

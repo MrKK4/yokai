@@ -18,6 +18,7 @@ interface SuggestionsRepository {
     suspend fun getSuggestions(): List<SuggestedManga>
     suspend fun insertSuggestions(suggestions: List<SuggestedManga>)
     suspend fun replaceAll(suggestions: List<SuggestedManga>)
+    suspend fun replaceSection(sectionKey: String, suggestions: List<SuggestedManga>)
     suspend fun deleteAll()
     suspend fun deleteBySectionKey(sectionKey: String)
     /** Deletes rows whose section_key is no longer present in `suggestion_planned_section`. V2-only. */

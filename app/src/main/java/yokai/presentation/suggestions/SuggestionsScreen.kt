@@ -237,7 +237,8 @@ fun SuggestionsScreen(
                             val sectionKey = section.sectionKey
                             val mangaList = visibleSuggestions[sectionKey]
                             val isLoadingSection = index >= state.nextBatchStartIndex && state.isFetchingBatch
-                            if (!isLoadingSection && mangaList.isNullOrEmpty()) return@forEachIndexed
+                            val isRefreshingSection = sectionKey in state.refreshingSectionKeys
+                            if (!isLoadingSection && !isRefreshingSection && mangaList.isNullOrEmpty()) return@forEachIndexed
                             item(
                                 key = "header:$sectionKey",
                                 span = { GridItemSpan(maxLineSpan) },
@@ -253,14 +254,14 @@ fun SuggestionsScreen(
                                     },
                                 )
                             }
-                            if (!mangaList.isNullOrEmpty()) {
+                            if (!mangaList.isNullOrEmpty() && !isRefreshingSection) {
                                 items(
                                     items = mangaList,
                                     key = { manga -> "$sectionKey:${manga.source}:${manga.url}" },
                                 ) { manga ->
                                     SuggestionItem(manga = manga, onClick = { onMangaClick(manga) })
                                 }
-                            } else if (isLoadingSection) {
+                            } else if (isLoadingSection || isRefreshingSection) {
                                 repeat(SKELETON_CARDS_PER_SECTION) { index ->
                                     item(key = "skeleton:$sectionKey:$index") {
                                         SuggestionSkeletonCard()
@@ -277,6 +278,7 @@ fun SuggestionsScreen(
                     } else {
                         // V1 / legacy: iterate loaded sections directly.
                         visibleSuggestions.forEach { (sectionKey, mangaList) ->
+                            val isRefreshingSection = sectionKey in state.refreshingSectionKeys
                             item(
                                 key = "header:$sectionKey",
                                 span = { GridItemSpan(maxLineSpan) },
@@ -292,11 +294,19 @@ fun SuggestionsScreen(
                                     },
                                 )
                             }
-                            items(
-                                items = mangaList,
-                                key = { manga -> "$sectionKey:${manga.source}:${manga.url}" },
-                            ) { manga ->
-                                SuggestionItem(manga = manga, onClick = { onMangaClick(manga) })
+                            if (isRefreshingSection) {
+                                repeat(SKELETON_CARDS_PER_SECTION) { index ->
+                                    item(key = "skeleton:$sectionKey:$index") {
+                                        SuggestionSkeletonCard()
+                                    }
+                                }
+                            } else {
+                                items(
+                                    items = mangaList,
+                                    key = { manga -> "$sectionKey:${manga.source}:${manga.url}" },
+                                ) { manga ->
+                                    SuggestionItem(manga = manga, onClick = { onMangaClick(manga) })
+                                }
                             }
                             item(
                                 key = "space:$sectionKey",
