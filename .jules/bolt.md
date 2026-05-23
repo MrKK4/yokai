@@ -1,0 +1,3 @@
+## 2024-05-18 - Lazy Evaluation for Collections
+**Learning:** Chaining collection operations like `.filter`, `.map`, and `.flatten` on large datasets (e.g., library manga lists, extensions) can cause significant memory and performance bottlenecks due to intermediate ArrayList allocations for every step in the chain. Kotlin's `.asSequence()` should be used to enforce lazy evaluation.
+**Action:** Always prepend `.asSequence()` before performing chained collection operations on potentially large datasets in Kotlin to prevent costly intermediate allocations, and conclude the chain with `.toList()` when necessary.

@@ -58,7 +58,7 @@ abstract class BaseMigrationPresenter<T : BaseMigrationInterface>(
         val sortOrder = PreferenceValues.MigrationSourceOrder.fromPreference(preferences)
         val extensions = extensionManager.installedExtensionsFlow.value
         val obsoleteSources =
-            extensions.filter { it.isObsolete }.map { it.sources }.flatten().map { it.id }
+            extensions.asSequence().filter { it.isObsolete }.map { it.sources }.flatten().map { it.id }.toList()
 
         return sourceGroup
             .mapNotNull { if (it.key != LocalSource.ID) sourceManager.getOrStub(it.key) to it.value.size else null }
@@ -88,7 +88,7 @@ abstract class BaseMigrationPresenter<T : BaseMigrationInterface>(
     }
 
     private fun libraryToMigrationItem(library: List<Manga>, sourceId: Long): List<MangaItem> {
-        return library.filter { it.source == sourceId }.map(::MangaItem)
+        return library.asSequence().filter { it.source == sourceId }.map(::MangaItem).toList()
     }
 
     protected suspend fun firstTimeMigration() {

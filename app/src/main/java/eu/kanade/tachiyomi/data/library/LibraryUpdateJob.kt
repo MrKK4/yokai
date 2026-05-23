@@ -177,8 +177,10 @@ class LibraryUpdateJob(private val context: Context, workerParams: WorkerParamet
             if (savedMangasList != null) {
                 val mangas =
                     getLibraryManga.await()
+                        .asSequence()
                         .filter { it.manga.id in savedMangasList }
                         .distinctBy { it.manga.id }
+                        .toList()
                 val categoryId = inputData.getInt(KEY_CATEGORY, -1)
                 if (categoryId > -1) categoryIds.add(categoryId)
                 mangas
@@ -516,7 +518,7 @@ class LibraryUpdateJob(private val context: Context, workerParams: WorkerParamet
                 preferences.libraryUpdateCategories().get().map(String::toInt)
             if (categoriesToUpdate.isNotEmpty()) {
                 categoryIds.addAll(categoriesToUpdate)
-                libraryManga.filter { it.category in categoriesToUpdate }.distinctBy { it.manga.id }
+                libraryManga.asSequence().filter { it.category in categoriesToUpdate }.distinctBy { it.manga.id }.toList()
             } else {
                 categoryIds.addAll(getCategories.await().mapNotNull { it.id } + 0)
                 libraryManga.distinctBy { it.manga.id }
