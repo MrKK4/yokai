@@ -3,6 +3,7 @@ package yokai.presentation.extension.repo
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ExtensionOff
@@ -111,15 +112,18 @@ class ExtensionRepoScreen(
                     return@LazyColumn
                 }
 
-                repos.forEach { repo ->
-                    item {
-                        ExtensionRepoItem(
-                            extensionRepo = repo,
-                            onDeleteClick = { repoToDelete ->
-                                scope.launch { alertDialog.awaitExtensionRepoDeletePrompt(repoToDelete, screenModel) }
-                            },
-                        )
-                    }
+                items(
+                    items = repos,
+                    key = { it.baseUrl },
+                ) { repo ->
+                    // ⚡ Bolt: Using items() instead of forEach { item { ... } } allows Compose to properly
+                    // recycle components, avoid unnecessary nested layouts, and optimize performance for lists.
+                    ExtensionRepoItem(
+                        extensionRepo = repo,
+                        onDeleteClick = { repoToDelete ->
+                            scope.launch { alertDialog.awaitExtensionRepoDeletePrompt(repoToDelete, screenModel) }
+                        },
+                    )
                 }
             }
 
