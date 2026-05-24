@@ -8,41 +8,66 @@ CREATE TABLE suggestions(
     relevance_score REAL NOT NULL DEFAULT 0.0,
     display_rank INTEGER NOT NULL DEFAULT 0,
     fetched_at INTEGER NOT NULL DEFAULT 0,
-    UNIQUE(source, url)
+    result_version INTEGER NOT NULL DEFAULT 0,
+    refresh_session_id INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(result_version, source, url)
 );
 
 CREATE INDEX suggestions_relevance_score_index ON suggestions(relevance_score, fetched_at);
 CREATE INDEX suggestions_display_rank_index ON suggestions(display_rank);
+CREATE INDEX suggestions_result_version_index ON suggestions(result_version, display_rank);
+CREATE INDEX suggestions_refresh_session_id_index ON suggestions(refresh_session_id);
 
 findAll:
 SELECT *
 FROM suggestions
 ORDER BY display_rank ASC;
 
+findByResultVersion:
+SELECT *
+FROM suggestions
+WHERE result_version = :resultVersion
+ORDER BY display_rank ASC;
+
 insert:
-INSERT INTO suggestions(source, url, title, thumbnail_url, section_key, relevance_score, display_rank, fetched_at)
-VALUES(:source, :url, :title, :thumbnailUrl, :sectionKey, :relevanceScore, :displayRank, :fetchedAt)
-ON CONFLICT(source, url)
+INSERT INTO suggestions(source, url, title, thumbnail_url, section_key, relevance_score, display_rank, fetched_at, result_version, refresh_session_id)
+VALUES(:source, :url, :title, :thumbnailUrl, :sectionKey, :relevanceScore, :displayRank, :fetchedAt, :resultVersion, :refreshSessionId)
+ON CONFLICT(result_version, source, url)
 DO UPDATE SET
     title = excluded.title,
     thumbnail_url = excluded.thumbnail_url,
     section_key = excluded.section_key,
     relevance_score = excluded.relevance_score,
     display_rank = excluded.display_rank,
-    fetched_at = excluded.fetched_at;
+    fetched_at = excluded.fetched_at,
+    refresh_session_id = excluded.refresh_session_id;
 
 deleteAll:
 DELETE FROM suggestions;
 
+deleteByResultVersion:
+DELETE FROM suggestions WHERE result_version = :resultVersion;
+
 deleteBySectionKey:
 DELETE FROM suggestions WHERE section_key = :sectionKey;
+
+deleteBySectionKeyAndResultVersion:
+DELETE FROM suggestions WHERE section_key = :sectionKey AND result_version = :resultVersion;
 
 deleteOrphanedByPlan:
 -- Removes V2 suggestions whose section_key no longer maps to a planned section. V1 must NOT
 -- call this — V1 doesn't populate suggestion_planned_section so every V1 row would be wiped.
 DELETE FROM suggestions
-WHERE section_key NOT IN (SELECT section_key FROM suggestion_planned_section)
+WHERE result_version = :resultVersion
+  AND section_key NOT IN (
+      SELECT section_key
+      FROM suggestion_planned_section
+      WHERE result_version = :resultVersion
+  )
   AND section_key != '';
 
 count:
 SELECT COUNT(*) FROM suggestions;
+
+countByResultVersion:
+SELECT COUNT(*) FROM suggestions WHERE result_version = :resultVersion;

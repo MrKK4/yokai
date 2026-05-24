@@ -105,6 +105,7 @@ class RecentMangaAdapter(val delegate: RecentsInterface) :
         fun onCoverClick(position: Int)
         fun onMangaActionsClicked(position: Int, anchor: View)
         fun onRemoveHistoryClicked(position: Int)
+        fun onHistoryBucketClicked(position: Int)
         fun onSubChapterClicked(position: Int, chapter: Chapter, view: View)
         fun updateExpandedExtraChapters(position: Int, expanded: Boolean)
         fun areExtraChaptersExpanded(position: Int): Boolean

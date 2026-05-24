@@ -9,15 +9,24 @@ CREATE TABLE suggestion_planned_section(
     search_terms TEXT NOT NULL,
     sort_order TEXT NOT NULL,
     sort_fallback INTEGER AS Boolean NOT NULL DEFAULT 0,
-    planned_at INTEGER NOT NULL DEFAULT 0
+    planned_at INTEGER NOT NULL DEFAULT 0,
+    result_version INTEGER NOT NULL DEFAULT 0,
+    refresh_session_id INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX suggestion_planned_section_rank_index ON suggestion_planned_section(section_rank);
 CREATE INDEX suggestion_planned_section_planned_at_index ON suggestion_planned_section(planned_at);
+CREATE INDEX suggestion_planned_section_result_version_index ON suggestion_planned_section(result_version, section_rank);
 
 findAll:
 SELECT *
 FROM suggestion_planned_section
+ORDER BY section_rank ASC;
+
+findByResultVersion:
+SELECT *
+FROM suggestion_planned_section
+WHERE result_version = :resultVersion
 ORDER BY section_rank ASC;
 
 replaceSection:
@@ -30,7 +39,9 @@ INSERT OR REPLACE INTO suggestion_planned_section(
     search_terms,
     sort_order,
     sort_fallback,
-    planned_at
+    planned_at,
+    result_version,
+    refresh_session_id
 )
 VALUES(
     :sectionKey,
@@ -41,8 +52,13 @@ VALUES(
     :searchTerms,
     :sortOrder,
     :sortFallback,
-    :plannedAt
+    :plannedAt,
+    :resultVersion,
+    :refreshSessionId
 );
 
 deleteAll:
 DELETE FROM suggestion_planned_section;
+
+deleteByResultVersion:
+DELETE FROM suggestion_planned_section WHERE result_version = :resultVersion;

@@ -9,6 +9,7 @@ import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.SManga
 import io.mockk.every
 import io.mockk.mockk
+import java.net.SocketException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -17,6 +18,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.api.Test
 
 class CandidateRetrieverColdStartTest {
@@ -114,6 +116,19 @@ class CandidateRetrieverColdStartTest {
         assertEquals((9L..16L).toSet(), results.single().candidates.map { it.sourceId }.toSet())
     }
 
+    @Test
+    fun `connection reset interrupts section instead of becoming dry source results`() {
+        val retriever = retrieverWith(
+            ThrowingColdStartSource(id = 19L, throwable = SocketException("Connection reset")),
+        )
+
+        assertThrows<TransientSuggestionNetworkException> {
+            runBlocking {
+                retriever.retrieve(sections = listOf(normalDiscoverySection()))
+            }
+        }
+    }
+
     private fun retrieverWith(
         vararg sources: CatalogueSource,
         lastFetchedSourceIds: Set<String> = emptySet(),
@@ -182,6 +197,24 @@ private class FakeColdStartSource(
             },
             hasNextPage = true,
         )
+    }
+
+    override suspend fun getLatestUpdates(page: Int): MangasPage =
+        getPopularManga(page)
+
+    override fun getFilterList(): FilterList = FilterList()
+}
+
+private class ThrowingColdStartSource(
+    override val id: Long,
+    private val throwable: Throwable,
+) : CatalogueSource {
+    override val name: String = "Throwing $id"
+    override val lang: String = "en"
+    override val supportsLatest: Boolean = true
+
+    override suspend fun getPopularManga(page: Int): MangasPage {
+        throw throwable
     }
 
     override suspend fun getLatestUpdates(page: Int): MangasPage =

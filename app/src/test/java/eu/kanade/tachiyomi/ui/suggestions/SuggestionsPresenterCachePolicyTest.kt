@@ -65,6 +65,10 @@ class SuggestionsPresenterCachePolicyTest {
 
     @Test
     fun `refresh lock timeout never shows blocking empty page message`() {
+        // The foreground refresh path no longer waits on SuggestionsRefreshCoordinator,
+        // so the "another refresh is still running" branch is now unreachable. If this
+        // ever flips to true, the user-visible regression is the message reappearing
+        // when a pull-to-refresh races a background pagination call.
         assertFalse(shouldShowBlockingRefreshLockMessage())
     }
 
@@ -76,6 +80,46 @@ class SuggestionsPresenterCachePolicyTest {
     @Test
     fun `expanded sheet dismiss is ignored while suppressed for navigation`() {
         assertFalse(shouldCloseExpandedSheetOnDismiss(sheetSuppressed = true))
+    }
+
+    @Test
+    fun `v1 popular section renders with fire icon`() {
+        assertEquals("🔥 Popular", sectionKeyToV1DisplayName("popular"))
+    }
+
+    @Test
+    fun `v1 latest section renders with new icon`() {
+        assertEquals("🆕 Latest", sectionKeyToV1DisplayName("latest"))
+    }
+
+    @Test
+    fun `v1 affinity tag section renders with star icon and capitalization`() {
+        assertEquals("⭐ Romance", sectionKeyToV1DisplayName("tag:romance"))
+    }
+
+    @Test
+    fun `v1 pinned tag section renders with pin icon and no prefix word`() {
+        assertEquals("📌 Mecha", sectionKeyToV1DisplayName("pinned:mecha"))
+    }
+
+    @Test
+    fun `v1 saved search section renders with magnifier icon and no prefix word`() {
+        assertEquals("🔍 Cyberpunk", sectionKeyToV1DisplayName("search:cyberpunk"))
+    }
+
+    @Test
+    fun `v1 multi-word tag is title-cased`() {
+        assertEquals("⭐ Slice Of Life", sectionKeyToV1DisplayName("tag:slice of life"))
+    }
+
+    @Test
+    fun `v1 expanded section keeps capitalized tag without icon for sheet header`() {
+        assertEquals("Romance", sectionKeyToV1DisplayName("expanded:romance"))
+    }
+
+    @Test
+    fun `v1 unknown section key falls through unchanged`() {
+        assertEquals("custom_key_x", sectionKeyToV1DisplayName("custom_key_x"))
     }
 
     @Test

@@ -101,6 +101,7 @@
     </string-array>
 
     <string-array name="group_chapters_together">
+        <item>@string/by_age_buckets</item>
         <item>@string/by_series</item>
         <item>@string/by_week</item>
         <item>@string/by_day</item>

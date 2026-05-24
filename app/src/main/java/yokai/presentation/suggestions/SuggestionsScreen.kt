@@ -213,6 +213,14 @@ fun SuggestionsScreen(
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
+                    state.refreshBannerMessage?.let { message ->
+                        item(
+                            key = "refresh-banner",
+                            span = { GridItemSpan(maxLineSpan) },
+                        ) {
+                            SuggestionRefreshBanner(message = message)
+                        }
+                    }
                     if (showLoadingSkeleton && !usePlannedLayout) {
                         item(
                             key = "loading-header",
@@ -254,7 +262,11 @@ fun SuggestionsScreen(
                                     },
                                 )
                             }
-                            if (!mangaList.isNullOrEmpty() && !isRefreshingSection) {
+                            if (!mangaList.isNullOrEmpty()) {
+                                // Keep showing existing cards while the section is refreshing.
+                                // New cards swap in atomically via the DB flow observer once
+                                // the next batch commits, so the user never sees skeletons
+                                // replace content they could already read.
                                 items(
                                     items = mangaList,
                                     key = { manga -> "$sectionKey:${manga.source}:${manga.url}" },
@@ -294,18 +306,20 @@ fun SuggestionsScreen(
                                     },
                                 )
                             }
-                            if (isRefreshingSection) {
-                                repeat(SKELETON_CARDS_PER_SECTION) { index ->
-                                    item(key = "skeleton:$sectionKey:$index") {
-                                        SuggestionSkeletonCard()
-                                    }
-                                }
-                            } else {
+                            if (mangaList.isNotEmpty()) {
+                                // Keep existing cards visible while refreshing; the DB observer
+                                // atomically swaps in the new list when the refresh commits.
                                 items(
                                     items = mangaList,
                                     key = { manga -> "$sectionKey:${manga.source}:${manga.url}" },
                                 ) { manga ->
                                     SuggestionItem(manga = manga, onClick = { onMangaClick(manga) })
+                                }
+                            } else if (isRefreshingSection) {
+                                repeat(SKELETON_CARDS_PER_SECTION) { index ->
+                                    item(key = "skeleton:$sectionKey:$index") {
+                                        SuggestionSkeletonCard()
+                                    }
                                 }
                             }
                             item(
@@ -624,6 +638,26 @@ internal fun SuggestionItem(manga: Manga, onClick: () -> Unit) {
                     .padding(8.dp),
             )
         }
+    }
+}
+
+@Composable
+private fun SuggestionRefreshBanner(message: String) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 2.dp),
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+        shape = MaterialTheme.shapes.small,
+    ) {
+        Text(
+            text = message,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            style = MaterialTheme.typography.bodyMedium,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 

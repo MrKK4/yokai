@@ -10,6 +10,7 @@ import eu.kanade.tachiyomi.source.model.SManga
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
+import java.net.SocketTimeoutException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -17,6 +18,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import yokai.domain.manga.MangaRepository
@@ -354,7 +356,93 @@ class FeedAggregatorColdStartTest {
         assertEquals(Filter.Sort.Selection(1, ascending = false), sort.state)
     }
 
-    private fun aggregatorWith(vararg sources: CatalogueSource): FeedAggregator {
+    @Test
+    fun `cold start propagates transient network failure when offline`() {
+        val offlineNetwork = object : SuggestionNetworkStatus {
+            override fun isOnline(): Boolean = false
+        }
+        val source = FakeCatalogueSource(
+            id = 99L,
+            titlePrefix = "Popular",
+            supportsLatest = true,
+            popularThrows = SocketTimeoutException("simulated offline"),
+        )
+        val aggregator = aggregatorWith(source, networkStatus = offlineNetwork)
+
+        assertThrows(TransientSuggestionNetworkException::class.java) {
+            runBlocking {
+                aggregator.fetchPage(
+                    suggestionQueries = emptyList(),
+                    usedTags = emptySet(),
+                    seenMangaUrls = emptySet(),
+                    currentSortOrder = SuggestionSortOrder.Popular,
+                    includeSourceSection = true,
+                    pageOffset = 1,
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `cold start swallows non-network failures when online`() = runBlocking {
+        val onlineNetwork = object : SuggestionNetworkStatus {
+            override fun isOnline(): Boolean = true
+        }
+        val healthy = FakeCatalogueSource(
+            id = 1L,
+            titlePrefix = "Popular",
+            supportsLatest = true,
+        )
+        val broken = FakeCatalogueSource(
+            id = 2L,
+            titlePrefix = "Broken",
+            supportsLatest = true,
+            popularThrows = NoClassDefFoundError("simulated bad extension"),
+        )
+        val aggregator = aggregatorWith(healthy, broken, networkStatus = onlineNetwork)
+
+        val page = aggregator.fetchPage(
+            suggestionQueries = emptyList(),
+            usedTags = emptySet(),
+            seenMangaUrls = emptySet(),
+            currentSortOrder = SuggestionSortOrder.Popular,
+            includeSourceSection = true,
+            pageOffset = 1,
+        )
+
+        assertTrue(page.suggestions.isNotEmpty())
+        assertEquals(setOf(1L), page.suggestions.map { it.source }.toSet())
+    }
+
+    @Test
+    fun `expanded section propagates transient network failure when offline`() {
+        val offlineNetwork = object : SuggestionNetworkStatus {
+            override fun isOnline(): Boolean = false
+        }
+        val source = FakeCatalogueSource(
+            id = 7L,
+            titlePrefix = "Popular",
+            supportsLatest = true,
+            searchTitlePrefix = "Romance",
+            searchThrows = SocketTimeoutException("simulated offline"),
+        )
+        val aggregator = aggregatorWith(source, networkStatus = offlineNetwork)
+
+        assertThrows(TransientSuggestionNetworkException::class.java) {
+            runBlocking {
+                aggregator.fetchExpandedSectionProgressively(
+                    query = "Romance",
+                    sourceOffset = 0,
+                    sourceLimit = 4,
+                ) { /* ignore */ }
+            }
+        }
+    }
+
+    private fun aggregatorWith(
+        vararg sources: CatalogueSource,
+        networkStatus: SuggestionNetworkStatus = AlwaysOnlineSuggestionNetworkStatus,
+    ): FeedAggregator {
         val mangaRepository = mockk<MangaRepository>()
         coEvery { mangaRepository.getMangaList() } returns emptyList()
 
@@ -364,6 +452,7 @@ class FeedAggregatorColdStartTest {
             preferences = suggestionsPreferences(),
             tagCanonicalizer = mockk(relaxed = true),
             tagProfileRepository = FakeTagProfileRepository(),
+            networkStatus = networkStatus,
             catalogueSourcesProvider = { sources.toList() },
         )
     }
@@ -390,6 +479,9 @@ private class FakeCatalogueSource(
     private val filters: FilterList = FilterList(),
     private val searchDelayMs: Long = 0L,
     private val popularDelayMs: Long = 0L,
+    private val popularThrows: Throwable? = null,
+    private val latestThrows: Throwable? = null,
+    private val searchThrows: Throwable? = null,
 ) : CatalogueSource {
     var popularCalls = 0
         private set
@@ -404,11 +496,13 @@ private class FakeCatalogueSource(
     override suspend fun getPopularManga(page: Int): MangasPage {
         popularCalls++
         if (popularDelayMs > 0L) delay(popularDelayMs)
+        popularThrows?.let { throw it }
         return MangasPage(mangaPage(page, titlePrefix), hasNextPage = true)
     }
 
     override suspend fun getLatestUpdates(page: Int): MangasPage {
         latestCalls++
+        latestThrows?.let { throw it }
         if (latestIsEmpty) return MangasPage(emptyList(), hasNextPage = false)
         return MangasPage(mangaPage(page, "Latest"), hasNextPage = true)
     }
@@ -416,6 +510,7 @@ private class FakeCatalogueSource(
     override suspend fun getSearchManga(page: Int, query: String, filters: FilterList): MangasPage {
         searchCalls++
         if (searchDelayMs > 0L) delay(searchDelayMs)
+        searchThrows?.let { throw it }
         return searchTitlePrefix
             ?.let { MangasPage(mangaPage(page, it), hasNextPage = true) }
             ?: MangasPage(emptyList(), hasNextPage = false)

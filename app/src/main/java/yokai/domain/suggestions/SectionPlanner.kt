@@ -37,9 +37,11 @@ class SectionPlanner(
         now: Long,
         coldStart: Boolean = false,
     ): PlannedSection {
+        // Keep labels short. Long sentences like "Latest from your sources" used to truncate
+        // when paired with wide tag chips on smaller screens. Icons carry the intent.
         val displayReason = when (sortOrder) {
-            SuggestionSortOrder.Latest -> "Latest from your sources"
-            SuggestionSortOrder.Popular -> "Popular from your sources"
+            SuggestionSortOrder.Latest -> "🆕 Latest"
+            SuggestionSortOrder.Popular -> "🔥 Popular"
         }
         return PlannedSection(
             sectionKey = if (coldStart) COLD_START_DISCOVERY_SECTION_KEY else "discovery",
@@ -73,14 +75,9 @@ class SectionPlanner(
         )
     }
 
-    private fun reasonFor(profile: TagProfile): String = when {
-        profile.affinity > HIGH_AFFINITY_THRESHOLD -> "Because you love ${profile.displayName}"
-        profile.affinity > MID_AFFINITY_THRESHOLD -> "Because you often read ${profile.displayName}"
-        else -> "Because you read ${profile.displayName}"
-    }
-
-    private companion object {
-        private const val HIGH_AFFINITY_THRESHOLD = 5.0
-        private const val MID_AFFINITY_THRESHOLD = 2.0
-    }
+    // Affinity still drives section ordering (high-affinity tags sort first), but the
+    // visible label stays short and identical across tiers. Long "Because you …" sentences
+    // would push wide tag names off-screen on smaller devices.
+    private fun reasonFor(profile: TagProfile): String =
+        "⭐ ${profile.displayName}"
 }

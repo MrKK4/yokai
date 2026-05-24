@@ -82,7 +82,11 @@ class SuggestionsWorker(
                 if (suggestions.isEmpty()) return@tryRun retryOrFailure()
 
                 preferences.suggestionsResultVersion().set(SuggestionsConfig.RESULT_VERSION_V1)
-                suggestionsRepository.replaceAll(suggestions)
+                suggestionsRepository.replaceAll(
+                    suggestions,
+                    resultVersion = SuggestionsConfig.RESULT_VERSION_V1,
+                    refreshSessionId = 0L,
+                )
                 Result.success()
             } ?: retryOrFailure()
         } catch (e: CancellationException) {
@@ -111,13 +115,17 @@ class SuggestionsWorker(
             sortOrder = preferences.suggestionsSortOrder().get(),
             now = now,
         )
-        plannedSectionRepository.replaceAll(plannedSections)
+        plannedSectionRepository.replaceAll(
+            plannedSections,
+            resultVersion = SuggestionsConfig.RESULT_VERSION_V2,
+            refreshSessionId = 0L,
+        )
         // Belt-and-braces orphan sweep: deletes any rows whose section_key isn't in the new
         // plan, including the empty-string section_key edge case that the per-section loop
         // below would skip.
-        suggestionsRepository.deleteOrphanedByPlan()
+        suggestionsRepository.deleteOrphanedByPlan(SuggestionsConfig.RESULT_VERSION_V2)
 
-        val existingSuggestions = suggestionsRepository.getSuggestions()
+        val existingSuggestions = suggestionsRepository.getSuggestions(SuggestionsConfig.RESULT_VERSION_V2)
         val loadedSectionKeys = existingSuggestions.map { it.sectionKey }.toSet()
         val plannedSectionKeys = plannedSections.map { it.sectionKey }.toSet()
         val hasRetainedSuggestions = existingSuggestions.any { it.sectionKey in plannedSectionKeys }
@@ -267,7 +275,12 @@ class SuggestionsWorker(
         suggestions
             .groupBy { it.sectionKey }
             .forEach { (sectionKey, sectionSuggestions) ->
-                suggestionsRepository.replaceSection(sectionKey, sectionSuggestions)
+                suggestionsRepository.replaceSection(
+                    sectionKey,
+                    sectionSuggestions,
+                    resultVersion = SuggestionsConfig.RESULT_VERSION_V2,
+                    refreshSessionId = refreshId,
+                )
             }
         shownMangaHistoryRepository.insertAll(suggestions.map { it.source to it.url })
         suggestionSeenLogRepository.insertSeenBatch(

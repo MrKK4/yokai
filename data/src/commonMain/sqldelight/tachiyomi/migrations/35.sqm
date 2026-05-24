@@ -1,0 +1,95 @@
+CREATE TABLE suggestions_new(
+    _id INTEGER NOT NULL PRIMARY KEY,
+    source INTEGER NOT NULL,
+    url TEXT NOT NULL,
+    title TEXT NOT NULL,
+    thumbnail_url TEXT,
+    section_key TEXT NOT NULL DEFAULT '',
+    relevance_score REAL NOT NULL DEFAULT 0.0,
+    display_rank INTEGER NOT NULL DEFAULT 0,
+    fetched_at INTEGER NOT NULL DEFAULT 0,
+    result_version INTEGER NOT NULL DEFAULT 0,
+    refresh_session_id INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(result_version, source, url)
+);
+
+INSERT INTO suggestions_new(
+    _id,
+    source,
+    url,
+    title,
+    thumbnail_url,
+    section_key,
+    relevance_score,
+    display_rank,
+    fetched_at,
+    result_version,
+    refresh_session_id
+)
+SELECT
+    _id,
+    source,
+    url,
+    title,
+    thumbnail_url,
+    section_key,
+    relevance_score,
+    display_rank,
+    fetched_at,
+    0,
+    0
+FROM suggestions;
+
+DROP TABLE suggestions;
+ALTER TABLE suggestions_new RENAME TO suggestions;
+CREATE INDEX suggestions_relevance_score_index ON suggestions(relevance_score, fetched_at);
+CREATE INDEX suggestions_display_rank_index ON suggestions(display_rank);
+CREATE INDEX suggestions_result_version_index ON suggestions(result_version, display_rank);
+CREATE INDEX suggestions_refresh_session_id_index ON suggestions(refresh_session_id);
+
+CREATE TABLE suggestion_planned_section_new(
+    section_key TEXT NOT NULL PRIMARY KEY,
+    section_rank INTEGER NOT NULL,
+    section_type TEXT NOT NULL,
+    canonical_tag TEXT,
+    display_reason TEXT NOT NULL,
+    search_terms TEXT NOT NULL,
+    sort_order TEXT NOT NULL,
+    sort_fallback INTEGER AS Boolean NOT NULL DEFAULT 0,
+    planned_at INTEGER NOT NULL DEFAULT 0,
+    result_version INTEGER NOT NULL DEFAULT 0,
+    refresh_session_id INTEGER NOT NULL DEFAULT 0
+);
+
+INSERT INTO suggestion_planned_section_new(
+    section_key,
+    section_rank,
+    section_type,
+    canonical_tag,
+    display_reason,
+    search_terms,
+    sort_order,
+    sort_fallback,
+    planned_at,
+    result_version,
+    refresh_session_id
+)
+SELECT
+    section_key,
+    section_rank,
+    section_type,
+    canonical_tag,
+    display_reason,
+    search_terms,
+    sort_order,
+    sort_fallback,
+    planned_at,
+    2,
+    0
+FROM suggestion_planned_section;
+
+DROP TABLE suggestion_planned_section;
+ALTER TABLE suggestion_planned_section_new RENAME TO suggestion_planned_section;
+CREATE INDEX suggestion_planned_section_rank_index ON suggestion_planned_section(section_rank);
+CREATE INDEX suggestion_planned_section_planned_at_index ON suggestion_planned_section(planned_at);
+CREATE INDEX suggestion_planned_section_result_version_index ON suggestion_planned_section(result_version, section_rank);

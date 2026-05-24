@@ -24,6 +24,7 @@ class FeedAggregator(
     private val tagCanonicalizer: TagCanonicalizer,
     private val tagProfileRepository: TagProfileRepository,
     private val metadataVerifier: SuggestionMetadataVerifier? = null,
+    private val networkStatus: SuggestionNetworkStatus = AlwaysOnlineSuggestionNetworkStatus,
     private val catalogueSourcesProvider: () -> List<CatalogueSource> = sourceManager::getCatalogueSources,
 ) {
     suspend fun fetch(suggestionQueries: List<SuggestionQuery>): List<SuggestedManga> {
@@ -687,6 +688,10 @@ class FeedAggregator(
                             )
                         } catch (e: CancellationException) {
                             throw e
+                        } catch (e: TransientSuggestionNetworkException) {
+                            // Let the progressive expanded path pause for resume rather than
+                            // silently returning a thin batch as if the source had run dry.
+                            throw e
                         } catch (_: Throwable) {
                             emptyList()
                         }
@@ -801,6 +806,10 @@ class FeedAggregator(
                                 )
                             }
                         } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: TransientSuggestionNetworkException) {
+                            // Let the progressive expanded path pause for resume rather than
+                            // silently returning a thin batch as if the source had run dry.
                             throw e
                         } catch (_: Throwable) {
                             emptyList()
@@ -1007,15 +1016,28 @@ class FeedAggregator(
     private suspend fun <T> sourceResult(block: suspend () -> T): T? {
         return try {
             var completed = false
-            withTimeoutOrNull(SuggestionsConfig.SOURCE_REQUEST_TIMEOUT_MS) {
+            val result = withTimeoutOrNull(SuggestionsConfig.SOURCE_REQUEST_TIMEOUT_MS) {
                 block().also { completed = true }
-            }.takeIf { completed }
+            }
+            if (!completed && !networkStatus.isOnline()) {
+                throw TransientSuggestionNetworkException(
+                    java.io.IOException("Network unavailable while waiting for source"),
+                )
+            }
+            result.takeIf { completed }
         } catch (e: CancellationException) {
             throw e
-        } catch (_: Throwable) {
-            // Catch Throwable so an extension throwing NoClassDefFoundError, OutOfMemoryError,
-            // or ExceptionInInitializerError doesn't propagate through awaitAll and kill the
-            // entire V1 fetch — one bad source should produce a null result, not an empty feed.
+        } catch (e: TransientSuggestionNetworkException) {
+            throw e
+        } catch (e: Throwable) {
+            // Network-class failures (DNS, socket reset, SSL drop, timeout-while-offline) must
+            // surface so the presenter can pause the V1 refresh and show the "waiting for
+            // network" banner — same behaviour V2's CandidateRetriever has. Any other Throwable
+            // (e.g. a corrupt extension's NoClassDefFoundError) is still swallowed so one bad
+            // source does not kill the rest of the V1 fetch.
+            if (e.isTransientSuggestionNetworkFailure(networkStatus.isOnline())) {
+                throw TransientSuggestionNetworkException(e)
+            }
             null
         }
     }

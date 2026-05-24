@@ -91,7 +91,7 @@ class SectionPlannerTest {
 
         assertFalse(sections.any { it.canonicalTag == "action" })
         assertFalse(sections.any { it.canonicalTag == "zero" })
-        assertEquals("Latest from your sources", sections.first().displayReason)
+        assertEquals("🆕 Latest", sections.first().displayReason)
     }
 
     @Test
@@ -108,7 +108,7 @@ class SectionPlannerTest {
         assertEquals(1, sections.size)
         assertEquals(SectionType.DISCOVERY, sections.single().type)
         assertEquals(COLD_START_DISCOVERY_SECTION_KEY, sections.single().sectionKey)
-        assertEquals("Latest from your sources", sections.single().displayReason)
+        assertEquals("🆕 Latest", sections.single().displayReason)
     }
 
     @Test
@@ -125,7 +125,7 @@ class SectionPlannerTest {
         assertEquals(1, sections.size)
         assertEquals(SectionType.DISCOVERY, sections.single().type)
         assertEquals(COLD_START_DISCOVERY_SECTION_KEY, sections.single().sectionKey)
-        assertEquals("Popular from your sources", sections.single().displayReason)
+        assertEquals("🔥 Popular", sections.single().displayReason)
     }
 
     @Test
@@ -146,7 +146,7 @@ class SectionPlannerTest {
     }
 
     @Test
-    fun `managed reason strings use affinity tiers`() = runBlocking {
+    fun `managed tag sections use short star-prefixed label regardless of affinity tier`() = runBlocking {
         val repository = FakeTagProfileRepository()
         val planner = SectionPlanner(repository, SuggestionsDebugLog())
 
@@ -160,9 +160,12 @@ class SectionPlannerTest {
             now = 10_000L,
         )
 
-        assertEquals("Because you love Romance", sections[1].displayReason)
-        assertEquals("Because you often read Fantasy", sections[2].displayReason)
-        assertEquals("Because you read Drama", sections[3].displayReason)
+        // Single label style across all affinity tiers — affinity still drives ordering
+        // (sections[1] is highest), but the label stays short so long tag names don't
+        // truncate on screen.
+        assertEquals("⭐ Romance", sections[1].displayReason)
+        assertEquals("⭐ Fantasy", sections[2].displayReason)
+        assertEquals("⭐ Drama", sections[3].displayReason)
     }
 
     @Test

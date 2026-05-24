@@ -42,6 +42,7 @@ class CandidateRetriever(
     private val debugLog: SuggestionsDebugLog,
     private val tagCanonicalizer: TagCanonicalizer,
     private val tagProfileRepository: TagProfileRepository,
+    private val networkStatus: SuggestionNetworkStatus = AlwaysOnlineSuggestionNetworkStatus,
     private val catalogueSourcesProvider: () -> List<CatalogueSource> = sourceManager::getCatalogueSources,
     private val catalogueSourcesFlowProvider: () -> Flow<List<CatalogueSource>> = { sourceManager.catalogueSources },
 ) {
@@ -235,6 +236,8 @@ class CandidateRetriever(
                                 fetch()
                             } catch (e: CancellationException) {
                                 throw e
+                            } catch (e: TransientSuggestionNetworkException) {
+                                throw e
                             } catch (_: Throwable) {
                                 emptyList()
                             }
@@ -342,6 +345,8 @@ class CandidateRetriever(
                                 blockedMangaKeys = blockedMangaKeys,
                             )
                         } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: TransientSuggestionNetworkException) {
                             throw e
                         } catch (_: Throwable) {
                             // Bad cold-start source -> empty batch instead of cancelling siblings.
@@ -626,11 +631,27 @@ class CandidateRetriever(
                     LogType.SECTION_DROPPED,
                     "Source $sourceId timed out after ${SuggestionsConfig.SOURCE_REQUEST_TIMEOUT_MS}ms",
                 )
+                if (!networkStatus.isOnline()) {
+                    throw TransientSuggestionNetworkException(
+                        java.io.IOException("Network unavailable while waiting for source $sourceId"),
+                    )
+                }
             }
             result
         } catch (e: CancellationException) {
             throw e
+        } catch (e: TransientSuggestionNetworkException) {
+            throw e
         } catch (e: Throwable) {
+            if (e.isTransientSuggestionNetworkFailure(networkStatus.isOnline())) {
+                if (sourceId != null) {
+                    debugLog.add(
+                        LogType.SECTION_DROPPED,
+                        "Network interrupted while fetching source $sourceId: ${e.javaClass.simpleName}: ${e.message}",
+                    )
+                }
+                throw TransientSuggestionNetworkException(e)
+            }
             // Log individual source failures to the debug log (Bug 8a). Catching Throwable
             // (not just Exception) keeps a corrupt extension that throws e.g. NoClassDefFoundError
             // from killing every other source in the same coroutineScope.

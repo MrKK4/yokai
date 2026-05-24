@@ -263,6 +263,8 @@
     <string name="suggestions_block_tag">Block tag</string>
     <string name="suggestions_sort_title">Sort suggestions</string>
     <string name="suggestions_refreshing">Refreshing suggestions</string>
+    <string name="suggestions_switching_to_v1">Switching to V1 suggestions…</string>
+    <string name="suggestions_switching_to_v2">Switching to V2 suggestions…</string>
     <string name="suggestions_searching_sources">Looking for manga from your sources.</string>
     <string name="suggestions_no_matching">No matching suggestions</string>
     <string name="suggestions_try_another_filter">Try another suggestion filter.</string>
@@ -276,6 +278,7 @@
     <string name="suggestions_refresh_error">Could not refresh suggestions. Check your connection and source extensions.</string>
     <string name="suggestions_load_more_error">Could not load more suggestions. Check your connection and source extensions.</string>
     <string name="suggestions_waiting_for_sources">Waiting for source extensions to load. If none are installed, add or enable a source first.</string>
+    <string name="suggestions_waiting_for_network">Waiting for network to continue refreshing suggestions.</string>
     <string name="suggestions_refresh_in_progress">Another refresh is still running. Try again in a moment.</string>
     <string name="suggestions_expand_error">Could not load results. Check your connection.</string>
     <string name="suggestions_open_error">Could not open this manga. The source may be unavailable.</string>
@@ -323,9 +326,19 @@
     <string name="show_updated_time">Show updated time</string>
     <string name="sort_fetched_time">Sort by fetched time</string>
     <string name="group_chapters_together">Group chapters together</string>
+    <string name="by_age_buckets">By age buckets</string>
     <string name="by_series">By series</string>
     <string name="by_week">By week</string>
     <string name="by_day">By day</string>
+    <string name="history_today">Today</string>
+    <string name="history_yesterday">Yesterday</string>
+    <string name="history_up_to_7_days">Up to 7 days</string>
+    <string name="history_up_to_14_days">Up to 14 days</string>
+    <string name="history_up_to_30_days">Up to 30 days</string>
+    <string name="history_up_to_60_days">Up to 60 days</string>
+    <string name="history_up_to_90_days">Up to 90 days</string>
+    <string name="history_up_to_120_days">Up to 120 days</string>
+    <string name="history_over_120_days">120+ days</string>
     <string name="uniform_covers">Uniform covers</string>
     <string name="affects_library_grid">Affects library grid covers</string>
     <string name="only_unread">Only unread</string>

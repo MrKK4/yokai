@@ -357,9 +357,10 @@ class PreferencesHelper(val context: Context, val preferenceStore: PreferenceSto
 
     fun collapseGroupedUpdates() = preferenceStore.getBoolean("group_chapters_updates", false)
 
-    fun groupChaptersHistory() = preferenceStore.getEnum("group_chapters_history_type", RecentsPresenter.GroupType.ByWeek)
+    fun groupChaptersHistory() = preferenceStore.getEnum("group_chapters_history_type", RecentsPresenter.GroupType.ByAgeBuckets)
 
     fun collapseGroupedHistory() = preferenceStore.getBoolean("collapse_group_history", true)
+    fun collapsedHistoryBuckets() = preferenceStore.getStringSet("collapsed_history_buckets", emptySet())
 
     fun lastExtCheck() = preferenceStore.getLong("last_ext_check", 0)
 

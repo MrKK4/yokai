@@ -220,7 +220,34 @@ class RecentsPresenter(
                         (if (isCustom) ENDLESS_LIMIT else pageOffset).toLong(),
                     )
                 }
-                if (groupChaptersHistory.isByTime) {
+                if (groupChaptersHistory == GroupType.ByAgeBuckets) {
+                    val grouped = items.groupBy {
+                        val bucket = HistoryBucket.fromLastRead(it.history.last_read)
+                        it.manga.id to bucket
+                    }
+                    grouped
+                        .mapNotNull { (key, mchs) ->
+                            val chapters = mchs.map { mch ->
+                                ChapterHistory(mch.chapter, mch.history)
+                            }
+                            extraCount += mchs.size - chapters.size
+                            if (chapters.isEmpty()) return@mapNotNull null
+                            val existingItem = recentItems.takeLast(ENDLESS_LIMIT).find {
+                                val existingBucket = HistoryBucket.fromLastRead(it.mch.history.last_read)
+                                key == it.manga_id to existingBucket
+                            }?.takeIf { updatePageCount }
+                            val sort = Comparator<ChapterHistory> { c1, c2 ->
+                                c2.history!!.last_read.compareTo(c1.history!!.last_read)
+                            }
+                            val (sortedChapters, firstChapter, subCount) =
+                                setupExtraChapters(existingItem, chapters, sort)
+                            extraCount += subCount
+                            if (firstChapter == null) return@mapNotNull null
+                            mchs.find { firstChapter.id == it.chapter.id }?.also {
+                                it.extraChapters = sortedChapters
+                            }
+                        }
+                } else if (groupChaptersHistory.isByTime) {
                     dateFormat.applyPattern(
                         when (groupChaptersHistory) {
                             GroupType.ByWeek -> "yyyy-w"
@@ -415,6 +442,8 @@ class RecentsPresenter(
                             if (sortByFetched) item.date_fetch else item.date_upload
                         }
                 }
+            } else if (viewType.isHistory && groupChaptersHistory == GroupType.ByAgeBuckets) {
+                buildHistoryBucketItems(pairs)
             } else {
                 pairs.map { RecentMangaItem(it.first, it.second, null) }
             }
@@ -444,6 +473,32 @@ class RecentsPresenter(
                 }
             }
         }
+    }
+
+    private fun buildHistoryBucketItems(
+        pairs: List<Pair<MangaChapterHistory, Chapter>>,
+    ): List<RecentMangaItem> {
+        val collapsedBuckets = preferences.collapsedHistoryBuckets().get()
+        val byBucket = pairs.groupBy { HistoryBucket.fromLastRead(it.first.history.last_read) }
+        return HistoryBucket.entries.flatMap { bucket ->
+            val bucketPairs = byBucket[bucket].orEmpty()
+            if (bucketPairs.isEmpty() && bucket.id !in collapsedBuckets) return@flatMap emptyList()
+            buildList {
+                add(RecentMangaItem.historyBucketHeader(bucket, collapsed = bucket.id in collapsedBuckets))
+                if (bucket.id !in collapsedBuckets) {
+                    addAll(bucketPairs.map { RecentMangaItem(it.first, it.second, null) })
+                }
+            }
+        }
+    }
+
+    fun toggleHistoryBucket(bucket: HistoryBucket) {
+        val collapsed = preferences.collapsedHistoryBuckets().get().toMutableSet()
+        if (!collapsed.add(bucket.id)) {
+            collapsed.remove(bucket.id)
+        }
+        preferences.collapsedHistoryBuckets().set(collapsed)
+        getRecents()
     }
 
     private fun setupExtraChapters(
@@ -695,13 +750,14 @@ class RecentsPresenter(
     }
 
     enum class GroupType {
+        ByAgeBuckets,
         BySeries,
         ByWeek,
         ByDay,
         Never,
         ;
 
-        val isByTime get() = this == ByWeek || this == ByDay
+        val isByTime get() = this == ByWeek || this == ByDay || this == ByAgeBuckets
     }
 
     companion object {

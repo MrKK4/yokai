@@ -10,12 +10,22 @@ class PlannedSectionRepositoryImpl(
     private val handler: DatabaseHandler,
 ) : PlannedSectionRepository {
 
-    override suspend fun getPlannedSections(): List<PlannedSection> =
-        handler.awaitList { suggestion_planned_sectionQueries.findAll(::mapPlannedSection) }
+    override suspend fun getPlannedSections(resultVersion: Int?): List<PlannedSection> =
+        handler.awaitList {
+            if (resultVersion == null) {
+                suggestion_planned_sectionQueries.findAll(::mapPlannedSection)
+            } else {
+                suggestion_planned_sectionQueries.findByResultVersion(resultVersion.toLong(), ::mapPlannedSection)
+            }
+        }
 
-    override suspend fun replaceAll(sections: List<PlannedSection>) {
+    override suspend fun replaceAll(
+        sections: List<PlannedSection>,
+        resultVersion: Int,
+        refreshSessionId: Long,
+    ) {
         handler.await(inTransaction = true) {
-            suggestion_planned_sectionQueries.deleteAll()
+            suggestion_planned_sectionQueries.deleteByResultVersion(resultVersion.toLong())
             sections.forEach { section ->
                 suggestion_planned_sectionQueries.replaceSection(
                     sectionKey = section.sectionKey,
@@ -27,6 +37,8 @@ class PlannedSectionRepositoryImpl(
                     sortOrder = section.sortOrder.name,
                     sortFallback = section.sortFallback,
                     plannedAt = section.plannedAt,
+                    resultVersion = resultVersion.toLong(),
+                    refreshSessionId = refreshSessionId,
                 )
             }
         }
@@ -34,6 +46,10 @@ class PlannedSectionRepositoryImpl(
 
     override suspend fun deleteAll() {
         handler.await { suggestion_planned_sectionQueries.deleteAll() }
+    }
+
+    override suspend fun deleteByResultVersion(resultVersion: Int) {
+        handler.await { suggestion_planned_sectionQueries.deleteByResultVersion(resultVersion.toLong()) }
     }
 
     private fun mapPlannedSection(
@@ -46,6 +62,8 @@ class PlannedSectionRepositoryImpl(
         sortOrder: String,
         sortFallback: Boolean,
         plannedAt: Long,
+        resultVersion: Long,
+        refreshSessionId: Long,
     ): PlannedSection =
         PlannedSection(
             sectionKey = sectionKey,

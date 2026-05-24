@@ -8,8 +8,6 @@ import eu.kanade.tachiyomi.data.suggestions.SuggestionsWorker
 import eu.kanade.tachiyomi.domain.manga.models.Manga
 import eu.kanade.tachiyomi.ui.base.presenter.BaseCoroutinePresenter
 import eu.kanade.tachiyomi.util.system.launchIO
-import eu.kanade.tachiyomi.util.system.toast
-import eu.kanade.tachiyomi.util.system.withUIContext
 import java.util.ArrayDeque
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -52,6 +50,11 @@ import yokai.domain.suggestions.SessionContext
 import yokai.domain.suggestions.ShownMangaHistoryRepository
 import yokai.domain.suggestions.SuggestionRanker
 import yokai.domain.suggestions.SuggestionMetadataVerifier
+import yokai.domain.suggestions.SuggestionNetworkStatus
+import yokai.domain.suggestions.SuggestionRefreshReason
+import yokai.domain.suggestions.SuggestionRefreshSession
+import yokai.domain.suggestions.SuggestionRefreshSessionTracker
+import yokai.domain.suggestions.SuggestionResultMode
 import yokai.domain.suggestions.SuggestionSeenLogRepository
 import yokai.domain.suggestions.SuggestedManga
 import yokai.domain.suggestions.SuggestionSortOrder
@@ -61,6 +64,7 @@ import yokai.domain.suggestions.SuggestionsDebugLog
 import yokai.domain.suggestions.LogType
 import yokai.domain.suggestions.SuggestionsModeStoragePolicy
 import yokai.domain.suggestions.SuggestionsRefreshCoordinator
+import yokai.domain.suggestions.TransientSuggestionNetworkException
 import yokai.i18n.MR
 import yokai.util.lang.getString
 
@@ -93,6 +97,9 @@ data class SuggestionsState(
     val sheetError: String? = null,
     val sheetSuppressed: Boolean = false,
     val refreshingSectionKeys: Set<String> = emptySet(),
+    val refreshBannerMessage: String? = null,
+    val staleSnapshotMode: Int? = null,
+    val isPausedForNetwork: Boolean = false,
 )
 
 /**
@@ -139,6 +146,39 @@ internal fun sourceSortOrderForExpandableSection(
         else -> null
     }
 
+/**
+ * Converts a V1 sectionKey into a user-friendly header. V2 sections carry their own
+ * displayReason from SectionPlanner; V1 doesn't, so we synthesise headers from the
+ * prefix. Icons keep labels short (the user complaint was long "Because you read…"
+ * style headers getting cut off on wider tag names).
+ *
+ *  popular           → 🔥 Popular
+ *  latest            → 🆕 Latest
+ *  tag:romance       → ⭐ Romance        (affinity)
+ *  pinned:mecha      → 📌 Mecha          (no "Pinned:" word — icon carries meaning)
+ *  search:cyberpunk  → 🔍 Cyberpunk      (no "Search:" word)
+ *  expanded:foo      → Foo               (sheet header already has its own context)
+ *  anything else     → raw key           (never silently blank)
+ */
+internal fun sectionKeyToV1DisplayName(sectionKey: String): String {
+    val (icon, tail) = when {
+        sectionKey == "popular" -> "🔥 " to "popular"
+        sectionKey == "latest" -> "🆕 " to "latest"
+        sectionKey.startsWith("tag:") -> "⭐ " to sectionKey.removePrefix("tag:")
+        sectionKey.startsWith("pinned:") -> "📌 " to sectionKey.removePrefix("pinned:")
+        sectionKey.startsWith("search:") -> "🔍 " to sectionKey.removePrefix("search:")
+        sectionKey.startsWith("expanded:") -> "" to sectionKey.removePrefix("expanded:")
+        else -> return sectionKey
+    }
+    val pretty = tail.trim()
+        .takeIf { it.isNotBlank() }
+        ?.split(' ', '-', '_')
+        ?.filter { it.isNotBlank() }
+        ?.joinToString(" ") { word -> word.replaceFirstChar { c -> c.titlecase() } }
+        ?: return sectionKey
+    return "$icon$pretty"
+}
+
 class SuggestionsPresenter(
     private val context: Context,
     private val suggestionsRepository: SuggestionsRepository = Injekt.get(),
@@ -158,6 +198,7 @@ class SuggestionsPresenter(
     private val tagCanonicalizer: TagCanonicalizer = Injekt.get(),
     private val tagProfileRepository: TagProfileRepository = Injekt.get(),
     private val metadataVerifier: SuggestionMetadataVerifier = Injekt.get(),
+    private val networkStatus: SuggestionNetworkStatus = Injekt.get(),
 ) : BaseCoroutinePresenter<SuggestionsController>() {
 
     private val _state = MutableStateFlow(
@@ -168,6 +209,7 @@ class SuggestionsPresenter(
     private val isPageFetching = AtomicBoolean(false)
     private val isSectionBatchFetching = AtomicBoolean(false)
     private val feedGeneration = AtomicLong(0L)
+    private val refreshSessions = SuggestionRefreshSessionTracker()
     private var isWorkerRefreshing = false
     private var refreshJob: Job? = null
     private var sourceChangeRefreshJob: Job? = null
@@ -280,7 +322,8 @@ class SuggestionsPresenter(
         }
 
         suggestionsRepository.getSuggestionsAsFlow()
-            .onEach { suggestedList ->
+            .onEach { storedList ->
+                val suggestedList = storedList.filterForCurrentResultVersion()
                 // Bug 3 fix: reject emissions that belong to a previous feed generation.
                 // Without this guard, in-flight network requests from the previous sort can
                 // insert results into the DB whose flow emission then overwrites the new state.
@@ -302,6 +345,18 @@ class SuggestionsPresenter(
                     isRebuilding = false
                 }
                 renderSuggestedList(suggestedList)
+            }
+            .launchIn(presenterScope)
+
+        networkStatus.onlineChanges()
+            .onEach { online ->
+                if (online) {
+                    resumePausedRefreshIfNeeded()
+                } else if (isForegroundRefreshing.get() || isSectionBatchFetching.get()) {
+                    _state.update { state ->
+                        state.copy(refreshBannerMessage = waitingForNetworkMessage())
+                    }
+                }
             }
             .launchIn(presenterScope)
 
@@ -350,14 +405,14 @@ class SuggestionsPresenter(
                 restoreV2PlanState()
             }
             if (crashedDuringRefresh) {
-                isInitialLoad.set(suggestionsRepository.count() == 0L)
+                isInitialLoad.set(suggestionsRepository.count(currentSuggestionsResultVersion()) == 0L)
                 if (preferences.suggestionsV2Enabled().get() && !candidateRetriever.hasActiveNetworkSources()) {
                     showWaitingForSources()
                     isInitialLoad.set(false)
                 } else if (!isForegroundRefreshing.get()) {
                     refresh(hardRefresh = true)
                 }
-            } else if (suggestionsRepository.count() == 0L) {
+            } else if (suggestionsRepository.count(currentSuggestionsResultVersion()) == 0L) {
                 isInitialLoad.set(true)
                 if (preferences.suggestionsV2Enabled().get()) {
                     if (!candidateRetriever.hasActiveNetworkSources()) {
@@ -377,7 +432,7 @@ class SuggestionsPresenter(
 
     private suspend fun shouldAutoRefreshStoredSuggestions(now: Long): Boolean =
         shouldAutoRefreshStoredSuggestions(
-            newestFetchedAt = suggestionsRepository.getSuggestions()
+            newestFetchedAt = getCurrentSuggestions()
                 .maxOfOrNull { it.fetchedAt },
             now = now,
         ) && !isForegroundRefreshing.get()
@@ -388,7 +443,7 @@ class SuggestionsPresenter(
         val isV2 = preferences.suggestionsV2Enabled().get()
 
         if (sourceIds.isEmpty()) {
-            if (suggestionsRepository.count() == 0L) {
+            if (currentSuggestionsCount() == 0L) {
                 showWaitingForSources()
             }
             return
@@ -401,7 +456,7 @@ class SuggestionsPresenter(
         val isStuckWaitingForSources = _state.value.emptyMessage == waitingForSourcesMessage()
 
         if (previous == null) {
-            if ((suggestionsRepository.count() == 0L || isStuckWaitingForSources) && !isForegroundRefreshing.get()) {
+            if ((currentSuggestionsCount() == 0L || isStuckWaitingForSources) && !isForegroundRefreshing.get()) {
                 refresh(hardRefresh = isV2)
             }
             return
@@ -434,15 +489,85 @@ class SuggestionsPresenter(
             SuggestionsConfig.RESULT_VERSION_V1
         }
 
+    private fun currentSuggestionMode(): SuggestionResultMode =
+        if (preferences.suggestionsV2Enabled().get()) {
+            SuggestionResultMode.V2
+        } else {
+            SuggestionResultMode.V1
+        }
+
+    private fun isCurrentRefresh(session: SuggestionRefreshSession, generation: Long): Boolean =
+        generation == feedGeneration.get() &&
+            refreshSessions.isCurrent(session) &&
+            currentSuggestionMode() == session.mode
+
+    private fun refreshBannerMessage(session: SuggestionRefreshSession): String =
+        when (session.reason) {
+            SuggestionRefreshReason.Toggle -> context.getString(
+                if (session.mode == SuggestionResultMode.V2) {
+                    MR.strings.suggestions_switching_to_v2
+                } else {
+                    MR.strings.suggestions_switching_to_v1
+                },
+            )
+            else -> context.getString(MR.strings.suggestions_refreshing)
+        }
+
+    private fun waitingForNetworkMessage(): String =
+        context.getString(MR.strings.suggestions_waiting_for_network)
+
+    private fun resumePausedRefreshIfNeeded() {
+        val paused = refreshSessions.paused() ?: return
+        if (currentSuggestionMode() != paused.mode || refreshJob?.isActive == true) return
+        refreshSessions.clearPaused(paused)
+        refresh(
+            hardRefresh = paused.hardRefresh,
+            clearSortCache = false,
+            reason = paused.reason,
+        )
+    }
+
     private fun storedResultsMatchCurrentVersion(): Boolean =
         preferences.suggestionsResultVersion().get() == currentSuggestionsResultVersion()
 
-    private suspend fun clearStoredResultsThatDoNotMatchMode(): Boolean {
-        val storedSuggestionCount = suggestionsRepository.count()
+    private fun List<SuggestedManga>.filterForCurrentResultVersion(): List<SuggestedManga> {
+        val version = currentSuggestionsResultVersion()
+        val storedVersion = preferences.suggestionsResultVersion().get()
+        return filter { suggestion ->
+            suggestion.resultVersion == version ||
+                (
+                    suggestion.resultVersion == SuggestionsConfig.RESULT_VERSION_UNKNOWN &&
+                        storedVersion == version
+                    )
+        }
+    }
+
+    private suspend fun getCurrentSuggestions(): List<SuggestedManga> =
+        suggestionsRepository.getSuggestions(currentSuggestionsResultVersion())
+            .ifEmpty {
+                if (storedResultsMatchCurrentVersion()) {
+                    suggestionsRepository.getSuggestions()
+                        .filter { it.resultVersion == SuggestionsConfig.RESULT_VERSION_UNKNOWN }
+                } else {
+                    emptyList()
+                }
+            }
+
+    private suspend fun currentSuggestionsCount(): Long =
+        suggestionsRepository.count(currentSuggestionsResultVersion())
+            .takeIf { it > 0L }
+            ?: getCurrentSuggestions().size.toLong()
+
+    private suspend fun clearStoredResultsThatDoNotMatchMode(
+        session: SuggestionRefreshSession? = null,
+        generation: Long? = null,
+    ): Boolean {
+        val resultVersion = currentSuggestionsResultVersion()
+        val storedSuggestionCount = suggestionsRepository.count(resultVersion)
         val hasInvalidSectionKeys = storedSuggestionCount > 0L &&
-            suggestionsRepository.getSuggestions().any { it.sectionKey.isBlank() }
+            suggestionsRepository.getSuggestions(resultVersion).any { it.sectionKey.isBlank() }
         val plannedSectionCount = if (preferences.suggestionsV2Enabled().get()) {
-            plannedSectionRepository.getPlannedSections().size
+            plannedSectionRepository.getPlannedSections(SuggestionsConfig.RESULT_VERSION_V2).size
         } else {
             0
         }
@@ -454,16 +579,23 @@ class SuggestionsPresenter(
             hasInvalidSectionKeys = hasInvalidSectionKeys,
         )
         if (!shouldClear) return false
+        // Session guard: if a newer refresh has superseded this caller, skip the wipe.
+        // Without this, two concurrent refreshes (foreground + worker, or two foreground
+        // pulls racing through the now-lock-less refresh path) could both delete the same
+        // result-version rows before either has committed its replacement batch.
+        if (session != null && generation != null && !isCurrentRefresh(session, generation)) return false
 
-        suggestionsRepository.deleteAll()
-        plannedSectionRepository.deleteAll()
+        suggestionsRepository.deleteByResultVersion(resultVersion)
+        if (resultVersion == SuggestionsConfig.RESULT_VERSION_V2) {
+            plannedSectionRepository.deleteByResultVersion(resultVersion)
+        }
         preferences.suggestionsResultVersion().set(SuggestionsConfig.RESULT_VERSION_UNKNOWN)
         _state.update { it.copy(
-            suggestions = emptyMap(),
-            sectionDisplayNames = emptyMap(),
+            suggestions = it.suggestions,
+            sectionDisplayNames = it.sectionDisplayNames,
             selectedSectionKey = null,
-            plannedSections = emptyList(),
-            nextBatchStartIndex = 0,
+            plannedSections = it.plannedSections,
+            nextBatchStartIndex = it.nextBatchStartIndex,
             allSectionsLoaded = false,
             hasReachedEnd = false,
             endMessage = null,
@@ -499,7 +631,11 @@ class SuggestionsPresenter(
             msg == waitingForSourcesMessage()
     }
 
-    fun refresh(hardRefresh: Boolean = false, clearSortCache: Boolean = true) {
+    fun refresh(
+        hardRefresh: Boolean = false,
+        clearSortCache: Boolean = true,
+        reason: SuggestionRefreshReason = SuggestionRefreshReason.Manual,
+    ) {
         // User explicitly wants fresh data — discard all snapshots and unfreeze the
         // DB flow observer so it can write new results to state as they arrive.
         frozenForSort = null
@@ -518,6 +654,8 @@ class SuggestionsPresenter(
         activeFlowGeneration = generation  // Bug 3: record generation for DB observer guard
         isForegroundRefreshing.set(true)
         currentPageOffset = Random.nextInt(1, 8)   // randomize page 1–7 on each refresh
+        val pageOffset = currentPageOffset
+        val mode = currentSuggestionMode()
         isPageFetching.set(false)
         isSectionBatchFetching.set(false)
         usedTags.clear()
@@ -535,11 +673,22 @@ class SuggestionsPresenter(
         } else {
             emptySet()
         }
+        val session = refreshSessions.start(
+            mode = mode,
+            sortOrder = _state.value.sortOrder,
+            hardRefresh = hardRefresh,
+            targetSectionKey = v2RefreshTargetSectionKey,
+            pageOffset = pageOffset,
+            reason = reason,
+        )
 
         _state.update { state ->
             val hasRenderedSuggestions = state.suggestions.values.any { section -> section.isNotEmpty() }
             state.copy(
                 emptyMessage = null,
+                refreshBannerMessage = refreshBannerMessage(session).takeIf { hasRenderedSuggestions },
+                staleSnapshotMode = session.mode.resultVersion.takeIf { hasRenderedSuggestions },
+                isPausedForNetwork = false,
                 plannedSections = state.plannedSections.takeIf { hasRenderedSuggestions } ?: emptyList(),
                 sectionDisplayNames = state.sectionDisplayNames.takeIf { hasRenderedSuggestions } ?: emptyMap(),
                 nextBatchStartIndex = state.nextBatchStartIndex.takeIf { hasRenderedSuggestions } ?: 0,
@@ -557,77 +706,90 @@ class SuggestionsPresenter(
         }
         updateLoadingState()
 
-        val pageOffset = currentPageOffset
-
         refreshJob = presenterScope.launchIO {
+            var pausedForNetwork = false
             try {
-                val acquired = SuggestionsRefreshCoordinator.withLockOrSkip {
-                    if (generation != feedGeneration.get()) return@withLockOrSkip
-                    // Persist an "in flight" marker covering the wipe-then-write window of both
-                    // V1 and V2 refresh paths (clearStoredResultsThatDoNotMatchMode + replaceAll).
-                    // If a process kill happens between wipe and write, onCreate sees this flag
-                    // on next launch and forces a recovery hard refresh.
-                    preferences.suggestionsRefreshInFlight().set(true)
-                    clearStoredResultsThatDoNotMatchMode()
-                    if (preferences.suggestionsV2Enabled().get()) {
-                        if (!candidateRetriever.hasActiveNetworkSources()) {
-                            throw RefreshBlocked(waitingForSourcesMessage())
-                        }
-                        val hasExistingContent = suggestionsRepository.count() > 0L
-                        if (!hardRefresh && hasExistingContent) {
-                            // Soft path: re-rank locally, then refresh the currently visible section.
-                            softRefreshV2(
-                                generation = generation,
-                                pageOffset = pageOffset,
-                                refreshTargetSectionKey = v2RefreshTargetSectionKey,
-                            )
-                        } else {
-                            // Hard path: wipe DB and do a full network fetch.
-                            sectionLastFetchedAt.clear()
-                            refreshV2(generation = generation, pageOffset = pageOffset)
-                        }
-                    } else {
-                        sectionLastFetchedAt.clear()
-                        val suggestions = buildFreshSuggestions(pageOffset)
-                        if (generation != feedGeneration.get()) return@withLockOrSkip
-                        suggestionsRepository.replaceAll(suggestions)
-                        // Generation re-check AFTER the DB write commits. Without this, a cancel
-                        // arriving after the version write but before the in-flight prefs flush
-                        // could repoison `suggestionsResultVersion` (set to UNKNOWN by a V2
-                        // toggle) back to V1, leaving the next launch reading V1 rows under
-                        // a V2 expectation.
-                        if (generation != feedGeneration.get()) return@withLockOrSkip
-                        preferences.suggestionsResultVersion().set(SuggestionsConfig.RESULT_VERSION_V1)
-                        renderStoredSuggestions()
-                        // Persist shown manga into the 30-day history
-                        shownHistoryRepository.insertAll(
-                            suggestions.map { it.source to it.url },
-                        )
-                        // Persist tag rotation — reset is handled inside buildFreshSuggestions
-                        preferences.usedSuggestionTags().set(usedTags.toSet())
-                        _state.update { it.copy(emptyMessage = null) }
+                // Foreground refresh runs without the SuggestionsRefreshCoordinator mutex:
+                // OkHttp source fetches are not cooperatively cancellable, so a stuck prior
+                // refresh would otherwise hold the lock past `MAX_FOREGROUND_LOCK_WAIT_MS`
+                // and surface a misleading "another refresh is running" message to the user.
+                // Concurrent writes are still safe — every DB-mutating step below is gated
+                // by `isCurrentRefresh(session, generation)`, so a superseded refresh exits
+                // before committing. Background workers retain the mutex (see SuggestionsWorker).
+                if (!isCurrentRefresh(session, generation)) return@launchIO
+                // Persist an "in flight" marker covering the wipe-then-write window of both
+                // V1 and V2 refresh paths (clearStoredResultsThatDoNotMatchMode + replaceAll).
+                // If a process kill happens between wipe and write, onCreate sees this flag
+                // on next launch and forces a recovery hard refresh.
+                preferences.suggestionsRefreshInFlight().set(true)
+                clearStoredResultsThatDoNotMatchMode(session = session, generation = generation)
+                if (session.mode == SuggestionResultMode.V2) {
+                    if (!candidateRetriever.hasActiveNetworkSources()) {
+                        throw RefreshBlocked(waitingForSourcesMessage())
                     }
-                }
-                // Lock-acquisition timeout: surface a non-fatal hint instead of leaving the UI
-                // pretending the refresh is still running. The user can pull-to-refresh again
-                // once the prior refresh completes.
-                if (acquired == null && generation == feedGeneration.get()) {
-                    _state.update { it.copy(
-                        emptyMessage = if (shouldShowBlockingRefreshLockMessage()) {
-                            refreshInProgressMessage()
-                        } else {
-                            it.emptyMessage
-                        },
-                    )}
-                    showRefreshLockToast()
+                    val hasExistingContent = currentSuggestionsCount() > 0L
+                    if (!hardRefresh && hasExistingContent) {
+                        // Soft path: re-rank locally, then refresh the currently visible section.
+                        softRefreshV2(
+                            generation = generation,
+                            pageOffset = pageOffset,
+                            session = session,
+                            refreshTargetSectionKey = v2RefreshTargetSectionKey,
+                        )
+                    } else {
+                        // Hard path: wipe DB and do a full network fetch.
+                        sectionLastFetchedAt.clear()
+                        refreshV2(generation = generation, pageOffset = pageOffset, session = session)
+                    }
+                } else {
+                    sectionLastFetchedAt.clear()
+                    val suggestions = buildFreshSuggestions(pageOffset)
+                    if (!isCurrentRefresh(session, generation)) return@launchIO
+                    suggestionsRepository.replaceAll(
+                        suggestions,
+                        resultVersion = session.mode.resultVersion,
+                        refreshSessionId = session.sessionId,
+                    )
+                    // Generation re-check AFTER the DB write commits. Without this, a cancel
+                    // arriving after the version write but before the in-flight prefs flush
+                    // could repoison `suggestionsResultVersion` (set to UNKNOWN by a V2
+                    // toggle) back to V1, leaving the next launch reading V1 rows under
+                    // a V2 expectation.
+                    if (!isCurrentRefresh(session, generation)) return@launchIO
+                    preferences.suggestionsResultVersion().set(SuggestionsConfig.RESULT_VERSION_V1)
+                    renderStoredSuggestions()
+                    // Persist shown manga into the 30-day history
+                    shownHistoryRepository.insertAll(
+                        suggestions.map { it.source to it.url },
+                    )
+                    // Persist tag rotation — reset is handled inside buildFreshSuggestions
+                    preferences.usedSuggestionTags().set(usedTags.toSet())
+                    _state.update { it.copy(emptyMessage = null) }
                 }
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: TransientSuggestionNetworkException) {
+                pausedForNetwork = refreshSessions.pauseIfCurrent(session)
+                if (pausedForNetwork && isCurrentRefresh(session, generation)) {
+                    isForegroundRefreshing.set(false)
+                    isSectionBatchFetching.set(false)
+                    isPageFetching.set(false)
+                    _state.update { state ->
+                        state.copy(
+                            isPausedForNetwork = true,
+                            refreshBannerMessage = waitingForNetworkMessage(),
+                            refreshingSectionKeys = emptySet(),
+                            isFetching = false,
+                            isFetchingBatch = false,
+                            isLoading = false,
+                        )
+                    }
+                }
             } catch (e: RefreshBlocked) {
-                if (generation == feedGeneration.get()) {
-                    val hasStoredSuggestions = suggestionsRepository.count() > 0L
-                    if (!hasStoredSuggestions && preferences.suggestionsV2Enabled().get()) {
-                        plannedSectionRepository.deleteAll()
+                if (isCurrentRefresh(session, generation)) {
+                    val hasStoredSuggestions = currentSuggestionsCount() > 0L
+                    if (!hasStoredSuggestions && session.mode == SuggestionResultMode.V2) {
+                        plannedSectionRepository.deleteByResultVersion(session.mode.resultVersion)
                     }
                     if (!hasStoredSuggestions) {
                         preferences.suggestionsResultVersion().set(SuggestionsConfig.RESULT_VERSION_UNKNOWN)
@@ -646,7 +808,7 @@ class SuggestionsPresenter(
                 ) }
                 }
             } catch (_: Exception) {
-                if (generation == feedGeneration.get()) {
+                if (isCurrentRefresh(session, generation)) {
                     // Only surface a refresh-failure banner when nothing landed in the cache.
                     // Per-section work now catches its own throwables; if some sections still
                     // inserted before an orchestration-level failure, the user sees those
@@ -662,11 +824,19 @@ class SuggestionsPresenter(
                 // Clear the in-flight marker unconditionally — even if the refresh was cancelled
                 // by a newer generation, the wipe-then-write window has closed for THIS coroutine.
                 preferences.suggestionsRefreshInFlight().set(false)
-                if (generation == feedGeneration.get()) {
+                if (!pausedForNetwork && isCurrentRefresh(session, generation)) {
+                    refreshSessions.finishIfCurrent(session)
                     isInitialLoad.set(false)
                     isForegroundRefreshing.set(false)
                     isRebuilding = false
-                    _state.update { it.copy(refreshingSectionKeys = emptySet()) }
+                    _state.update {
+                        it.copy(
+                            refreshingSectionKeys = emptySet(),
+                            refreshBannerMessage = null,
+                            staleSnapshotMode = null,
+                            isPausedForNetwork = false,
+                        )
+                    }
                     updateLoadingState()
                     try {
                         syncSelectedSectionKeyWithStoredSuggestions()
@@ -730,10 +900,13 @@ class SuggestionsPresenter(
 
                     val newSuggestions = page.suggestions
                         .filterNot { it.memoryKey() in seenMangaUrls }
-                    val nextRank = suggestionsRepository.count()
+                    val nextRank = currentSuggestionsCount()
                     val rankedSuggestions = newSuggestions.withDisplayRanks(nextRank)
                     if (rankedSuggestions.isNotEmpty()) {
-                        suggestionsRepository.insertSuggestions(rankedSuggestions)
+                        suggestionsRepository.insertSuggestions(
+                            rankedSuggestions,
+                            resultVersion = currentSuggestionsResultVersion(),
+                        )
                         renderStoredSuggestions()
                         seenMangaUrls.addAll(rankedSuggestions.map { it.memoryKey() })
                         // Persist shown manga into the 30-day history
@@ -822,7 +995,7 @@ class SuggestionsPresenter(
             // ── Restore from cache if we've loaded this sort before ────────────
             val cached = sortSnapshotCache[sortOrder]
             if (cached != null) {
-                val dbSignatureAtRestore = suggestionsRepository.getSuggestions().dbSignature()
+                val dbSignatureAtRestore = getCurrentSuggestions().dbSignature()
                 // Cancel any in-flight requests from the previous rebuild so they
                 // don't write stale results to state or the DB.
                 refreshJob?.cancel()
@@ -880,7 +1053,11 @@ class SuggestionsPresenter(
             blacklistedTags = preferences.suggestionsTagsBlacklist().get(),
             pinnedTags = preferences.suggestionsPinnedTags().get(),
         )
-        rebuildFeed(sortOrder = _state.value.sortOrder, clearRenderedResults = true)
+        rebuildFeed(
+            sortOrder = _state.value.sortOrder,
+            clearRenderedResults = true,
+            reason = SuggestionRefreshReason.Toggle,
+        )
         return true
     }
 
@@ -927,16 +1104,25 @@ class SuggestionsPresenter(
         refreshJob?.cancel()
         val generation = feedGeneration.incrementAndGet()
         activeFlowGeneration = generation
+        val session = refreshSessions.start(
+            mode = SuggestionResultMode.V2,
+            sortOrder = _state.value.sortOrder,
+            hardRefresh = false,
+            targetSectionKey = manualRefreshTargetSectionKey(),
+            pageOffset = currentPageOffset,
+            reason = SuggestionRefreshReason.Manual,
+        )
         isForegroundRefreshing.set(true)
         isPageFetching.set(false)
         isSectionBatchFetching.set(false)
         updateLoadingState()
 
         refreshJob = presenterScope.launchIO {
+            var pausedForNetwork = false
             try {
                 val now = System.currentTimeMillis()
                 syncLegacyTagStateForV2(now)
-                if (generation != feedGeneration.get()) return@launchIO
+                if (!isCurrentRefresh(session, generation)) return@launchIO
 
                 val profiles = tagProfileRepository.getAllProfiles()
                 val plannedSections = sectionPlanner.plan(
@@ -944,11 +1130,15 @@ class SuggestionsPresenter(
                     sortOrder = _state.value.sortOrder,
                     now = now,
                 )
-                plannedSectionRepository.replaceAll(plannedSections)
+                plannedSectionRepository.replaceAll(
+                    plannedSections,
+                    resultVersion = session.mode.resultVersion,
+                    refreshSessionId = session.sessionId,
+                )
 
                 val plannedKeys = plannedSections.map { it.sectionKey }.toSet()
                 val canonicalBlacklist = metadataVerifier.canonicalizeBlacklist(pendingBlacklist)
-                val existingSuggestions = suggestionsRepository.getSuggestions()
+                val existingSuggestions = getCurrentSuggestions()
                     .filter { it.sectionKey in plannedKeys }
                 val allowedSuggestions = metadataVerifier.filterSuggestions(
                     suggestions = existingSuggestions,
@@ -961,7 +1151,11 @@ class SuggestionsPresenter(
                     .toSet()
 
                 preferences.suggestionsResultVersion().set(SuggestionsConfig.RESULT_VERSION_V2)
-                suggestionsRepository.replaceAll(allowedSuggestions)
+                suggestionsRepository.replaceAll(
+                    allowedSuggestions,
+                    resultVersion = session.mode.resultVersion,
+                    refreshSessionId = session.sessionId,
+                )
                 renderStoredSuggestions()
                 sectionLastFetchedAt.clear()
 
@@ -997,7 +1191,7 @@ class SuggestionsPresenter(
                 val rankingContext = suggestionRanker.buildRankingContext()
                 val refreshId = preferences.suggestionsTotalRefreshCount().get().toLong()
                 for (section in targetSections) {
-                    if (generation != feedGeneration.get()) return@launchIO
+                    if (!isCurrentRefresh(session, generation)) return@launchIO
                     refreshV2SingleSection(
                         section = section,
                         generation = generation,
@@ -1005,19 +1199,32 @@ class SuggestionsPresenter(
                         refreshId = refreshId,
                         rankingContext = rankingContext,
                         now = now,
+                        session = session,
                     )
                 }
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: TransientSuggestionNetworkException) {
+                pausedForNetwork = refreshSessions.pauseIfCurrent(session)
+                if (isCurrentRefresh(session, generation)) {
+                    _state.update { it.copy(refreshBannerMessage = waitingForNetworkMessage(), isPausedForNetwork = true) }
+                }
             } catch (_: Exception) {
-                if (generation == feedGeneration.get() && _state.value.suggestions.isEmpty()) {
+                if (isCurrentRefresh(session, generation) && _state.value.suggestions.isEmpty()) {
                     _state.update { it.copy(emptyMessage = refreshErrorMessage()) }
                 }
             } finally {
-                if (generation == feedGeneration.get()) {
+                if (!pausedForNetwork && isCurrentRefresh(session, generation)) {
+                    refreshSessions.finishIfCurrent(session)
                     isForegroundRefreshing.set(false)
                     isSectionBatchFetching.set(false)
-                    _state.update { it.copy(refreshingSectionKeys = emptySet()) }
+                    _state.update {
+                        it.copy(
+                            refreshingSectionKeys = emptySet(),
+                            refreshBannerMessage = null,
+                            isPausedForNetwork = false,
+                        )
+                    }
                     updateLoadingState()
                 }
             }
@@ -1212,7 +1419,11 @@ class SuggestionsPresenter(
         _state.update { it.copy(sheetSuppressed = false) }
     }
 
-    private fun rebuildFeed(sortOrder: SuggestionSortOrder, clearRenderedResults: Boolean = false) {
+    private fun rebuildFeed(
+        sortOrder: SuggestionSortOrder,
+        clearRenderedResults: Boolean = false,
+        reason: SuggestionRefreshReason = SuggestionRefreshReason.Manual,
+    ) {
         // A non-sort rebuild (filter/source/V2-toggle change) invalidates all snapshots
         // because the result set will differ regardless of sort order.  Also unfreeze
         // the DB flow observer so new results are written to state as they arrive.
@@ -1226,10 +1437,10 @@ class SuggestionsPresenter(
         // Keep old suggestions visible during rebuild — the DB flow observer will skip
         // empty emissions while isRebuilding is true, preventing a blank-screen flash.
         isRebuilding = true
-        val shouldClearRenderedResults = clearRenderedResults || !storedResultsMatchCurrentVersion()
+        val shouldClearSelection = clearRenderedResults || !storedResultsMatchCurrentVersion()
         _state.update { it.copy(
-            suggestions = if (shouldClearRenderedResults) emptyMap() else it.suggestions,
-            selectedSectionKey = if (shouldClearRenderedResults) null else it.selectedSectionKey,
+            suggestions = it.suggestions,
+            selectedSectionKey = if (shouldClearSelection) null else it.selectedSectionKey,
             isLoading = false,
             isFetching = false,
             isFetchingBatch = false,
@@ -1250,7 +1461,7 @@ class SuggestionsPresenter(
             sheetError = null,
             sheetSuppressed = false,
         )}
-        refresh(hardRefresh = true, clearSortCache = false)
+        refresh(hardRefresh = true, clearSortCache = false, reason = reason)
     }
 
     suspend fun getOrCreateLocalManga(manga: Manga): Manga? {
@@ -1341,6 +1552,7 @@ class SuggestionsPresenter(
     private suspend fun softRefreshV2(
         generation: Long,
         pageOffset: Int,
+        session: SuggestionRefreshSession,
         refreshTargetSectionKey: String?,
     ) {
         val now = System.currentTimeMillis()
@@ -1351,10 +1563,10 @@ class SuggestionsPresenter(
 
         // Step 1: Rebuild profile from local DB (no network call).
         interestProfileBuilder.buildProfile(now)
-        if (generation != feedGeneration.get()) return
+        if (!isCurrentRefresh(session, generation)) return
         syncLegacyTagStateForV2(now)
         val profiles = tagProfileRepository.getAllProfiles()
-        if (generation != feedGeneration.get()) return
+        if (!isCurrentRefresh(session, generation)) return
 
         // Step 2: Re-plan sections in new affinity order.
         val plannedSections = sectionPlanner.plan(
@@ -1362,16 +1574,20 @@ class SuggestionsPresenter(
             sortOrder = _state.value.sortOrder,
             now = now,
         )
-        if (generation != feedGeneration.get()) return
-        plannedSectionRepository.replaceAll(plannedSections)
+        if (!isCurrentRefresh(session, generation)) return
+        plannedSectionRepository.replaceAll(
+            plannedSections,
+            resultVersion = session.mode.resultVersion,
+            refreshSessionId = session.sessionId,
+        )
         // Prune any leftover rows whose section_key isn't in the new plan. Without this, a user
         // who blacklists a previously-managed tag would keep seeing rows from that section
         // until the section_key happened to collide with a future plan entry.
-        suggestionsRepository.deleteOrphanedByPlan()
+        suggestionsRepository.deleteOrphanedByPlan(session.mode.resultVersion)
 
         // Step 3: Re-rank existing stored suggestions using new section order.
-        val existing = suggestionsRepository.getSuggestions()
-        if (generation != feedGeneration.get()) return
+        val existing = getCurrentSuggestions()
+        if (!isCurrentRefresh(session, generation)) return
         var renderedSectionKeys = existing.map { it.sectionKey }.toSet()
         val shouldReRankStoredRows = refreshTargetSectionKey == null
         if (existing.isNotEmpty() && shouldReRankStoredRows) {
@@ -1386,9 +1602,13 @@ class SuggestionsPresenter(
                 }
             }
             if (reRanked.isNotEmpty()) {
-                if (generation != feedGeneration.get()) return
+                if (!isCurrentRefresh(session, generation)) return
                 preferences.suggestionsResultVersion().set(SuggestionsConfig.RESULT_VERSION_V2)
-                suggestionsRepository.replaceAll(reRanked)
+                suggestionsRepository.replaceAll(
+                    reRanked,
+                    resultVersion = session.mode.resultVersion,
+                    refreshSessionId = session.sessionId,
+                )
                 renderedSectionKeys = reRanked.map { it.sectionKey }.toSet()
                 renderStoredSuggestions()
                 debugLog.add(LogType.REFRESH_MODE, "Soft refresh: re-ranked ${reRanked.size} items across ${plannedSections.size} sections")
@@ -1399,31 +1619,61 @@ class SuggestionsPresenter(
         val refreshId = preferences.suggestionsTotalRefreshCount().get().toLong()
         currentV2RefreshId = refreshId
 
-        val refreshTargetSection = refreshTargetSectionKey
-            ?.let { key -> plannedSections.firstOrNull { it.sectionKey == key } }
-            ?: plannedSections.firstOrNull().takeIf { refreshTargetSectionKey != null }
-        val discoverySection = plannedSections.firstOrNull { it.type == SectionType.DISCOVERY }
-        val refreshTargetSections = if (refreshTargetSectionKey != null) {
-            buildList {
-                discoverySection?.let(::add)
-                refreshTargetSection?.let { target ->
-                    if (none { it.sectionKey == target.sectionKey }) {
-                        add(target)
-                    }
-                }
-            }
-        } else {
-            emptyList()
+        // Step 4: Re-rank-driven feed reshuffle. The previously-loaded section count
+        // anchors how many sections the pull-to-refresh will touch. We take the top
+        // N planned sections in the freshly-ranked order — N stays equal to whatever
+        // the user had on screen, but WHICH N can change (e.g. a tag whose affinity
+        // climbed during this session replaces one that fell out of the top set).
+        val previouslyLoadedKeys = _state.value.suggestions
+            .filterValues { it.isNotEmpty() }
+            .keys
+        val previouslyLoadedCount = previouslyLoadedKeys.size
+
+        // Snapshot the manga currently on screen and bias the fetch away from them
+        // for THIS refresh. They get added to the in-memory `seenMangaUrls` set so
+        // the candidate retriever filters them at the source level. The persistent
+        // history TTL re-seeds the set on next launch, so the same titles can
+        // resurface later — this is a session-scoped penalty, not a permanent block.
+        val justShownKeys = _state.value.suggestions.values
+            .flatten()
+            .map { "${it.source}:${it.url}" }
+        if (justShownKeys.isNotEmpty()) {
+            seenMangaUrls.addAll(justShownKeys)
         }
-        refreshTargetSections.forEach { section ->
+
+        val refreshTopN = when {
+            previouslyLoadedCount > 0 -> plannedSections.take(previouslyLoadedCount)
+            // First-time refresh with nothing loaded yet falls back to whatever the
+            // explicit target requested (visible / selected section), preserving the
+            // old single-section behaviour for callers that pass a target key.
+            refreshTargetSectionKey != null -> plannedSections
+                .firstOrNull { it.sectionKey == refreshTargetSectionKey }
+                ?.let(::listOf)
+                .orEmpty()
+            else -> emptyList()
+        }
+        val refreshTopNKeys = refreshTopN.map { it.sectionKey }.toSet()
+
+        // Step 5: Evict any previously-loaded section that fell out of the top N so
+        // the UI doesn't keep a stale tag visible after the user explicitly asked
+        // for fresh suggestions. The DB rows are removed too, otherwise the next
+        // DB-observer emission would resurrect them.
+        val evictedKeys = previouslyLoadedKeys - refreshTopNKeys
+        if (evictedKeys.isNotEmpty()) {
+            evictedKeys.forEach { key ->
+                suggestionsRepository.deleteBySectionKey(key, session.mode.resultVersion)
+            }
+        }
+
+        // Step 6: Mark every section in the new top N as stale so the next batch
+        // fetch will hit the network. Sections beyond the top N keep their cache —
+        // they remain visible in the feed but won't refresh unless the user scrolls
+        // to them and the existing scroll-triggered batch loader picks them up.
+        refreshTopN.forEach { section ->
             sectionLastFetchedAt.remove(section.sectionKey)
         }
-        val lazyRefreshStartIndex = refreshTargetSections
-            .mapNotNull { target -> plannedSections.indexOfFirst { it.sectionKey == target.sectionKey }.takeIf { it >= 0 } }
-            .maxOrNull()
-            ?.plus(1)
-            ?.coerceAtMost(plannedSections.size)
-        val staleSections = if (refreshTargetSection == null) {
+
+        val staleSections = if (previouslyLoadedCount == 0 && refreshTargetSectionKey == null) {
             plannedSections.filter { !isSectionCacheFresh(it, now) }
         } else {
             emptyList()
@@ -1432,59 +1682,65 @@ class SuggestionsPresenter(
             plannedSections = plannedSections,
             loadedSectionKeys = renderedSectionKeys,
         )
-        if (generation != feedGeneration.get()) return
+        if (!isCurrentRefresh(session, generation)) return
         val displayNames = plannedSections.associate { it.sectionKey to it.displayReason }
-        val refreshingSectionKeys = refreshTargetSections.map { it.sectionKey }.toSet()
-        _state.update { it.copy(
-            plannedSections = plannedSections,
-            sectionDisplayNames = displayNames,
-            nextBatchStartIndex = lazyRefreshStartIndex ?: if (refreshTargetSection != null) loadedPrefixSize else 0,
-            isFetchingBatch = false,
-            allSectionsLoaded = if (lazyRefreshStartIndex != null) {
-                lazyRefreshStartIndex >= plannedSections.size
-            } else if (refreshTargetSection != null) {
-                loadedPrefixSize >= plannedSections.size
+        _state.update { state ->
+            val keptSuggestions = if (evictedKeys.isNotEmpty()) {
+                state.suggestions.filterKeys { it !in evictedKeys }
             } else {
-                staleSections.isEmpty()
-            },
-            hasReachedEnd = false,
-            endMessage = null,
-            emptyMessage = null,
-            refreshingSectionKeys = refreshingSectionKeys,
-        )}
-
-        // Step 5: Refresh the target section, or fall back to expired-section repair.
-        if (refreshTargetSections.isNotEmpty() && generation == feedGeneration.get()) {
-            val rankingContext = suggestionRanker.buildRankingContext()
-            var inserted = 0
-            for (section in refreshTargetSections) {
-                if (generation != feedGeneration.get()) return
-                inserted += refreshV2SingleSection(
-                    section = section,
-                    generation = generation,
-                    pageOffset = pageOffset,
-                    refreshId = refreshId,
-                    rankingContext = rankingContext,
-                    now = now,
-                )
+                state.suggestions
             }
-            if (inserted == 0 && suggestionsRepository.count() > 0L) {
+            state.copy(
+                suggestions = keptSuggestions,
+                plannedSections = plannedSections,
+                sectionDisplayNames = displayNames,
+                // Start the scroll-triggered batch loader at the first not-yet-fetched
+                // top-N section. Discovery sits at index 0 and is visible at the top of
+                // the feed, so the first batch kick-off below covers it; subsequent
+                // sections fire when the user scrolls them into view.
+                nextBatchStartIndex = if (refreshTopN.isNotEmpty()) 0 else loadedPrefixSize,
+                isFetchingBatch = false,
+                allSectionsLoaded = if (refreshTopN.isNotEmpty()) {
+                    false
+                } else {
+                    staleSections.isEmpty()
+                },
+                hasReachedEnd = false,
+                endMessage = null,
+                emptyMessage = null,
+                refreshingSectionKeys = refreshTopNKeys,
+            )
+        }
+
+        // Step 7: Kick the first section's fetch immediately — the discovery row sits
+        // at the top of the feed after a pull, so the user expects to see it move
+        // first. The rest of the top N intentionally wait for scroll: the existing
+        // `loadNextSectionBatch` path picks them up as the user reaches each header.
+        if (refreshTopN.isNotEmpty() && isCurrentRefresh(session, generation)) {
+            val inserted = loadNextSectionBatchInternal(
+                generation = generation,
+                pageOffset = pageOffset,
+                refreshId = refreshId,
+                session = session,
+            )
+            if (inserted == 0 && currentSuggestionsCount() > 0L) {
                 pendingRefreshMessage = context.getString(MR.strings.suggestions_up_to_date)
             }
-        } else if (staleSections.isNotEmpty() && generation == feedGeneration.get()) {
-            var inserted = loadNextSectionBatchInternal(generation = generation, pageOffset = pageOffset, refreshId = refreshId)
+        } else if (staleSections.isNotEmpty() && isCurrentRefresh(session, generation)) {
+            var inserted = loadNextSectionBatchInternal(generation = generation, pageOffset = pageOffset, refreshId = refreshId, session = session)
             var retries = 0
-            while (generation == feedGeneration.get() && inserted == 0 && !_state.value.allSectionsLoaded && retries < MAX_ZERO_INSERT_RETRIES) {
+            while (isCurrentRefresh(session, generation) && inserted == 0 && !_state.value.allSectionsLoaded && retries < MAX_ZERO_INSERT_RETRIES) {
                 delay(ZERO_INSERT_RETRY_DELAY_MS)
-                inserted += loadNextSectionBatchInternal(generation = generation, pageOffset = pageOffset, refreshId = refreshId)
+                inserted += loadNextSectionBatchInternal(generation = generation, pageOffset = pageOffset, refreshId = refreshId, session = session)
                 retries++
             }
-        } else if (staleSections.isEmpty()) {
-            // Bug 8c: user pulled to refresh but all sections were cache-fresh — give brief feedback.
+        } else if (staleSections.isEmpty() && refreshTopN.isEmpty()) {
+            // Pull fired but nothing was loaded and no stale sections exist — give
+            // brief feedback so the user knows the gesture was acknowledged.
             pendingRefreshMessage = context.getString(MR.strings.suggestions_up_to_date)
         }
 
-        if (suggestionsRepository.count() == 0L) {
+        if (currentSuggestionsCount() == 0L) {
             throw RefreshBlocked(
                 noMatchesMessage(),
             )
@@ -1498,6 +1754,7 @@ class SuggestionsPresenter(
         refreshId: Long,
         rankingContext: RankingContext,
         now: Long,
+        session: SuggestionRefreshSession? = null,
     ): Int {
         if (!isSectionBatchFetching.compareAndSet(false, true)) return 0
 
@@ -1551,10 +1808,12 @@ class SuggestionsPresenter(
                 sectionSeenKeys = sectionSeenKeys,
                 now = now,
                 pageOffset = pageOffset,
+                session = session,
+                generation = generation,
             )
         } finally {
             isSectionBatchFetching.set(false)
-            if (generation == feedGeneration.get()) {
+            if (session?.let { isCurrentRefresh(it, generation) } ?: (generation == feedGeneration.get())) {
                 _state.update { it.copy(
                     isFetchingBatch = false,
                     isFetching = false,
@@ -1640,34 +1899,42 @@ class SuggestionsPresenter(
             sessionContext = sessionContext,
         ).withSectionDisplayRanks(result.section)
 
-    private suspend fun refreshV2(generation: Long, pageOffset: Int) {
+    private suspend fun refreshV2(
+        generation: Long,
+        pageOffset: Int,
+        session: SuggestionRefreshSession,
+    ) {
         val now = System.currentTimeMillis()
         debugLog.add(LogType.REFRESH_MODE, "Hard refresh - rebuilding profile, resetting seen log")
-        if (generation != feedGeneration.get()) return
+        if (!isCurrentRefresh(session, generation)) return
         // Trim the seen-log to a rolling retention window. Earlier this used Long.MAX_VALUE
         // which wiped every row on every hard refresh, destroying the dedupe signal across
         // sessions. SEEN_LOG_HARD_REFRESH_RETENTION_MS keeps a few days of history so popular
         // titles can resurface while back-to-back refreshes don't re-show the same manga.
         suggestionSeenLogRepository.deleteOlderThan(now - SuggestionsConfig.SEEN_LOG_HARD_REFRESH_RETENTION_MS)
-        if (generation != feedGeneration.get()) return
+        if (!isCurrentRefresh(session, generation)) return
         sectionLastFetchedAt.clear()
 
         interestProfileBuilder.buildProfile(now)
-        if (generation != feedGeneration.get()) return
+        if (!isCurrentRefresh(session, generation)) return
         syncLegacyTagStateForV2(now)
         val profiles = tagProfileRepository.getAllProfiles()
-        if (generation != feedGeneration.get()) return
+        if (!isCurrentRefresh(session, generation)) return
 
         val plannedSections = sectionPlanner.plan(
             profiles = profiles,
             sortOrder = _state.value.sortOrder,
             now = now,
         )
-        if (generation != feedGeneration.get()) return
-        plannedSectionRepository.replaceAll(plannedSections)
+        if (!isCurrentRefresh(session, generation)) return
+        plannedSectionRepository.replaceAll(
+            plannedSections,
+            resultVersion = session.mode.resultVersion,
+            refreshSessionId = session.sessionId,
+        )
         // Prune any orphaned suggestion rows so a blacklisted-tag-section's old manga don't
         // leak into the hard-refresh result through accumulation in the suggestions table.
-        suggestionsRepository.deleteOrphanedByPlan()
+        suggestionsRepository.deleteOrphanedByPlan(session.mode.resultVersion)
 
         val totalRefreshCount = preferences.suggestionsTotalRefreshCount()
         val refreshId = totalRefreshCount.get() + 1L
@@ -1675,7 +1942,7 @@ class SuggestionsPresenter(
         currentV2RefreshId = refreshId
         preferences.suggestionsLastHardRefreshAt().set(now)
 
-        if (generation != feedGeneration.get()) return
+        if (!isCurrentRefresh(session, generation)) return
         val displayNames = plannedSections.associate { it.sectionKey to it.displayReason }
         _state.update { it.copy(
             plannedSections = plannedSections,
@@ -1695,14 +1962,16 @@ class SuggestionsPresenter(
                 generation = generation,
                 pageOffset = pageOffset,
                 refreshId = refreshId,
+                session = session,
             )
             var retries = 0
-            while (generation == feedGeneration.get() && inserted == 0 && !_state.value.allSectionsLoaded && retries < MAX_ZERO_INSERT_RETRIES) {
+            while (isCurrentRefresh(session, generation) && inserted == 0 && !_state.value.allSectionsLoaded && retries < MAX_ZERO_INSERT_RETRIES) {
                 delay(ZERO_INSERT_RETRY_DELAY_MS)
                 inserted += loadNextSectionBatchInternal(
                     generation = generation,
                     pageOffset = pageOffset,
                     refreshId = refreshId,
+                    session = session,
                 )
                 retries++
             }
@@ -1722,10 +1991,10 @@ class SuggestionsPresenter(
     }
 
     private suspend fun restoreV2PlanState() {
-        val plannedSections = plannedSectionRepository.getPlannedSections()
+        val plannedSections = plannedSectionRepository.getPlannedSections(SuggestionsConfig.RESULT_VERSION_V2)
         if (plannedSections.isEmpty()) return
 
-        val loadedSectionKeys = suggestionsRepository.getSuggestions()
+        val loadedSectionKeys = getCurrentSuggestions()
             .map { it.sectionKey }
             .toSet()
         val nextIndex = SectionBatcher.contiguousLoadedPrefixSize(
@@ -1767,6 +2036,7 @@ class SuggestionsPresenter(
         generation: Long,
         pageOffset: Int,
         refreshId: Long,
+        session: SuggestionRefreshSession? = null,
     ): Int {
         val state = _state.value
         if (state.allSectionsLoaded || state.nextBatchStartIndex >= state.plannedSections.size) {
@@ -1793,6 +2063,7 @@ class SuggestionsPresenter(
         )}
 
         var insertedCount = 0
+        var interruptedByNetwork = false
         try {
             val now = System.currentTimeMillis()
             val sectionsToFetch = batch.filterNot { section -> isSectionCacheFresh(section, now) }
@@ -1820,7 +2091,7 @@ class SuggestionsPresenter(
                 globalSeenKeys = seenMangaUrls.toSet(),
                 sectionSeenKeys = allSectionSeenKeys,
             ) { result ->
-                if (generation == feedGeneration.get()) {
+                if (session?.let { isCurrentRefresh(it, generation) } ?: (generation == feedGeneration.get())) {
                     val sectionKey = result.section.sectionKey
                     val acc = accumulatedCandidates.getOrPut(sectionKey) { mutableListOf() }
                     acc.addAll(result.candidates)
@@ -1843,9 +2114,13 @@ class SuggestionsPresenter(
                                 sectionSeenKeys = allSectionSeenKeys,
                                 now = now,
                                 pageOffset = pageOffset,
+                                session = session,
+                                generation = generation,
                             )
                         }
                     } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: TransientSuggestionNetworkException) {
                         throw e
                     } catch (t: Throwable) {
                         debugLog.add(
@@ -1855,11 +2130,18 @@ class SuggestionsPresenter(
                     }
                 }
             }
+        } catch (e: TransientSuggestionNetworkException) {
+            interruptedByNetwork = true
+            throw e
         } finally {
-            val nextIndex = (batchStartIndex + batch.size).coerceAtMost(state.plannedSections.size)
+            val nextIndex = if (interruptedByNetwork) {
+                batchStartIndex
+            } else {
+                (batchStartIndex + batch.size).coerceAtMost(state.plannedSections.size)
+            }
             val allLoaded = nextIndex >= state.plannedSections.size
             isSectionBatchFetching.set(false)
-            if (generation == feedGeneration.get()) {
+            if (session?.let { isCurrentRefresh(it, generation) } ?: (generation == feedGeneration.get())) {
                 _state.update { current ->
                     val hasAnySuggestions = insertedCount > 0 ||
                         current.suggestions.values.any { section -> section.isNotEmpty() }
@@ -1902,6 +2184,8 @@ class SuggestionsPresenter(
         sectionSeenKeys: Map<String, Set<String>>,
         now: Long,
         pageOffset: Int,
+        session: SuggestionRefreshSession? = null,
+        generation: Long? = null,
     ): Int {
         var resultToRank = verifyCandidateResult(result, rankingContext)
         var suggestions = rankVerifiedSection(resultToRank, rankingContext, sectionSeenKeys)
@@ -1990,12 +2274,26 @@ class SuggestionsPresenter(
         }
         // ─────────────────────────────────────────────────────────────────────────
 
-        preferences.suggestionsResultVersion().set(SuggestionsConfig.RESULT_VERSION_V2)
-        if (pendingV2HardRefreshReplace.compareAndSet(true, false)) {
-            suggestionsRepository.replaceAll(suggestions)
-        } else {
-            suggestionsRepository.replaceSection(result.section.sectionKey, suggestions)
+        // Session guard: a superseded refresh must not commit its section to the DB.
+        // Without this, an in-flight V1 batch could write V1 rows after the user has
+        // toggled to V2 and a newer session has started; the next read filters by
+        // current mode so the UI is safe, but the DB then carries dead rows that
+        // confuse seen-log accounting and slow subsequent reads.
+        if (session != null && generation != null && !isCurrentRefresh(session, generation)) {
+            return 0
         }
+        preferences.suggestionsResultVersion().set(SuggestionsConfig.RESULT_VERSION_V2)
+        val resultVersion = session?.mode?.resultVersion ?: currentSuggestionsResultVersion()
+        val refreshSessionId = session?.sessionId
+        // `pendingV2HardRefreshReplace` is consumed here to reset the in-flight marker
+        // exactly once per hard refresh; the write itself is identical for both branches.
+        pendingV2HardRefreshReplace.compareAndSet(true, false)
+        suggestionsRepository.replaceSection(
+            result.section.sectionKey,
+            suggestions,
+            resultVersion = resultVersion,
+            refreshSessionId = refreshSessionId,
+        )
         renderStoredSuggestions()
         shownHistoryRepository.insertAll(suggestions.map { it.source to it.url })
         seenMangaUrls.addAll(suggestions.map { it.memoryKey() })
@@ -2074,7 +2372,7 @@ class SuggestionsPresenter(
     }
 
     private suspend fun renderStoredSuggestions(warmSession: Boolean = false) {
-        renderSuggestedList(suggestionsRepository.getSuggestions(), warmSession = warmSession)
+        renderSuggestedList(getCurrentSuggestions(), warmSession = warmSession)
     }
 
     private fun renderSuggestedList(
@@ -2099,7 +2397,7 @@ class SuggestionsPresenter(
         // raw key leaking into the UI header.
         val plannedDisplayNames = _state.value.plannedSections.associate { it.sectionKey to it.displayReason }
         val displayNames = grouped.keys.associateWith { sectionKey ->
-            plannedDisplayNames[sectionKey] ?: sectionKey.toV1DisplayName()
+            plannedDisplayNames[sectionKey] ?: sectionKeyToV1DisplayName(sectionKey)
         }
         val selectedSectionKey = _state.value.selectedSectionKey?.takeIf { it in grouped.keys }
         _state.update { state ->
@@ -2114,7 +2412,7 @@ class SuggestionsPresenter(
 
     private suspend fun syncSelectedSectionKeyWithStoredSuggestions() {
         val selectedSectionKey = _state.value.selectedSectionKey ?: return
-        val storedSectionKeys = suggestionsRepository.getSuggestions()
+        val storedSectionKeys = getCurrentSuggestions()
             .map { it.sectionKey }
             .toSet()
         if (storedSectionKeys.isNotEmpty() && selectedSectionKey !in storedSectionKeys) {
@@ -2362,37 +2660,6 @@ class SuggestionsPresenter(
 
     private fun waitingForSourcesMessage(): String =
         context.getString(MR.strings.suggestions_waiting_for_sources)
-
-    private fun refreshInProgressMessage(): String =
-        context.getString(MR.strings.suggestions_refresh_in_progress)
-
-    private suspend fun showRefreshLockToast() {
-        withUIContext {
-            context.toast(refreshInProgressMessage())
-        }
-    }
-
-    /**
-     * Converts a V1 sectionKey ("pinned:mecha", "tag:romance", "search:isekai") into a
-     * user-friendly header. Falls back to the raw key for unrecognised prefixes so future
-     * additions don't silently render as blank headers.
-     */
-    private fun String.toV1DisplayName(): String {
-        val (prefix, tail) = when {
-            startsWith("pinned:") -> "Pinned" to removePrefix("pinned:")
-            startsWith("tag:") -> null to removePrefix("tag:")
-            startsWith("search:") -> "Search" to removePrefix("search:")
-            startsWith("expanded:") -> null to removePrefix("expanded:")
-            else -> return this
-        }
-        val pretty = tail.trim()
-            .takeIf { it.isNotBlank() }
-            ?.split(' ', '-', '_')
-            ?.filter { it.isNotBlank() }
-            ?.joinToString(" ") { word -> word.replaceFirstChar { c -> c.titlecase() } }
-            ?: return this
-        return if (prefix != null) "$prefix: $pretty" else pretty
-    }
 
     internal companion object {
         private const val MAX_ZERO_INSERT_RETRIES = 10

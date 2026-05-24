@@ -34,7 +34,17 @@
       "Bash(tasklist)",
       "Bash(findstr -i java)",
       "Bash(./gradlew :app:compileStandardReleaseKotlin :app:compileStandardBetaKotlin :app:compileDevBetaKotlin :app:compileDevNightlyKotlin :app:test)",
-      "Bash(./gradlew :app:test :domain:test)"
+      "Bash(./gradlew :app:test :domain:test)",
+      "Bash(./gradlew :app:compileDebugKotlin)",
+      "Bash(./gradlew :app:ktlintCheck)",
+      "Bash(Select-String \"error|FAILED|BUILD SUC\")",
+      "Bash(Select-Object -Last 20)",
+      "Bash(./gradlew :app:test --tests \"eu.kanade.tachiyomi.ui.suggestions.SuggestionsPresenterCachePolicyTest\")",
+      "Bash(./gradlew :app:tasks --all)",
+      "Bash(./gradlew :app:testDevDebugUnitTest --tests \"eu.kanade.tachiyomi.ui.suggestions.SuggestionsPresenterCachePolicyTest\")",
+      "Bash(./gradlew :app:testDevDebugUnitTest)",
+      "Bash(./gradlew :app:testDevDebugUnitTest --tests \"yokai.domain.suggestions.FeedAggregatorColdStartTest\")",
+      "Bash(./gradlew :app:testDevDebugUnitTest --tests \"yokai.domain.suggestions.SectionPlannerTest\")"
     ]
   }
 }

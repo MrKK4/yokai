@@ -51,7 +51,12 @@ data class SeenEntry(
 )
 
 interface PlannedSectionRepository {
-    suspend fun getPlannedSections(): List<PlannedSection>
-    suspend fun replaceAll(sections: List<PlannedSection>)
+    suspend fun getPlannedSections(resultVersion: Int? = null): List<PlannedSection>
+    suspend fun replaceAll(
+        sections: List<PlannedSection>,
+        resultVersion: Int = SuggestionsConfig.RESULT_VERSION_V2,
+        refreshSessionId: Long = 0L,
+    )
     suspend fun deleteAll()
+    suspend fun deleteByResultVersion(resultVersion: Int)
 }

@@ -816,7 +816,9 @@ class RecentsController(bundle: Bundle? = null) :
     override fun onItemClick(view: View?, position: Int): Boolean {
         val item = adapter.getItem(position) ?: return false
         if (item is RecentMangaItem) {
-            if (item.mch.manga.id == null) {
+            if (item.historyBucket != null) {
+                presenter.toggleHistoryBucket(item.historyBucket)
+            } else if (item.mch.manga.id == null) {
                 val headerItem = adapter.getHeaderOf(item) as? RecentMangaHeaderItem
                 tempJumpTo(
                     when (headerItem?.recentsType) {
@@ -831,6 +833,11 @@ class RecentsController(bundle: Bundle? = null) :
             }
         } else if (item is RecentMangaHeaderItem) return false
         return true
+    }
+
+    override fun onHistoryBucketClicked(position: Int) {
+        val item = adapter.getItem(position) as? RecentMangaItem ?: return
+        item.historyBucket?.let(presenter::toggleHistoryBucket)
     }
 
     private fun openChapter(view: View?, manga: Manga, chapter: Chapter) {
