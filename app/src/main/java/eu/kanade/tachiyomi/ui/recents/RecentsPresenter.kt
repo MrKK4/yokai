@@ -443,7 +443,12 @@ class RecentsPresenter(
                         }
                 }
             } else if (viewType.isHistory && groupChaptersHistory == GroupType.ByAgeBuckets) {
-                buildHistoryBucketItems(pairs)
+                // Per-page emit raw items only. Bucket headers are inserted once after
+                // pagination completes (see the limit == -1 branch below). Building headers
+                // per page caused them to stack — every page emitted its own "Up to 30 days"
+                // and "Up to 60 days", duplicating the bands until something forced a full
+                // refresh.
+                pairs.map { RecentMangaItem(it.first, it.second, null) }
             } else {
                 pairs.map { RecentMangaItem(it.first, it.second, null) }
             }
@@ -464,6 +469,15 @@ class RecentsPresenter(
             return
         }
         if (limit == -1) {
+            if (customViewType == null &&
+                viewType.isHistory &&
+                groupChaptersHistory == GroupType.ByAgeBuckets
+            ) {
+                val accumulatedPairs = recentItems
+                    .filter { it.historyBucket == null && it.mch.manga.id != null }
+                    .map { it.mch to it.chapter }
+                recentItems = buildHistoryBucketItems(accumulatedPairs)
+            }
             setDownloadedChapters(recentItems)
             if (customViewType == null) {
                 withContext(Dispatchers.Main) {
