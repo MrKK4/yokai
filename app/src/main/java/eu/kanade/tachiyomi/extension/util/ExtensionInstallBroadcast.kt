@@ -14,6 +14,7 @@ import android.os.Bundle
 import android.widget.Toast
 import com.hippo.unifile.UniFile
 import eu.kanade.tachiyomi.extension.ExtensionManager
+import eu.kanade.tachiyomi.ui.security.SecureActivityDelegate
 import eu.kanade.tachiyomi.extension.util.ExtensionInstallBroadcast.Companion.EXTRA_SESSION_ID
 import eu.kanade.tachiyomi.extension.util.ExtensionInstallBroadcast.Companion.PACKAGE_INSTALLED_ACTION
 import eu.kanade.tachiyomi.extension.util.ExtensionInstallBroadcast.Companion.packageInstallStep
@@ -126,6 +127,7 @@ class ExtensionInstallActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        SecureActivityDelegate.setSecure(this)
         try {
             if (PACKAGE_INSTALLED_ACTION == intent.action) {
                 packageInstallStep(this, intent)
