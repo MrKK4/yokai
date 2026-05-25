@@ -93,11 +93,16 @@ fun SuggestionsExpandedSheet(
                 .fillMaxWidth()
                 .navigationBarsPadding(),
         ) {
-            // Header row — same pattern as SuggestionsFilterSheet
+            // Header row — same pattern as SuggestionsFilterSheet.
+            // Vertical padding tightened from 12.dp to 4.dp: ModalBottomSheet renders
+            // its own drag handle with built-in 22.dp top + 8.dp bottom padding,
+            // so an extra 12.dp on the header row left a visibly empty band above
+            // the section title. 4.dp keeps a hair of breathing room without the
+            // sheet looking front-padded.
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 24.dp, vertical = 12.dp),
+                    .padding(horizontal = 24.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {

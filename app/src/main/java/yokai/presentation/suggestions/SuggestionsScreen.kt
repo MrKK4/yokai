@@ -284,7 +284,14 @@ fun SuggestionsScreen(
                                 key = "space:$sectionKey",
                                 span = { GridItemSpan(maxLineSpan) },
                             ) {
-                                Box(modifier = Modifier.height(18.dp))
+                                // Tightened from 18.dp to 4.dp: the LazyVerticalGrid already
+                                // applies `verticalArrangement = spacedBy(14.dp)` between
+                                // every item, so the previous spacer plus the natural
+                                // arrangement gap totalled ~46.dp of empty space between
+                                // a section's last row and the next section's header. 4.dp
+                                // is enough to visually separate the bands without the
+                                // feed feeling broken up.
+                                Box(modifier = Modifier.height(4.dp))
                             }
                         }
                     } else {
@@ -326,7 +333,14 @@ fun SuggestionsScreen(
                                 key = "space:$sectionKey",
                                 span = { GridItemSpan(maxLineSpan) },
                             ) {
-                                Box(modifier = Modifier.height(18.dp))
+                                // Tightened from 18.dp to 4.dp: the LazyVerticalGrid already
+                                // applies `verticalArrangement = spacedBy(14.dp)` between
+                                // every item, so the previous spacer plus the natural
+                                // arrangement gap totalled ~46.dp of empty space between
+                                // a section's last row and the next section's header. 4.dp
+                                // is enough to visually separate the bands without the
+                                // feed feeling broken up.
+                                Box(modifier = Modifier.height(4.dp))
                             }
                         }
                     }
