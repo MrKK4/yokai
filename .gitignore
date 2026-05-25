@@ -11,3 +11,9 @@
 .kotlin/
 kls_database.db
 weblate.conf
+
+# Local AI assistant / configuration directories
+.claude/
+.antigravitycli/
+.Jules/
+.openclaude/
