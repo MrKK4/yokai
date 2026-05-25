@@ -1629,17 +1629,13 @@ class SuggestionsPresenter(
             .keys
         val previouslyLoadedCount = previouslyLoadedKeys.size
 
-        // Snapshot the manga currently on screen and bias the fetch away from them
-        // for THIS refresh. They get added to the in-memory `seenMangaUrls` set so
-        // the candidate retriever filters them at the source level. The persistent
-        // history TTL re-seeds the set on next launch, so the same titles can
-        // resurface later — this is a session-scoped penalty, not a permanent block.
-        val justShownKeys = _state.value.suggestions.values
-            .flatten()
-            .map { "${it.source}:${it.url}" }
-        if (justShownKeys.isNotEmpty()) {
-            seenMangaUrls.addAll(justShownKeys)
-        }
+        // NOTE: we intentionally do NOT add the currently-shown manga to `seenMangaUrls`
+        // here. They already landed in the set when their original section committed
+        // (see `appendSectionResult`), and adding them again would shrink the candidate
+        // pool below the per-section target — empirically dropping sections from 9 to
+        // ~6 results. Variety between refreshes already comes from the randomised page
+        // offset (`currentPageOffset = Random.nextInt(1, 8)`) plus the persistent
+        // seen-log TTL.
 
         val refreshTopN = when {
             previouslyLoadedCount > 0 -> plannedSections.take(previouslyLoadedCount)
@@ -2024,11 +2020,51 @@ class SuggestionsPresenter(
             ?: preferences.suggestionsTotalRefreshCount().get().toLong()
         presenterScope.launchIO {
             if (generation != feedGeneration.get()) return@launchIO
-            loadNextSectionBatchInternal(
-                generation = generation,
-                pageOffset = pageOffset,
-                refreshId = refreshId,
-            )
+            try {
+                loadNextSectionBatchInternal(
+                    generation = generation,
+                    pageOffset = pageOffset,
+                    refreshId = refreshId,
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: TransientSuggestionNetworkException) {
+                // Scroll-triggered section loads must not crash the app when the
+                // network drops mid-fetch. Mirror the foreground refresh handler:
+                // pause the active session, surface the waiting-for-network banner,
+                // and let the connectivity callback resume it once we're back online.
+                val session = refreshSessions.activeSessionOrNull()
+                val pausedForNetwork = session?.let { refreshSessions.pauseIfCurrent(it) } == true
+                if (pausedForNetwork) {
+                    isSectionBatchFetching.set(false)
+                    isPageFetching.set(false)
+                    _state.update { state ->
+                        state.copy(
+                            isPausedForNetwork = true,
+                            refreshBannerMessage = waitingForNetworkMessage(),
+                            isFetchingBatch = false,
+                            isFetching = false,
+                        )
+                    }
+                } else {
+                    _state.update { state ->
+                        state.copy(
+                            isPausedForNetwork = true,
+                            refreshBannerMessage = waitingForNetworkMessage(),
+                            isFetchingBatch = false,
+                            isFetching = false,
+                        )
+                    }
+                }
+            } catch (_: Exception) {
+                // Pagination is best-effort: any other failure (parser error,
+                // source extension fault) should not crash the process. The
+                // affected section will simply remain in `refreshingSectionKeys`
+                // until the next manual refresh resets it.
+                _state.update { state ->
+                    state.copy(isFetchingBatch = false, isFetching = false)
+                }
+            }
         }
     }
 
@@ -2385,6 +2421,11 @@ class SuggestionsPresenter(
         val grouped = suggestedList.groupBy { it.sectionKey }.mapValues { entry ->
             entry.value
                 .distinctBy { it.source to it.url }
+                // Defensive cap at the render boundary: if anything upstream ever
+                // writes more than MAX_RESULTS_PER_SECTION rows for a section (an
+                // old DB row, a worker race, etc.), the UI still respects the
+                // per-section target instead of showing a 6×3 grid of 18 items.
+                .take(SuggestionsConfig.MAX_RESULTS_PER_SECTION)
                 .map { suggested ->
                     MangaImpl(source = suggested.source, url = suggested.url).apply {
                         title = suggested.title

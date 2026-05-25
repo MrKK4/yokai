@@ -35,19 +35,34 @@ class RecentMangaHolder(
     private val binding = MangaGridItemBinding.bind(view)
 
     init {
-        val showActions = View.OnLongClickListener {
-            adapter.delegate.onMangaActionsClicked(flexibleAdapterPosition, binding.card)
-            true
+        val onCoverClick = View.OnClickListener {
+            adapter.delegate.onCoverClick(flexibleAdapterPosition)
         }
-        binding.card.setOnClickListener { adapter.delegate.onCoverClick(flexibleAdapterPosition) }
-        binding.constraintLayout.setOnClickListener { adapter.delegate.onCoverClick(flexibleAdapterPosition) }
-        binding.root.setOnLongClickListener(showActions)
-        binding.constraintLayout.setOnLongClickListener(showActions)
-        binding.card.setOnLongClickListener(showActions)
-        binding.coverConstraint.setOnLongClickListener(showActions)
-        binding.coverThumbnail.setOnLongClickListener(showActions)
-        binding.textLayout.setOnLongClickListener(showActions)
-        binding.title.setOnLongClickListener(showActions)
+        binding.card.setOnClickListener(onCoverClick)
+        binding.constraintLayout.setOnClickListener(onCoverClick)
+        binding.coverConstraint.setOnClickListener(onCoverClick)
+        binding.coverThumbnail.setOnClickListener(onCoverClick)
+        binding.textLayout.setOnClickListener(onCoverClick)
+        binding.title.setOnClickListener(onCoverClick)
+        // History tab intentionally has no long-press menu: the eye-minus button
+        // on the card already covers history removal, and the only other action
+        // (add/remove library) is one tap away from the manga details page that
+        // a short tap already opens. Updates and other recents views still keep
+        // the popup so the user can add a fetched chapter's series to library
+        // without leaving the list.
+        if (!adapter.viewType.isHistory) {
+            val showActions = View.OnLongClickListener {
+                adapter.delegate.onMangaActionsClicked(flexibleAdapterPosition, binding.card)
+                true
+            }
+            binding.root.setOnLongClickListener(showActions)
+            binding.constraintLayout.setOnLongClickListener(showActions)
+            binding.card.setOnLongClickListener(showActions)
+            binding.coverConstraint.setOnLongClickListener(showActions)
+            binding.coverThumbnail.setOnLongClickListener(showActions)
+            binding.textLayout.setOnLongClickListener(showActions)
+            binding.title.setOnLongClickListener(showActions)
+        }
         binding.removeHistory.setOnClickListener {
             adapter.delegate.onRemoveHistoryClicked(flexibleAdapterPosition)
         }
@@ -165,15 +180,17 @@ internal fun shouldShowHistoryResetButton(
 internal enum class RecentMangaLongPressAction {
     AddToLibrary,
     RemoveFromLibrary,
-    RemoveFromHistory,
 }
 
 internal fun recentMangaLongPressActions(
     viewType: RecentsViewType,
     isFavorite: Boolean,
-    historyId: Long?,
+    @Suppress("UNUSED_PARAMETER") historyId: Long?,
 ): List<RecentMangaLongPressAction> =
     buildList {
+        // History removal lives on the per-card eye-minus button only; keeping a
+        // long-press duplicate confused users into thinking the two were different
+        // actions. The historyId parameter is retained for callsite compatibility.
         add(
             if (isFavorite) {
                 RecentMangaLongPressAction.RemoveFromLibrary
@@ -181,7 +198,4 @@ internal fun recentMangaLongPressActions(
                 RecentMangaLongPressAction.AddToLibrary
             },
         )
-        if (viewType.isHistory && historyId != null) {
-            add(RecentMangaLongPressAction.RemoveFromHistory)
-        }
     }

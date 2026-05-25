@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.ui.recents
 
+import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -40,7 +41,11 @@ class RecentMangaHolderTest {
     }
 
     @Test
-    fun `history long press shows library and history actions`() {
+    fun `history long press surfaces library action only`() {
+        // History removal lives on the per-card eye-minus button; the long-press
+        // menu intentionally does not duplicate it. The library toggle is still
+        // available so the user can add an interesting history entry to library
+        // without navigating into the manga details screen.
         val actions = recentMangaLongPressActions(
             viewType = RecentsViewType.History,
             isFavorite = false,
@@ -48,7 +53,7 @@ class RecentMangaHolderTest {
         )
 
         assertTrue(RecentMangaLongPressAction.AddToLibrary in actions)
-        assertTrue(RecentMangaLongPressAction.RemoveFromHistory in actions)
+        assertEquals(1, actions.size)
     }
 
     @Test
@@ -64,13 +69,14 @@ class RecentMangaHolderTest {
     }
 
     @Test
-    fun `non history long press does not show history removal`() {
+    fun `non history long press surfaces only the library action`() {
         val actions = recentMangaLongPressActions(
             viewType = RecentsViewType.Updates,
             isFavorite = false,
             historyId = 1L,
         )
 
-        assertFalse(RecentMangaLongPressAction.RemoveFromHistory in actions)
+        assertTrue(RecentMangaLongPressAction.AddToLibrary in actions)
+        assertEquals(1, actions.size)
     }
 }

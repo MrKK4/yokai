@@ -729,14 +729,11 @@ class RecentsController(bundle: Bundle? = null) :
                     popup.menu.add(0, RECENTS_ACTION_LIBRARY, 0, anchor.context.getString(MR.strings.add_to_library))
                 RecentMangaLongPressAction.RemoveFromLibrary ->
                     popup.menu.add(0, RECENTS_ACTION_LIBRARY, 0, anchor.context.getString(MR.strings.remove_from_library))
-                RecentMangaLongPressAction.RemoveFromHistory ->
-                    popup.menu.add(0, RECENTS_ACTION_REMOVE_HISTORY, 1, anchor.context.getString(MR.strings.reset_chapter_history))
             }
         }
         popup.setOnMenuItemClickListener { menuItem ->
             when (menuItem.itemId) {
                 RECENTS_ACTION_LIBRARY -> toggleMangaFavoriteFromRecents(manga)
-                RECENTS_ACTION_REMOVE_HISTORY -> showRemoveHistoryDialog(item.mch.manga, item.mch.history, item.mch.chapter)
             }
             true
         }
@@ -855,6 +852,12 @@ class RecentsController(bundle: Bundle? = null) :
     }
 
     override fun onItemLongClick(position: Int) {
+        // History tab intentionally has no long-press action: the eye-minus button
+        // already covers removal and any other intent the user has (open details,
+        // add to library) is a single tap away on the card itself. FlexibleAdapter
+        // still routes long-presses here from the recycler-level listener, so the
+        // guard lives here too.
+        if (presenter.viewType.isHistory) return
         val item = adapter.getItem(position) as? RecentMangaItem ?: return
         showRemoveHistoryDialog(item.mch.manga, item.mch.history, item.mch.chapter)
     }
@@ -1128,6 +1131,5 @@ class RecentsController(bundle: Bundle? = null) :
 
     private companion object {
         const val RECENTS_ACTION_LIBRARY = 1
-        const val RECENTS_ACTION_REMOVE_HISTORY = 2
     }
 }

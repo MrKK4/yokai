@@ -61,6 +61,14 @@ class SuggestionRefreshSessionTracker {
             current.sessionId == session.sessionId && current.mode == session.mode
         } == true
 
+    /**
+     * Returns the currently-active session if one exists. Used by callers that
+     * need to pause/resume the in-flight refresh without holding a reference to
+     * the session themselves (e.g. scroll-triggered batch loads that hit a
+     * transient network failure mid-fetch).
+     */
+    fun activeSessionOrNull(): SuggestionRefreshSession? = activeSession
+
     fun pauseIfCurrent(session: SuggestionRefreshSession): Boolean =
         if (isCurrent(session)) {
             pausedSession = session
