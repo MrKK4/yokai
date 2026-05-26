@@ -102,6 +102,12 @@ class CandidateRetriever(
     suspend fun retrieveProgressively(
         sections: List<PlannedSection>,
         pageOffset: Int = 1,
+        // Per-section page offset override. When provided, each section's fetch
+        // starts at a different page so that a single refresh covering multiple
+        // tag sections does not pull the same "popular page N" subset for every
+        // section. Falls back to the shared [pageOffset] when null so existing
+        // call sites stay backward-compatible.
+        pageOffsetFor: ((PlannedSection) -> Int)? = null,
         maxPerSourceFetch: Int? = null,
         globalSeenKeys: Set<String> = emptySet(),
         sectionSeenKeys: Map<String, Set<String>> = emptyMap(),
@@ -115,11 +121,12 @@ class CandidateRetriever(
 
             sections.forEach { section ->
                 launch {
+                    val sectionPageOffset = pageOffsetFor?.invoke(section) ?: pageOffset
                     val partial = mutableListOf<SuggestionCandidate>()
                     val complete = withTimeoutOrNull(SuggestionsConfig.SECTION_TIMEOUT_MS) {
                         retrieveSection(
                             section = section,
-                            pageOffset = pageOffset,
+                            pageOffset = sectionPageOffset,
                             requestGate = requestGate,
                             maxPerSourceFetch = maxPerSourceFetch,
                             globalSeenKeys = globalSeenKeys,

@@ -1561,6 +1561,18 @@ class SuggestionsPresenter(
             "Soft refresh - re-ranking locally, target=${refreshTargetSectionKey ?: "stale-sections"}",
         )
 
+        // Step 0: Trim the in-memory shown-set down to the persistent 24h window.
+        // `seenMangaUrls` accumulates after every section commit but is only
+        // wiped on hard refresh, so a session of repeated soft refreshes used to
+        // poison the candidate pool — sources had no fresh manga left to surface
+        // because every recent popular hit was still flagged "seen". Re-seeding
+        // from `shownHistoryRepository` keeps the persistent dedupe guarantee
+        // (no manga shown twice within 24h) while letting older titles resurface.
+        val recentShownCutoff = now - RECENT_HISTORY_SEED_MILLIS
+        val recentShownKeys = shownHistoryRepository.getKeysShownAfter(recentShownCutoff)
+        seenMangaUrls.clear()
+        seenMangaUrls.addAll(recentShownKeys)
+
         // Step 1: Rebuild profile from local DB (no network call).
         interestProfileBuilder.buildProfile(now)
         if (!isCurrentRefresh(session, generation)) return
@@ -2124,6 +2136,11 @@ class SuggestionsPresenter(
             candidateRetriever.retrieveProgressively(
                 sections = sectionsToFetch,
                 pageOffset = pageOffset,
+                // Per-section randomised page so that two tag sections fetched in
+                // the same refresh do not land on the same "popular page N" subset.
+                // Caller-supplied `pageOffset` still anchors discovery for callers
+                // that bypass this lambda; here every section rolls its own.
+                pageOffsetFor = { Random.nextInt(1, 8) },
                 globalSeenKeys = seenMangaUrls.toSet(),
                 sectionSeenKeys = allSectionSeenKeys,
             ) { result ->

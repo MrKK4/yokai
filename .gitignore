@@ -12,6 +12,9 @@
 kls_database.db
 weblate.conf
 
+# Local profiling artifacts
+/profiling/
+
 # Local AI assistant / configuration directories
 .claude/
 .antigravitycli/
