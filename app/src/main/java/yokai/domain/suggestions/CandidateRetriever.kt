@@ -68,21 +68,25 @@ class CandidateRetriever(
         maxPerSourceFetch: Int? = null,
         globalSeenKeys: Set<String> = emptySet(),
         sectionSeenKeys: Map<String, Set<String>> = emptyMap(),
+        sectionTimeoutMs: Long = SuggestionsConfig.SECTION_TIMEOUT_MS,
     ): List<CandidateRetrievalResult> {
         val results = coroutineScope {
             val requestGate = Semaphore(SuggestionsConfig.MAX_CONCURRENT_SOURCE_REQUESTS)
             sections.map { section ->
                 async {
-                    CandidateRetrievalResult(
-                        section = section,
-                        candidates = retrieveSection(
+                    val candidates = withTimeoutOrNull(sectionTimeoutMs) {
+                        retrieveSection(
                             section = section,
                             pageOffset = pageOffset,
                             requestGate = requestGate,
                             maxPerSourceFetch = maxPerSourceFetch,
                             globalSeenKeys = globalSeenKeys,
                             sectionSeenKeys = sectionSeenKeys[section.sectionKey].orEmpty(),
-                        ),
+                        )
+                    }.orEmpty()
+                    CandidateRetrievalResult(
+                        section = section,
+                        candidates = candidates,
                     )
                 }
             }.awaitAll()

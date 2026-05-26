@@ -25,7 +25,6 @@ object SuggestionsConfig {
     const val MAX_CONCURRENT_SOURCE_REQUESTS = 8
     const val SOURCE_REQUEST_TIMEOUT_MS = 15_000L
     const val SECTION_TIMEOUT_MS = 22_000L
-    const val SECTION_FILL_EXTRA_PAGE_LIMIT = 2
     const val MAX_CANDIDATES_PER_SECTION = 500
     const val MAX_PER_SOURCE_FETCH = 6
     const val MANUAL_REFRESH_MAX_PER_SOURCE_FETCH = 2
@@ -41,10 +40,9 @@ object SuggestionsConfig {
     /** Max time to wait for SourceManager to populate before cold-start discovery gives up. */
     const val SOURCE_POPULATION_TIMEOUT_MS = 10_000L
     const val BACKGROUND_MAX_SECTION_BATCHES = 3
-    /** Minimum acceptable results per section. If a section yields fewer than this
-     *  after all sources + dedup + filters, it is logged as SECTION_THIN and the
-     *  seen-log filter is relaxed for a second ranking pass. */
-    const val MIN_RESULTS_PER_SECTION = 5
+    /** Target visible results per section. Thin sections are logged, but seen/history
+     *  filters are never relaxed just to fill the grid. */
+    const val MIN_RESULTS_PER_SECTION = MAX_RESULTS_PER_SECTION
     // ──────────────────────────────────────────────────────────────────────────
 
     const val HARD_REFRESH_NOVELTY_QUOTA = 0.70

@@ -98,22 +98,7 @@ data class SuggestionsState(
     val sheetSuppressed: Boolean = false,
     val refreshingSectionKeys: Set<String> = emptySet(),
     val refreshBannerMessage: String? = null,
-    val staleSnapshotMode: Int? = null,
     val isPausedForNetwork: Boolean = false,
-)
-
-/**
- * In-memory snapshot of the rendered state for a single sort order.
- * Captured the moment the user switches away from a sort so switching back
- * immediately shows the previous results without a network round-trip.
- */
-private data class SortSnapshot(
-    val suggestions: Map<String, List<Manga>>,
-    val plannedSections: List<PlannedSection>,
-    val nextBatchStartIndex: Int,
-    val allSectionsLoaded: Boolean,
-    val hasReachedEnd: Boolean,
-    val endMessage: String?,
 )
 
 internal fun shouldAutoRefreshStoredSuggestions(
@@ -231,23 +216,9 @@ class SuggestionsPresenter(
      */
     private var sortDebounceJob: Job? = null
     /**
-     * Per-sort snapshot cache. Populated the moment the user switches away from a sort
-     * so switching back immediately restores the previous results.
-     * Cleared on explicit refresh or non-sort rebuilds (filter/source/V2-mode changes).
-     */
-    private val sortSnapshotCache = mutableMapOf<SuggestionSortOrder, SortSnapshot>()
-    /**
-     * When non-null, the DB flow observer protects a snapshot-restored sort from the
-     * exact DB contents that were present at restore time. Once the DB contents change,
-     * the observer accepts the new data and clears this freeze.
-     */
-    @Volatile private var frozenForSort: SuggestionSortOrder? = null
-    @Volatile private var frozenDbSignature: Long? = null
-    /**
      * Generation value captured at the time the most recent [rebuildFeed] or [refresh] starts.
      * The DB flow observer rejects any emission where [feedGeneration] no longer matches this
      * value, preventing stale in-flight results from overwriting new sort/filter state.
-     * (Bug 3 fix — replaces the incomplete `frozenForSort == null` guard in the flow observer.)
      */
     @Volatile private var activeFlowGeneration = 0L
     private val usedTags = linkedSetOf<String>()
@@ -329,14 +300,6 @@ class SuggestionsPresenter(
                 // insert results into the DB whose flow emission then overwrites the new state.
                 if (feedGeneration.get() != activeFlowGeneration) return@onEach
                 if (suggestedList.isNotEmpty() && !storedResultsMatchCurrentVersion()) return@onEach
-                // While showing a snapshot-restored sort, the DB may still hold the
-                // previous sort's rows. Ignore only that exact snapshot; accept later
-                // worker/refresh updates so the cached UI does not stay stale forever.
-                if (frozenForSort == _state.value.sortOrder) {
-                    if (suggestedList.dbSignature() == frozenDbSignature) return@onEach
-                    frozenForSort = null
-                    frozenDbSignature = null
-                }
                 if (shouldKeepCurrentSuggestions(suggestedList)) return@onEach
                 // During a rebuild (V1/V2 toggle, sort switch, filter change), skip empty
                 // emissions so old suggestions stay visible until the first batch inserts.
@@ -522,7 +485,6 @@ class SuggestionsPresenter(
         refreshSessions.clearPaused(paused)
         refresh(
             hardRefresh = paused.hardRefresh,
-            clearSortCache = false,
             reason = paused.reason,
         )
     }
@@ -633,21 +595,10 @@ class SuggestionsPresenter(
 
     fun refresh(
         hardRefresh: Boolean = false,
-        clearSortCache: Boolean = true,
         reason: SuggestionRefreshReason = SuggestionRefreshReason.Manual,
     ) {
-        // User explicitly wants fresh data — discard all snapshots and unfreeze the
-        // DB flow observer so it can write new results to state as they arrive.
-        frozenForSort = null
-        frozenDbSignature = null
-        if (clearSortCache) {
-            sortSnapshotCache.clear()
-        }
         pendingRefreshMessage = null
         SuggestionsWorker.cancelManual(context)
-        if (hardRefresh) {
-            seenMangaUrls.clear()      // Bug 4 fix: allow full candidate re-evaluation on hard refresh
-        }
         refreshJob?.cancel()
         refreshJob = null
         val generation = feedGeneration.incrementAndGet()
@@ -687,7 +638,6 @@ class SuggestionsPresenter(
             state.copy(
                 emptyMessage = null,
                 refreshBannerMessage = refreshBannerMessage(session).takeIf { hasRenderedSuggestions },
-                staleSnapshotMode = session.mode.resultVersion.takeIf { hasRenderedSuggestions },
                 isPausedForNetwork = false,
                 plannedSections = state.plannedSections.takeIf { hasRenderedSuggestions } ?: emptyList(),
                 sectionDisplayNames = state.sectionDisplayNames.takeIf { hasRenderedSuggestions } ?: emptyMap(),
@@ -833,7 +783,6 @@ class SuggestionsPresenter(
                         it.copy(
                             refreshingSectionKeys = emptySet(),
                             refreshBannerMessage = null,
-                            staleSnapshotMode = null,
                             isPausedForNetwork = false,
                         )
                     }
@@ -859,9 +808,6 @@ class SuggestionsPresenter(
     }
 
     fun loadNextPage() {
-        // While showing a snapshot, pagination is disabled — the cached content is
-        // complete for that sort and we don't want to mix it with live DB results.
-        if (frozenForSort != null) return
         if (preferences.suggestionsV2Enabled().get()) {
             loadNextSectionBatch()
             return
@@ -969,74 +915,15 @@ class SuggestionsPresenter(
     }
 
     fun setSortOrder(sortOrder: SuggestionSortOrder) {
-        // Guard against a stale state check during in-flight network requests:
-        // compare against the committed var, not state.sortOrder, which may lag.
         if (committedSortOrder == sortOrder) return
-        // Commit immediately so any concurrent call within the debounce window
-        // sees the latest desired order and skips a redundant rebuild.
         committedSortOrder = sortOrder
         // Debounce: cancel the pending rebuild if the user taps again within 300 ms.
         // Only the last selection within the window fires a network request.
         sortDebounceJob?.cancel()
         sortDebounceJob = presenterScope.launchIO {
             delay(300)
-            // ── Snapshot current results before switching away ─────────────────
-            val currentState = _state.value
-            if (currentState.suggestions.isNotEmpty()) {
-                sortSnapshotCache[currentState.sortOrder] = SortSnapshot(
-                    suggestions        = currentState.suggestions,
-                    plannedSections    = currentState.plannedSections,
-                    nextBatchStartIndex = currentState.nextBatchStartIndex,
-                    allSectionsLoaded  = currentState.allSectionsLoaded,
-                    hasReachedEnd      = currentState.hasReachedEnd,
-                    endMessage         = currentState.endMessage,
-                )
-            }
-            // ── Restore from cache if we've loaded this sort before ────────────
-            val cached = sortSnapshotCache[sortOrder]
-            if (cached != null) {
-                val dbSignatureAtRestore = getCurrentSuggestions().dbSignature()
-                // Cancel any in-flight requests from the previous rebuild so they
-                // don't write stale results to state or the DB.
-                refreshJob?.cancel()
-                val generation = feedGeneration.incrementAndGet()
-                activeFlowGeneration = generation
-                // The cached restore cancels any active refresh above, so clear the
-                // foreground flag here; the cancelled job's stale generation will skip cleanup.
-                isForegroundRefreshing.set(false)
-                isPageFetching.set(false)
-                isSectionBatchFetching.set(false)
-                // Freeze only against the DB snapshot that existed before this cached
-                // restore. Any later DB change is treated as fresh and shown.
-                frozenForSort = sortOrder
-                frozenDbSignature = dbSignatureAtRestore
-                preferences.suggestionsSortOrder().set(sortOrder)
-                val selectedSectionKey = currentState.selectedSectionKey
-                    ?.takeIf { selected -> selected in cached.suggestions.keys }
-                _state.update { it.copy(
-                    sortOrder          = sortOrder,
-                    suggestions        = cached.suggestions,
-                    selectedSectionKey = selectedSectionKey,
-                    isLoading          = false,
-                    isFetching         = false,
-                    isFetchingBatch    = false,
-                    plannedSections    = cached.plannedSections,
-                    nextBatchStartIndex = cached.nextBatchStartIndex,
-                    allSectionsLoaded  = cached.allSectionsLoaded,
-                    hasReachedEnd      = cached.hasReachedEnd,
-                    endMessage         = cached.endMessage,
-                    emptyMessage       = null,
-                    sheetSectionKey    = null,
-                    sheetResults       = emptyList(),
-                    sheetIsLoading     = false,
-                    sheetError         = null,
-                    sheetSuppressed    = false,
-                )}
-            } else {
-                // No cache for this sort — rebuild from network (existing path).
-                preferences.suggestionsSortOrder().set(sortOrder)
-                rebuildFeed(sortOrder = sortOrder)
-            }
+            preferences.suggestionsSortOrder().set(sortOrder)
+            rebuildFeed(sortOrder = sortOrder)
         }
     }
 
@@ -1424,12 +1311,6 @@ class SuggestionsPresenter(
         clearRenderedResults: Boolean = false,
         reason: SuggestionRefreshReason = SuggestionRefreshReason.Manual,
     ) {
-        // A non-sort rebuild (filter/source/V2-toggle change) invalidates all snapshots
-        // because the result set will differ regardless of sort order.  Also unfreeze
-        // the DB flow observer so new results are written to state as they arrive.
-        frozenForSort = null
-        frozenDbSignature = null
-        sortSnapshotCache.clear()
         refreshJob?.cancel()
         isForegroundRefreshing.set(false)
         isPageFetching.set(false)
@@ -1461,7 +1342,7 @@ class SuggestionsPresenter(
             sheetError = null,
             sheetSuppressed = false,
         )}
-        refresh(hardRefresh = true, clearSortCache = false, reason = reason)
+        refresh(hardRefresh = true, reason = reason)
     }
 
     suspend fun getOrCreateLocalManga(manga: Manga): Manga? {
@@ -1673,10 +1554,8 @@ class SuggestionsPresenter(
             }
         }
 
-        // Step 6: Mark every section in the new top N as stale so the next batch
-        // fetch will hit the network. Sections beyond the top N keep their cache —
-        // they remain visible in the feed but won't refresh unless the user scrolls
-        // to them and the existing scroll-triggered batch loader picks them up.
+        // Step 6: Mark every section in the new top N as refreshable so a manual
+        // pull replaces each loaded section instead of only swapping the first row.
         refreshTopN.forEach { section ->
             sectionLastFetchedAt.remove(section.sectionKey)
         }
@@ -1702,10 +1581,8 @@ class SuggestionsPresenter(
                 suggestions = keptSuggestions,
                 plannedSections = plannedSections,
                 sectionDisplayNames = displayNames,
-                // Start the scroll-triggered batch loader at the first not-yet-fetched
-                // top-N section. Discovery sits at index 0 and is visible at the top of
-                // the feed, so the first batch kick-off below covers it; subsequent
-                // sections fire when the user scrolls them into view.
+                // Start at the first top-N section. The foreground refresh below will
+                // walk every loaded/top-N section now; scroll loading resumes after it.
                 nextBatchStartIndex = if (refreshTopN.isNotEmpty()) 0 else loadedPrefixSize,
                 isFetchingBatch = false,
                 allSectionsLoaded = if (refreshTopN.isNotEmpty()) {
@@ -1720,17 +1597,24 @@ class SuggestionsPresenter(
             )
         }
 
-        // Step 7: Kick the first section's fetch immediately — the discovery row sits
-        // at the top of the feed after a pull, so the user expects to see it move
-        // first. The rest of the top N intentionally wait for scroll: the existing
-        // `loadNextSectionBatch` path picks them up as the user reaches each header.
+        // Step 7: Replace every loaded/top-N section during the foreground refresh.
+        // Older behavior fetched only the first section and left the rest visually
+        // stale until the user scrolled into them.
         if (refreshTopN.isNotEmpty() && isCurrentRefresh(session, generation)) {
-            val inserted = loadNextSectionBatchInternal(
-                generation = generation,
-                pageOffset = pageOffset,
-                refreshId = refreshId,
-                session = session,
-            )
+            var inserted = 0
+            while (
+                isCurrentRefresh(session, generation) &&
+                _state.value.nextBatchStartIndex < refreshTopN.size
+            ) {
+                val beforeIndex = _state.value.nextBatchStartIndex
+                inserted += loadNextSectionBatchInternal(
+                    generation = generation,
+                    pageOffset = pageOffset,
+                    refreshId = refreshId,
+                    session = session,
+                )
+                if (_state.value.nextBatchStartIndex <= beforeIndex) break
+            }
             if (inserted == 0 && currentSuggestionsCount() > 0L) {
                 pendingRefreshMessage = context.getString(MR.strings.suggestions_up_to_date)
             }
@@ -2023,9 +1907,6 @@ class SuggestionsPresenter(
     }
 
     private fun loadNextSectionBatch() {
-        // While showing a snapshot, do not load more — the cached state is complete
-        // for that sort and live DB results must not be mixed into it.
-        if (frozenForSort != null) return
         val generation = feedGeneration.get()
         val pageOffset = currentPageOffset
         val refreshId = currentV2RefreshId.takeIf { it > 0L }
@@ -2246,28 +2127,32 @@ class SuggestionsPresenter(
         sectionLastFetchedAt[result.section.sectionKey] = now
 
         var topUpPage = pageOffset + 2
-        var topUpAttempts = 0
+        val topUpDeadline = now + SuggestionsConfig.SECTION_TIMEOUT_MS
         while (
             suggestions.size < SuggestionsConfig.MAX_RESULTS_PER_SECTION &&
-            topUpAttempts < SuggestionsConfig.SECTION_FILL_EXTRA_PAGE_LIMIT
+            System.currentTimeMillis() < topUpDeadline &&
+            (session == null || generation == null || isCurrentRefresh(session, generation))
         ) {
+            val remainingMs = (topUpDeadline - System.currentTimeMillis())
+                .coerceAtLeast(1L)
             val topUpResult = candidateRetriever.retrieve(
                 sections = listOf(result.section),
                 pageOffset = topUpPage,
                 globalSeenKeys = seenMangaUrls.toSet(),
                 sectionSeenKeys = sectionSeenKeys,
+                sectionTimeoutMs = remainingMs,
             ).singleOrNull() ?: break
             val verifiedTopUp = verifyCandidateResult(topUpResult, rankingContext)
             val combinedCandidates = (resultToRank.candidates + verifiedTopUp.candidates)
                 .distinctBy { it.sourceId to it.manga.url }
-            if (combinedCandidates.size <= resultToRank.candidates.size) break
-            resultToRank = resultToRank.copy(candidates = combinedCandidates)
-            val toppedUp = rankVerifiedSection(resultToRank, rankingContext, sectionSeenKeys)
-            if (toppedUp.size > suggestions.size) {
-                suggestions = toppedUp
+            if (combinedCandidates.size > resultToRank.candidates.size) {
+                resultToRank = resultToRank.copy(candidates = combinedCandidates)
+                val toppedUp = rankVerifiedSection(resultToRank, rankingContext, sectionSeenKeys)
+                if (toppedUp.size > suggestions.size) {
+                    suggestions = toppedUp
+                }
             }
             topUpPage++
-            topUpAttempts++
         }
 
         if (suggestions.isEmpty()) {
@@ -2275,57 +2160,13 @@ class SuggestionsPresenter(
             return 0
         }
 
-        // ── Seen-log widening (v3 plan §"Minimum Results Per Section") ──────────
-        // If the normal pass yielded fewer than the minimum, re-rank the same
-        // candidates with the per-section seen-log cleared so manga seen > 12 h
-        // ago in this section becomes eligible again. Never drop a section just
-        // because it's thin — accept whatever is available after the retry.
-        if (suggestions.size < SuggestionsConfig.MIN_RESULTS_PER_SECTION) {
+        if (suggestions.size < SuggestionsConfig.MAX_RESULTS_PER_SECTION) {
             debugLog.add(
                 LogType.SECTION_THIN,
                 "Section '${result.section.sectionKey}' returned only ${suggestions.size} results " +
-                    "after all sources (minimum is ${SuggestionsConfig.MIN_RESULTS_PER_SECTION}) — retrying with relaxed seen-log",
+                    "after strict filtering (target is ${SuggestionsConfig.MAX_RESULTS_PER_SECTION})",
             )
-            val relaxedSuggestions = suggestionRanker.rankWithContext(
-                retrievalResults = listOf(resultToRank),
-                context = rankingContext,
-                globalSeenKeys = seenMangaUrls.toSet(),
-                // Pass empty seen keys for this section so items seen > 12 h ago are allowed.
-                sectionSeenKeys = sectionSeenKeys - result.section.sectionKey,
-                sessionContext = sessionContext,
-            ).withSectionDisplayRanks(result.section)
-            if (relaxedSuggestions.size > suggestions.size) {
-                suggestions = relaxedSuggestions
-            }
-            // Second-pass: if per-section relaxation still yields nothing, also clear
-            // globalSeenKeys. This is the last-resort so a section never returns 0 results
-            // when candidates exist (they just happened to be seen recently).
-            if (suggestions.isEmpty() && result.candidates.isNotEmpty()) {
-                debugLog.add(
-                    LogType.SECTION_THIN,
-                    "Section '${result.section.sectionKey}' still 0 after per-section relaxation — clearing global seen keys",
-                )
-                val fullyRelaxed = suggestionRanker.rankWithContext(
-                    retrievalResults = listOf(resultToRank),
-                    context = rankingContext,
-                    globalSeenKeys = emptySet(),
-                    sectionSeenKeys = emptyMap(),
-                    sessionContext = sessionContext,
-                ).withSectionDisplayRanks(result.section)
-                if (fullyRelaxed.isNotEmpty()) {
-                    suggestions = fullyRelaxed
-                }
-            }
-            // Log final thin count so it's visible even if relaxation helped.
-            if (suggestions.size < SuggestionsConfig.MIN_RESULTS_PER_SECTION) {
-                debugLog.add(
-                    LogType.SECTION_THIN,
-                    "Section '${result.section.sectionKey}' returned only ${suggestions.size} results " +
-                        "after all sources (minimum is ${SuggestionsConfig.MIN_RESULTS_PER_SECTION})",
-                )
-            }
         }
-        // ─────────────────────────────────────────────────────────────────────────
 
         // Session guard: a superseded refresh must not commit its section to the DB.
         // Without this, an in-flight V1 batch could write V1 rows after the user has
@@ -2621,16 +2462,6 @@ class SuggestionsPresenter(
             preferences.lastFetchedSuggestionsSourceIds().set(displayedSourceIds)
         }
     }
-
-    private fun List<SuggestedManga>.dbSignature(): Long =
-        fold(size.toLong()) { hash, suggestion ->
-            31L * hash +
-                suggestion.source +
-                31L * suggestion.url.hashCode() +
-                31L * suggestion.sectionKey.hashCode() +
-                31L * suggestion.displayRank +
-                31L * suggestion.fetchedAt
-        }
 
     private fun sectionEndMessage(loadedCount: Int, plannedCount: Int): String =
         if (loadedCount.coerceAtMost(plannedCount) <= 0) {

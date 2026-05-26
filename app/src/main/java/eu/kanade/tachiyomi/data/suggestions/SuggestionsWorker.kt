@@ -222,16 +222,19 @@ class SuggestionsWorker(
 
             var combinedResult = result
             var nextPage = 3
-            var attempts = 0
+            val fillDeadline = System.currentTimeMillis() + SuggestionsConfig.SECTION_TIMEOUT_MS
             while (
                 sectionSuggestions.size < SuggestionsConfig.MAX_RESULTS_PER_SECTION &&
-                attempts < SuggestionsConfig.SECTION_FILL_EXTRA_PAGE_LIMIT
+                System.currentTimeMillis() < fillDeadline
             ) {
+                val remainingMs = (fillDeadline - System.currentTimeMillis())
+                    .coerceAtLeast(1L)
                 val extraResult = candidateRetriever.retrieve(
                     sections = listOf(result.section),
                     pageOffset = nextPage,
                     globalSeenKeys = globalSeenKeys,
                     sectionSeenKeys = sectionSeenKeys,
+                    sectionTimeoutMs = remainingMs,
                 ).singleOrNull() ?: break
                 val verifiedExtra = if (rankingContext.blacklistedTags.isEmpty()) {
                     extraResult
@@ -245,21 +248,21 @@ class SuggestionsWorker(
                 }
                 val combinedCandidates = (combinedResult.candidates + verifiedExtra.candidates)
                     .distinctBy { it.sourceId to it.manga.url }
-                if (combinedCandidates.size <= combinedResult.candidates.size) break
-                combinedResult = combinedResult.copy(candidates = combinedCandidates)
-                val ranked = suggestionRanker.rankWithContext(
-                    retrievalResults = listOf(combinedResult),
-                    context = rankingContext,
-                    globalSeenKeys = globalSeenKeys,
-                    sectionSeenKeys = sectionSeenKeys,
-                    sessionContext = sessionContext,
-                )
-                if (ranked.size > sectionSuggestions.size) {
-                    sectionSuggestions = ranked
-                    filledBySection[result.section.sectionKey] = ranked
+                if (combinedCandidates.size > combinedResult.candidates.size) {
+                    combinedResult = combinedResult.copy(candidates = combinedCandidates)
+                    val ranked = suggestionRanker.rankWithContext(
+                        retrievalResults = listOf(combinedResult),
+                        context = rankingContext,
+                        globalSeenKeys = globalSeenKeys,
+                        sectionSeenKeys = sectionSeenKeys,
+                        sessionContext = sessionContext,
+                    )
+                    if (ranked.size > sectionSuggestions.size) {
+                        sectionSuggestions = ranked
+                        filledBySection[result.section.sectionKey] = ranked
+                    }
                 }
                 nextPage++
-                attempts++
             }
         }
         return filledBySection.values.flatten()
