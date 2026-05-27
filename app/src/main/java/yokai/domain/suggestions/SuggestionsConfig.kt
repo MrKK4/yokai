@@ -21,6 +21,9 @@ object SuggestionsConfig {
     const val EXPANDED_MAX_RESULTS = 40
     const val EXPANDED_PAGE_SIZE = 20
     const val EXPANDED_SOURCE_BATCH_SIZE = 8
+    // Main feed refreshes use a small rotating source cohort for faster first paint.
+    // Expanded "view more" sheets keep using the full active source pool.
+    const val MAIN_FEED_SOURCE_COHORT_SIZE = 4
     const val MAX_ACTIVE_SOURCES = Int.MAX_VALUE
     const val MAX_CONCURRENT_SOURCE_REQUESTS = 8
     const val SOURCE_REQUEST_TIMEOUT_MS = 15_000L

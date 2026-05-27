@@ -2051,6 +2051,20 @@ class SuggestionsPresenter(
                                 session = session,
                                 generation = generation,
                             )
+                        } else {
+                            val partialResult = CandidateRetrievalResult(
+                                section = result.section,
+                                candidates = acc.distinctBy { it.sourceId to it.manga.url },
+                                isSectionComplete = false,
+                            )
+                            val previewSuggestions = rankSectionPreview(
+                                result = partialResult,
+                                rankingContext = rankingContext,
+                                sectionSeenKeys = allSectionSeenKeys,
+                            )
+                            if (previewSuggestions.isNotEmpty()) {
+                                renderSectionPreview(result.section, previewSuggestions)
+                            }
                         }
                     } catch (e: CancellationException) {
                         throw e
@@ -2269,6 +2283,26 @@ class SuggestionsPresenter(
         renderSuggestedList(getCurrentSuggestions(), warmSession = warmSession)
     }
 
+    private fun renderSectionPreview(
+        section: PlannedSection,
+        suggestions: List<SuggestedManga>,
+    ) {
+        val preview = suggestions
+            .distinctBy { it.source to it.url }
+            .take(SuggestionsConfig.MAX_RESULTS_PER_SECTION)
+            .map { it.toDisplayManga() }
+        if (preview.isEmpty()) return
+
+        _state.update { state ->
+            state.copy(
+                suggestions = state.suggestions + (section.sectionKey to preview),
+                sectionDisplayNames = state.sectionDisplayNames + (section.sectionKey to section.displayReason),
+                selectedSectionKey = state.selectedSectionKey?.takeIf { it in state.suggestions || it == section.sectionKey },
+                emptyMessage = null,
+            )
+        }
+    }
+
     private fun renderSuggestedList(
         suggestedList: List<SuggestedManga>,
         warmSession: Boolean = true,
@@ -2284,12 +2318,7 @@ class SuggestionsPresenter(
                 // old DB row, a worker race, etc.), the UI still respects the
                 // per-section target instead of showing a 6×3 grid of 18 items.
                 .take(SuggestionsConfig.MAX_RESULTS_PER_SECTION)
-                .map { suggested ->
-                    MangaImpl(source = suggested.source, url = suggested.url).apply {
-                        title = suggested.title
-                        thumbnail_url = suggested.thumbnailUrl
-                    }
-                }
+                .map { suggested -> suggested.toDisplayManga() }
         }
         // V2 populates plannedSections with displayReason. V1 doesn't, so synthesize friendly
         // labels from the section_key prefix ("pinned:mecha" -> "Pinned: Mecha") to avoid the
@@ -2308,6 +2337,12 @@ class SuggestionsPresenter(
             )
         }
     }
+
+    private fun SuggestedManga.toDisplayManga(): Manga =
+        MangaImpl(source = source, url = url).apply {
+            title = this@toDisplayManga.title
+            thumbnail_url = thumbnailUrl
+        }
 
     private suspend fun syncSelectedSectionKeyWithStoredSuggestions() {
         val selectedSectionKey = _state.value.selectedSectionKey ?: return

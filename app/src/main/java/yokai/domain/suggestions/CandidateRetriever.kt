@@ -20,6 +20,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.random.Random
 
 data class SuggestionCandidate(
     val section: PlannedSection,
@@ -69,6 +70,7 @@ class CandidateRetriever(
         globalSeenKeys: Set<String> = emptySet(),
         sectionSeenKeys: Map<String, Set<String>> = emptyMap(),
         sectionTimeoutMs: Long = SuggestionsConfig.SECTION_TIMEOUT_MS,
+        sourceCohortSeed: Int = Random.nextInt(),
     ): List<CandidateRetrievalResult> {
         val results = coroutineScope {
             val requestGate = Semaphore(SuggestionsConfig.MAX_CONCURRENT_SOURCE_REQUESTS)
@@ -82,6 +84,7 @@ class CandidateRetriever(
                             maxPerSourceFetch = maxPerSourceFetch,
                             globalSeenKeys = globalSeenKeys,
                             sectionSeenKeys = sectionSeenKeys[section.sectionKey].orEmpty(),
+                            sourceCohortSeed = sourceCohortSeed,
                         )
                     }.orEmpty()
                     CandidateRetrievalResult(
@@ -115,6 +118,7 @@ class CandidateRetriever(
         maxPerSourceFetch: Int? = null,
         globalSeenKeys: Set<String> = emptySet(),
         sectionSeenKeys: Map<String, Set<String>> = emptyMap(),
+        sourceCohortSeed: Int = Random.nextInt(),
         onResult: suspend (CandidateRetrievalResult) -> Unit,
     ) {
         if (sections.isEmpty()) return
@@ -135,6 +139,7 @@ class CandidateRetriever(
                             maxPerSourceFetch = maxPerSourceFetch,
                             globalSeenKeys = globalSeenKeys,
                             sectionSeenKeys = sectionSeenKeys[section.sectionKey].orEmpty(),
+                            sourceCohortSeed = sourceCohortSeed,
                             onSourceComplete = { batch ->
                                 partial.addAll(batch)
                                 results.trySend(
@@ -184,14 +189,18 @@ class CandidateRetriever(
         maxPerSourceFetch: Int? = null,
         globalSeenKeys: Set<String> = emptySet(),
         sectionSeenKeys: Set<String> = emptySet(),
+        sourceCohortSeed: Int,
         onSourceComplete: (suspend (List<SuggestionCandidate>) -> Unit)? = null,
     ): List<SuggestionCandidate> {
         val blockedMangaKeys = globalSeenKeys + sectionSeenKeys
         if (section.isColdStartDiscovery()) {
-            return retrieveColdStartDiscoverySection(section, requestGate, blockedMangaKeys, onSourceComplete)
+            return retrieveColdStartDiscoverySection(section, requestGate, blockedMangaKeys, sourceCohortSeed, onSourceComplete)
         }
 
-        val sources = activeSources(discovery = section.type == SectionType.DISCOVERY)
+        val sources = activeSources(
+            discovery = section.type == SectionType.DISCOVERY,
+            sourceCohortSeed = sourceCohortSeed,
+        )
         if (sources.isEmpty()) return emptyList()
 
         suspend fun fetchPageProgressive(
@@ -322,9 +331,10 @@ class CandidateRetriever(
         section: PlannedSection,
         requestGate: Semaphore,
         blockedMangaKeys: Set<String>,
+        sourceCohortSeed: Int,
         onSourceComplete: (suspend (List<SuggestionCandidate>) -> Unit)?,
     ): List<SuggestionCandidate> {
-        var sources = activeSources(discovery = true).shuffled()
+        var sources = activeSources(discovery = true, sourceCohortSeed = sourceCohortSeed)
         if (sources.isEmpty()) {
             // SourceManager's IO coroutine may not have finished populating the map yet.
             // Wait for the live Flow to emit at least one source before giving up.
@@ -332,7 +342,7 @@ class CandidateRetriever(
             withTimeoutOrNull(SuggestionsConfig.SOURCE_POPULATION_TIMEOUT_MS) {
                 catalogueSourcesFlowProvider().first { it.isNotEmpty() }
             }
-            sources = activeSources(discovery = true).shuffled()
+            sources = activeSources(discovery = true, sourceCohortSeed = sourceCohortSeed)
             debugLog.add(LogType.SECTION_DROPPED, "Cold-start: after wait — ${sources.size} sources available")
         }
         if (sources.isEmpty()) return emptyList()
@@ -601,15 +611,27 @@ class CandidateRetriever(
         }
     }
 
-    private fun activeSources(discovery: Boolean): List<CatalogueSource> =
-        activeNetworkSources(discovery, freshSourceFirst = true)
+    private fun activeSources(discovery: Boolean, sourceCohortSeed: Int): List<CatalogueSource> =
+        activeNetworkSources(
+            discovery = discovery,
+            freshSourceFirst = true,
+            maxSources = SuggestionsConfig.MAIN_FEED_SOURCE_COHORT_SIZE,
+            freshSourceSeed = sourceCohortSeed,
+        )
 
-    private fun activeNetworkSources(discovery: Boolean = false, freshSourceFirst: Boolean = false): List<CatalogueSource> =
+    private fun activeNetworkSources(
+        discovery: Boolean = false,
+        freshSourceFirst: Boolean = false,
+        maxSources: Int = SuggestionsConfig.MAX_ACTIVE_SOURCES,
+        freshSourceSeed: Int? = null,
+    ): List<CatalogueSource> =
         SuggestionSourceSelector.activeNetworkSources(
             sources = catalogueSourcesProvider(),
             selection = sourceSelection(),
             discovery = discovery,
+            maxSources = maxSources,
             freshSourceFirst = freshSourceFirst,
+            freshSourceSeed = freshSourceSeed,
         )
 
     private fun sourceSelection(): SuggestionSourceSelection =

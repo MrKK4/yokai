@@ -5,6 +5,7 @@ import eu.kanade.tachiyomi.source.LocalSource
 import eu.kanade.tachiyomi.source.model.FilterList
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Test
 
 class SuggestionSourceSelectorTest {
@@ -88,6 +89,65 @@ class SuggestionSourceSelectorTest {
 
         // 4 and 5 are unused (fresh), then 1,2,3 (last fetched) by name
         assertEquals(listOf(4L, 5L, 1L, 2L, 3L), selected.map { it.id })
+    }
+
+    @Test
+    fun `capped cohort rotates away from last fetched sources`() {
+        val sources = (1L..6L).map { id -> source(id, "s$id", "en") }
+
+        val selected = SuggestionSourceSelector.activeNetworkSources(
+            sources = sources,
+            selection = selection(lastFetchedSourceIds = setOf("1", "2", "3")),
+            discovery = false,
+            maxSources = 3,
+            freshSourceFirst = true,
+        )
+
+        assertEquals(listOf(4L, 5L, 6L), selected.map { it.id })
+    }
+
+    @Test
+    fun `capped cohort keeps pinned sources before fresh rotation`() {
+        val sources = (1L..6L).map { id -> source(id, "s$id", "en") }
+
+        val selected = SuggestionSourceSelector.activeNetworkSources(
+            sources = sources,
+            selection = selection(
+                pinnedSourceIds = setOf("2"),
+                lastFetchedSourceIds = setOf("1", "2", "3"),
+            ),
+            discovery = false,
+            maxSources = 3,
+            freshSourceFirst = true,
+        )
+
+        assertEquals(listOf(2L, 4L, 5L), selected.map { it.id })
+    }
+
+    @Test
+    fun `fresh source seed randomizes capped fresh cohort`() {
+        val sources = (1L..10L).map { id -> source(id, "s$id", "en") }
+
+        val firstRefresh = SuggestionSourceSelector.activeNetworkSources(
+            sources = sources,
+            selection = selection(),
+            discovery = false,
+            maxSources = 4,
+            freshSourceFirst = true,
+            freshSourceSeed = 1,
+        ).map { it.id }
+        val secondRefresh = SuggestionSourceSelector.activeNetworkSources(
+            sources = sources,
+            selection = selection(),
+            discovery = false,
+            maxSources = 4,
+            freshSourceFirst = true,
+            freshSourceSeed = 2,
+        ).map { it.id }
+
+        assertEquals(4, firstRefresh.size)
+        assertEquals(4, secondRefresh.size)
+        assertNotEquals(firstRefresh, secondRefresh)
     }
 
     @Test

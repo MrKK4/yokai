@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.api.Test
 
@@ -99,7 +100,7 @@ class CandidateRetrieverColdStartTest {
     }
 
     @Test
-    fun `manual refresh tries fresh sources before recently displayed sources`() = runBlocking {
+    fun `manual refresh uses a capped fresh source cohort before recently displayed sources`() = runBlocking {
         val sources = (1L..18L)
             .map { id -> FakeColdStartSource(id = id, titlePrefix = "Source$id", resultCount = 3) }
             .toTypedArray()
@@ -111,9 +112,13 @@ class CandidateRetrieverColdStartTest {
         val results = retriever.retrieve(
             sections = listOf(normalDiscoverySection()),
             maxPerSourceFetch = 2,
+            sourceCohortSeed = 1,
         )
 
-        assertEquals((9L..16L).toSet(), results.single().candidates.map { it.sourceId }.toSet())
+        val selectedSourceIds = results.single().candidates.map { it.sourceId }.toSet()
+        assertEquals(SuggestionsConfig.MAIN_FEED_SOURCE_COHORT_SIZE, selectedSourceIds.size)
+        assertEquals(8, results.single().candidates.size)
+        assertTrue(selectedSourceIds.all { it !in 1L..8L })
     }
 
     @Test
