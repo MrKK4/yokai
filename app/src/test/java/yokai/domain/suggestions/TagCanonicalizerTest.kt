@@ -13,6 +13,8 @@ class TagCanonicalizerTest {
 
         assertEquals("mother", canonicalizer.canonicalize("  Mother ♀ 1.5M ").canonicalKey)
         assertEquals("milf", canonicalizer.canonicalize("Milfs").canonicalKey)
+        assertEquals("milf", canonicalizer.canonicalize("Milf's").canonicalKey)
+        assertEquals("milf", canonicalizer.canonicalize("MILF’s").canonicalKey)
         assertEquals("science fiction", canonicalizer.canonicalize("ＳＣＩ－ＦＩ").canonicalKey)
         assertEquals("slice of life", canonicalizer.canonicalize("[Slice-of-Life]").canonicalKey)
     }

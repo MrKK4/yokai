@@ -165,7 +165,16 @@ class SuggestionRanker(
             } else {
                 maxResults
             }
-            val selected = bestByTitle.values.roundRobinBySource(effectiveMax)
+            val maxPerSource = if (
+                !coldStartDiscovery &&
+                maxResults <= SuggestionsConfig.MAX_RESULTS_PER_SECTION &&
+                result.sourcePoolSize > 1
+            ) {
+                SuggestionsConfig.MAIN_FEED_MAX_RESULTS_PER_SOURCE
+            } else {
+                null
+            }
+            val selected = bestByTitle.values.roundRobinBySource(effectiveMax, maxPerSource)
             selected
                 .map { it.toSuggestedManga() }
         }
@@ -238,10 +247,14 @@ class SuggestionRanker(
             )
     }
 
-    private fun Collection<ScoredCandidate>.roundRobinBySource(maxResults: Int): List<ScoredCandidate> {
+    private fun Collection<ScoredCandidate>.roundRobinBySource(
+        maxResults: Int,
+        maxPerSource: Int? = null,
+    ): List<ScoredCandidate> {
         return SourceDiversity.roundRobinBySource(
             items = this,
             maxResults = maxResults,
+            maxPerSource = maxPerSource,
             sourceId = { it.candidate.sourceId },
             sourceIndex = { it.candidate.sourceIndex },
             score = { it.score },

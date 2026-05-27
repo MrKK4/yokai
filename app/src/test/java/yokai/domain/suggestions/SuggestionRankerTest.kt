@@ -159,9 +159,48 @@ class SuggestionRankerTest {
         )
 
         assertEquals(
-            listOf(1L, 2L, 1L, 2L, 1L, 1L, 1L, 1L, 1L),
+            listOf(1L, 2L, 1L, 2L, 1L),
             ranked.map { it.source },
         )
+    }
+
+    @Test
+    fun `ranker limits single source dominance when cohort had multiple sources`() = runBlocking {
+        val tagRepository = FakeTagProfileRepository()
+        val ranker = SuggestionRanker(
+            mangaRepository = mockk<MangaRepository>(relaxed = true),
+            tagCanonicalizer = TagCanonicalizer(tagRepository),
+            tagProfileRepository = tagRepository,
+            debugLog = SuggestionsDebugLog(),
+            random = ZeroRandom,
+        )
+
+        val section = section()
+        val candidates = List(12) { position ->
+            candidate(section = section, sourceId = 1L, sourceIndex = 0, position = position)
+        }
+
+        val ranked = ranker.rankWithContext(
+            retrievalResults = listOf(
+                CandidateRetrievalResult(
+                    section = section,
+                    candidates = candidates,
+                    sourcePoolSize = SuggestionsConfig.MAIN_FEED_SOURCE_COHORT_SIZE,
+                ),
+            ),
+            context = RankingContext(
+                localKeys = emptySet(),
+                localTitles = emptySet(),
+                profiles = mapOf("action" to profile("action", recent = 10.0)),
+                blacklistedTags = emptySet(),
+            ),
+            globalSeenKeys = emptySet(),
+            sectionSeenKeys = emptyMap(),
+            sessionContext = SessionContext(),
+        )
+
+        assertEquals(SuggestionsConfig.MAIN_FEED_MAX_RESULTS_PER_SOURCE, ranked.size)
+        assertEquals(setOf(1L), ranked.map { it.source }.toSet())
     }
 
     private fun section(): PlannedSection =

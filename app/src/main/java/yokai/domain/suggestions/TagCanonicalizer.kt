@@ -52,6 +52,7 @@ class TagCanonicalizer(
             .replace(DECORATIVE_SYMBOLS, "")
             .replace(COUNT_OR_PAREN, " ")
             .replace(INTERNAL_PUNCTUATION, " ")
+            .replace(APOSTROPHES, "")
             .trim(PUNCTUATION_TO_TRIM::contains)
             .replace(WHITESPACE, " ")
             .trim()
@@ -107,6 +108,7 @@ class TagCanonicalizer(
             "(?i)(?<=\\S)\\s*[\\[(].*?[\\])]\\s*$|\\s+\\d+(?:[.,]\\d+)?[kKmMbB]?\\s*$",
         )
         private val INTERNAL_PUNCTUATION = Regex("[/_]")
+        private val APOSTROPHES = Regex("[`'’]")
         private val PUNCTUATION_TO_TRIM = setOf(
             '-',
             '_',

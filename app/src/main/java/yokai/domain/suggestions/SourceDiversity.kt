@@ -4,6 +4,7 @@ internal object SourceDiversity {
     fun <T> roundRobinBySource(
         items: Collection<T>,
         maxResults: Int,
+        maxPerSource: Int? = null,
         sourceId: (T) -> Long,
         sourceIndex: (T) -> Int,
         score: (T) -> Double,
@@ -16,6 +17,7 @@ internal object SourceDiversity {
             .map { sourceItems ->
                 sourceItems
                     .sortedByDescending(score)
+                    .let { items -> maxPerSource?.let(items::take) ?: items }
                     .toMutableList()
             }
             .sortedWith(

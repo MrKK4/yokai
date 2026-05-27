@@ -301,6 +301,7 @@ class SuggestionsPresenter(
                 if (feedGeneration.get() != activeFlowGeneration) return@onEach
                 if (suggestedList.isNotEmpty() && !storedResultsMatchCurrentVersion()) return@onEach
                 if (shouldKeepCurrentSuggestions(suggestedList)) return@onEach
+                if (shouldDeferDbEmissionDuringForegroundRefresh(suggestedList)) return@onEach
                 // During a rebuild (V1/V2 toggle, sort switch, filter change), skip empty
                 // emissions so old suggestions stay visible until the first batch inserts.
                 if (isRebuilding && suggestedList.isEmpty() && _state.value.suggestions.isNotEmpty()) return@onEach
@@ -1442,7 +1443,11 @@ class SuggestionsPresenter(
             "Soft refresh - re-ranking locally, target=${refreshTargetSectionKey ?: "stale-sections"}",
         )
 
-        // Step 0: Trim the in-memory shown-set down to the persistent 24h window.
+        // Step 0: Trim the in-memory shown-set down to the persistent 24h window
+        // plus whatever is currently visible. Visible cards must not be eligible for
+        // the replacement fetch in the same pull gesture; if the source returns a
+        // static front page, this is what forces a real swap instead of re-showing
+        // the same source+url.
         // `seenMangaUrls` accumulates after every section commit but is only
         // wiped on hard refresh, so a session of repeated soft refreshes used to
         // poison the candidate pool — sources had no fresh manga left to surface
@@ -1451,8 +1456,16 @@ class SuggestionsPresenter(
         // (no manga shown twice within 24h) while letting older titles resurface.
         val recentShownCutoff = now - RECENT_HISTORY_SEED_MILLIS
         val recentShownKeys = shownHistoryRepository.getKeysShownAfter(recentShownCutoff)
+        val visibleSuggestionKeys = _state.value.suggestions.values
+            .flatten()
+            .map { manga -> "${manga.source}:${manga.url}" }
+        val visibleSuggestionSourceUrls = _state.value.suggestions.values
+            .flatten()
+            .map { manga -> manga.source to manga.url }
         seenMangaUrls.clear()
         seenMangaUrls.addAll(recentShownKeys)
+        seenMangaUrls.addAll(visibleSuggestionKeys)
+        shownHistoryRepository.insertAll(visibleSuggestionSourceUrls)
 
         // Step 1: Rebuild profile from local DB (no network call).
         interestProfileBuilder.buildProfile(now)
@@ -1521,14 +1534,6 @@ class SuggestionsPresenter(
             .filterValues { it.isNotEmpty() }
             .keys
         val previouslyLoadedCount = previouslyLoadedKeys.size
-
-        // NOTE: we intentionally do NOT add the currently-shown manga to `seenMangaUrls`
-        // here. They already landed in the set when their original section committed
-        // (see `appendSectionResult`), and adding them again would shrink the candidate
-        // pool below the per-section target — empirically dropping sections from 9 to
-        // ~6 results. Variety between refreshes already comes from the randomised page
-        // offset (`currentPageOffset = Random.nextInt(1, 8)`) plus the persistent
-        // seen-log TTL.
 
         val refreshTopN = when {
             previouslyLoadedCount > 0 -> plannedSections.take(previouslyLoadedCount)
@@ -2277,6 +2282,17 @@ class SuggestionsPresenter(
         return selectedSectionKey != null &&
             isBusy &&
             suggestedList.none { it.sectionKey == selectedSectionKey }
+    }
+
+    private fun shouldDeferDbEmissionDuringForegroundRefresh(suggestedList: List<SuggestedManga>): Boolean {
+        if (!isForegroundRefreshing.get()) return false
+        if (_state.value.suggestions.isEmpty()) return false
+        if (suggestedList.isEmpty()) return true
+        // Foreground refreshes render intentionally through renderSectionPreview()
+        // and appendSectionResult()/renderStoredSuggestions(). Letting the DB flow
+        // mirror every intermediate delete/replace makes cards pop in/out while the
+        // same refresh is still assembling final sections.
+        return true
     }
 
     private suspend fun renderStoredSuggestions(warmSession: Boolean = false) {

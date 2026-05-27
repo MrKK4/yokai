@@ -37,6 +37,11 @@ class SuggestionsDebugLog(
         }
         entries.addLast(SuggestionsLogEntry(timestamp, type, message))
         _entriesFlow.value = entries.toList()
+        try {
+            android.util.Log.d("SuggestionsLog", "[$type] $message")
+        } catch (_: RuntimeException) {
+            // JVM unit tests use Android stubs where Log.d throws.
+        }
     }
 
     @Synchronized

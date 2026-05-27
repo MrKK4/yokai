@@ -35,6 +35,7 @@ data class CandidateRetrievalResult(
     val section: PlannedSection,
     val candidates: List<SuggestionCandidate>,
     val isSectionComplete: Boolean = false,
+    val sourcePoolSize: Int = candidates.map { it.sourceId }.toSet().size,
 )
 
 class CandidateRetriever(
@@ -76,7 +77,7 @@ class CandidateRetriever(
             val requestGate = Semaphore(SuggestionsConfig.MAX_CONCURRENT_SOURCE_REQUESTS)
             sections.map { section ->
                 async {
-                    val candidates = withTimeoutOrNull(sectionTimeoutMs) {
+                    val result = withTimeoutOrNull(sectionTimeoutMs) {
                         retrieveSection(
                             section = section,
                             pageOffset = pageOffset,
@@ -86,11 +87,11 @@ class CandidateRetriever(
                             sectionSeenKeys = sectionSeenKeys[section.sectionKey].orEmpty(),
                             sourceCohortSeed = sourceCohortSeed,
                         )
-                    }.orEmpty()
-                    CandidateRetrievalResult(
+                    } ?: CandidateRetrievalResult(
                         section = section,
-                        candidates = candidates,
+                        candidates = emptyList(),
                     )
+                    result
                 }
             }.awaitAll()
         }
@@ -153,12 +154,13 @@ class CandidateRetriever(
                         )
                     }
                     // complete == null means section timed out — emit partial results as final
-                    val finalCandidates = complete ?: partial.distinctBy { it.sourceId to it.manga.url }
+                    val finalCandidates = complete?.candidates ?: partial.distinctBy { it.sourceId to it.manga.url }
                     results.send(
                         CandidateRetrievalResult(
                             section = section,
                             candidates = finalCandidates,
                             isSectionComplete = true,
+                            sourcePoolSize = complete?.sourcePoolSize ?: finalCandidates.map { it.sourceId }.toSet().size,
                         ),
                     )
 
@@ -191,7 +193,7 @@ class CandidateRetriever(
         sectionSeenKeys: Set<String> = emptySet(),
         sourceCohortSeed: Int,
         onSourceComplete: (suspend (List<SuggestionCandidate>) -> Unit)? = null,
-    ): List<SuggestionCandidate> {
+    ): CandidateRetrievalResult {
         val blockedMangaKeys = globalSeenKeys + sectionSeenKeys
         if (section.isColdStartDiscovery()) {
             return retrieveColdStartDiscoverySection(section, requestGate, blockedMangaKeys, sourceCohortSeed, onSourceComplete)
@@ -201,7 +203,9 @@ class CandidateRetriever(
             discovery = section.type == SectionType.DISCOVERY,
             sourceCohortSeed = sourceCohortSeed,
         )
-        if (sources.isEmpty()) return emptyList()
+        if (sources.isEmpty()) {
+            return CandidateRetrievalResult(section = section, candidates = emptyList(), sourcePoolSize = 0)
+        }
 
         suspend fun fetchPageProgressive(
             page: Int,
@@ -322,9 +326,13 @@ class CandidateRetriever(
             candidates.addAll(page2Candidates)
         }
 
-        return candidates
-            .distinctBy { it.sourceId to it.manga.url }
-            .take(SuggestionsConfig.MAX_CANDIDATES_PER_SECTION)
+        return CandidateRetrievalResult(
+            section = section,
+            candidates = candidates
+                .distinctBy { it.sourceId to it.manga.url }
+                .take(SuggestionsConfig.MAX_CANDIDATES_PER_SECTION),
+            sourcePoolSize = sources.size,
+        )
     }
 
     private suspend fun retrieveColdStartDiscoverySection(
@@ -333,7 +341,7 @@ class CandidateRetriever(
         blockedMangaKeys: Set<String>,
         sourceCohortSeed: Int,
         onSourceComplete: (suspend (List<SuggestionCandidate>) -> Unit)?,
-    ): List<SuggestionCandidate> {
+    ): CandidateRetrievalResult {
         var sources = activeSources(discovery = true, sourceCohortSeed = sourceCohortSeed)
         if (sources.isEmpty()) {
             // SourceManager's IO coroutine may not have finished populating the map yet.
@@ -345,7 +353,9 @@ class CandidateRetriever(
             sources = activeSources(discovery = true, sourceCohortSeed = sourceCohortSeed)
             debugLog.add(LogType.SECTION_DROPPED, "Cold-start: after wait — ${sources.size} sources available")
         }
-        if (sources.isEmpty()) return emptyList()
+        if (sources.isEmpty()) {
+            return CandidateRetrievalResult(section = section, candidates = emptyList(), sourcePoolSize = 0)
+        }
 
         val countBySource = ConcurrentHashMap<Long, AtomicInteger>()
         val candidates = mutableListOf<SuggestionCandidate>()
@@ -394,10 +404,14 @@ class CandidateRetriever(
             }
         }
 
-        return candidates
-            .distinctBy { it.sourceId to it.manga.url }
-            .shuffled()
-            .take(SuggestionsConfig.COLD_START_MAX_CANDIDATES)
+        return CandidateRetrievalResult(
+            section = section,
+            candidates = candidates
+                .distinctBy { it.sourceId to it.manga.url }
+                .shuffled()
+                .take(SuggestionsConfig.COLD_START_MAX_CANDIDATES),
+            sourcePoolSize = sources.size,
+        )
     }
 
     private suspend fun fetchDiscoverySource(
