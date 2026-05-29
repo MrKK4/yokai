@@ -24,6 +24,16 @@ object SuggestionsConfig {
     // Main feed refreshes use a small rotating source cohort for faster first paint.
     // Expanded "view more" sheets keep using the full active source pool.
     const val MAIN_FEED_SOURCE_COHORT_SIZE = 4
+    // Tag sections need EVERY active source, not a narrow cohort. Phase A
+    // (filter-injection) is dead code for genre tags on every installed hentai source
+    // (sources only expose Sort/Status/Category checkboxes, never genres). Phase B
+    // (text search) returns 0 results for any source whose extension maps the query
+    // to /search/?key=… instead of /tag/<tag>/, AND that source has empty vocabulary
+    // on the first fetch. With a cohort of 4–8 out of 20+ installed sources, almost
+    // every tag section misses the sources that would have populated it. The request
+    // gate (MAX_CONCURRENT_SOURCE_REQUESTS=8) still throttles in-flight fetches; this
+    // just stops pre-filtering the pool. SECTION_TIMEOUT_MS bounds total wall time.
+    const val TAG_SECTION_SOURCE_COHORT_SIZE = Int.MAX_VALUE
     const val MAIN_FEED_MAX_RESULTS_PER_SOURCE =
         (MAX_RESULTS_PER_SECTION + MAIN_FEED_SOURCE_COHORT_SIZE - 1) / MAIN_FEED_SOURCE_COHORT_SIZE
     const val MAX_ACTIVE_SOURCES = Int.MAX_VALUE
@@ -32,6 +42,16 @@ object SuggestionsConfig {
     const val SECTION_TIMEOUT_MS = 22_000L
     const val MAX_CANDIDATES_PER_SECTION = 500
     const val MAX_PER_SOURCE_FETCH = 6
+    // Top-up walks deeper pages until the section fills or SECTION_TIMEOUT_MS expires.
+    // This matters for heavily-read popular tags: page 1/2 can be fully consumed by
+    // seen/history filters, while page 3+ still contains valid unseen manga.
+    const val TAG_NATIVE_DRY_PAGE_FALLBACK_THRESHOLD = 2
+    const val DRY_SEARCH_PAGE_TTL_MS = 6 * 60 * 60 * 1000L
+    // After this many consecutive failures (timeouts or non-transient throwables), a
+    // source is skipped at the start of each fetch instead of consuming
+    // SOURCE_REQUEST_TIMEOUT_MS again. Resets on any successful fetch. Process-lifetime
+    // only — re-evaluated when the app restarts.
+    const val SOURCE_COOLDOWN_FAILURE_THRESHOLD = 3
     const val MANUAL_REFRESH_MAX_PER_SOURCE_FETCH = 2
     const val EXPANDED_MAX_PER_SOURCE_FETCH = 5
     const val COLD_START_HISTORY_THRESHOLD = 12

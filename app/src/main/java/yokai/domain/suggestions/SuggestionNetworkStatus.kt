@@ -25,9 +25,13 @@ class TransientSuggestionNetworkException(
 
 fun Throwable.isTransientSuggestionNetworkFailure(isOnline: Boolean): Boolean {
     if (!isOnline) return true
+    // Per-host DNS failures (UnknownHostException, "unable to resolve host" IOException)
+    // are NOT transient — the device has working network, just THAT hostname returned no
+    // address (NXDOMAIN, ISP DNS filter, or extension's domain dead). Classifying as
+    // transient would propagate through the chunk's coroutineScope and cancel sibling
+    // source fetches in the same chunk, even though they could succeed.
     return causeChain().any { throwable ->
-        throwable is UnknownHostException ||
-            throwable is ConnectException ||
+        throwable is ConnectException ||
             throwable is NoRouteToHostException ||
             throwable is SocketException ||
             // SocketTimeoutException extends InterruptedIOException, not SocketException,
@@ -45,7 +49,6 @@ fun Throwable.isTransientSuggestionNetworkFailure(isOnline: Boolean): Boolean {
                             message.contains("network is unreachable") ||
                             message.contains("no route to host") ||
                             message.contains("software caused connection abort") ||
-                            message.contains("unable to resolve host") ||
                             message.contains("failed to connect")
                     }
                 )

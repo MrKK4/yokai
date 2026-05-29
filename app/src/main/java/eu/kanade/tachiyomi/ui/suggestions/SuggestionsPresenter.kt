@@ -145,6 +145,11 @@ internal fun sourceSortOrderForExpandableSection(
  *  expanded:foo      → Foo               (sheet header already has its own context)
  *  anything else     → raw key           (never silently blank)
  */
+private val SECTION_LABEL_EMOJI_PREFIXES = listOf("🔥", "🆕", "⭐", "📌", "🔍")
+
+private fun String.hasEmojiPrefix(): Boolean =
+    SECTION_LABEL_EMOJI_PREFIXES.any { startsWith(it) }
+
 internal fun sectionKeyToV1DisplayName(sectionKey: String): String {
     val (icon, tail) = when {
         sectionKey == "popular" -> "🔥 " to "popular"
@@ -1189,9 +1194,19 @@ class SuggestionsPresenter(
                     if (expandedSectionKey != sectionKey) {
                         it
                     } else {
+                        val hasResults = it.sheetResults.isNotEmpty()
                         it.copy(
                             sheetIsLoading = false,
-                            sheetError = context.getString(MR.strings.suggestions_expand_error),
+                            sheetHasMore = if (hasResults) {
+                                it.sheetHasMore || hasExpandedBufferedSuggestions()
+                            } else {
+                                false
+                            },
+                            sheetError = if (hasResults) {
+                                null
+                            } else {
+                                context.getString(MR.strings.suggestions_expand_error)
+                            },
                         )
                     }
                 }
@@ -1536,7 +1551,16 @@ class SuggestionsPresenter(
         val previouslyLoadedCount = previouslyLoadedKeys.size
 
         val refreshTopN = when {
-            previouslyLoadedCount > 0 -> plannedSections.take(previouslyLoadedCount)
+            previouslyLoadedCount > 0 -> {
+                val topLoadedSections = plannedSections.take(previouslyLoadedCount)
+                val targetSection = refreshTargetSectionKey
+                    ?.let { targetKey -> plannedSections.firstOrNull { it.sectionKey == targetKey } }
+                if (targetSection != null && topLoadedSections.none { it.sectionKey == targetSection.sectionKey }) {
+                    topLoadedSections + targetSection
+                } else {
+                    topLoadedSections
+                }
+            }
             // First-time refresh with nothing loaded yet falls back to whatever the
             // explicit target requested (visible / selected section), preserving the
             // old single-section behaviour for callers that pass a target key.
@@ -1900,7 +1924,15 @@ class SuggestionsPresenter(
         )
         val allLoaded = nextIndex >= plannedSections.size
         currentV2RefreshId = preferences.suggestionsTotalRefreshCount().get().toLong()
-        val displayNames = plannedSections.associate { it.sectionKey to it.displayReason }
+        // Persisted `display_reason` strings from an earlier app version may not carry
+        // the emoji prefix that SectionPlanner now uses ("⭐ MILF" / "🔥 Popular").
+        // Fall back to the freshly-synthesised label when the stored reason looks like
+        // the legacy form ("Because you …" / "Latest from your sources").
+        val displayNames = plannedSections.associate { section ->
+            val stored = section.displayReason
+            val refreshed = if (stored.hasEmojiPrefix()) stored else sectionKeyToV1DisplayName(section.sectionKey)
+            section.sectionKey to refreshed
+        }
         _state.update { it.copy(
             plannedSections = plannedSections,
             sectionDisplayNames = displayNames,
@@ -2022,11 +2054,22 @@ class SuggestionsPresenter(
             candidateRetriever.retrieveProgressively(
                 sections = sectionsToFetch,
                 pageOffset = pageOffset,
-                // Per-section randomised page so that two tag sections fetched in
-                // the same refresh do not land on the same "popular page N" subset.
-                // Caller-supplied `pageOffset` still anchors discovery for callers
-                // that bypass this lambda; here every section rolls its own.
-                pageOffsetFor = { Random.nextInt(1, 8) },
+                // Page strategy:
+                //  • DISCOVERY: rotate across pages 1–7 so back-to-back refreshes do not
+                //    keep returning the same "popular page 1" list.
+                //  • Tag sections: ALWAYS anchor at page 1. Two different tags already pull
+                //    distinct content, so randomisation gains nothing — but on the many
+                //    sources that resolve a tag query through text search, pages 4+ are
+                //    routinely empty and the section ends up thin. Page 1 is the only page
+                //    every source is guaranteed to populate; the seen-log filter + the
+                //    in-`retrieveSection` page+1 backstop already handle de-duplication
+                //    across refreshes.
+                pageOffsetFor = { section ->
+                    when (section.type) {
+                        SectionType.DISCOVERY -> Random.nextInt(1, 8)
+                        else -> 1
+                    }
+                },
                 globalSeenKeys = seenMangaUrls.toSet(),
                 sectionSeenKeys = allSectionSeenKeys,
             ) { result ->
@@ -2145,8 +2188,15 @@ class SuggestionsPresenter(
 
         sectionLastFetchedAt[result.section.sectionKey] = now
 
-        var topUpPage = pageOffset + 2
+        var topUpPage = if (result.section.type == SectionType.DISCOVERY) {
+            pageOffset.coerceAtLeast(1) + 1
+        } else {
+            2
+        }
         val topUpDeadline = now + SuggestionsConfig.SECTION_TIMEOUT_MS
+        // Walk deeper pages until the section fills or the timeout expires. Do not
+        // replay page 1; CandidateRetriever's page-specific recovery path keeps each
+        // request on the page requested here.
         while (
             suggestions.size < SuggestionsConfig.MAX_RESULTS_PER_SECTION &&
             System.currentTimeMillis() < topUpDeadline &&
@@ -2160,6 +2210,7 @@ class SuggestionsPresenter(
                 globalSeenKeys = seenMangaUrls.toSet(),
                 sectionSeenKeys = sectionSeenKeys,
                 sectionTimeoutMs = remainingMs,
+                allowPageBackstop = false,
             ).singleOrNull() ?: break
             val verifiedTopUp = verifyCandidateResult(topUpResult, rankingContext)
             val combinedCandidates = (resultToRank.candidates + verifiedTopUp.candidates)

@@ -17,7 +17,6 @@ internal object SourceDiversity {
             .map { sourceItems ->
                 sourceItems
                     .sortedByDescending(score)
-                    .let { items -> maxPerSource?.let(items::take) ?: items }
                     .toMutableList()
             }
             .sortedWith(
@@ -29,16 +28,29 @@ internal object SourceDiversity {
             )
 
         val selected = mutableListOf<T>()
-        while (selected.size < maxResults) {
+        val productiveSourceCount = sourceBuckets.size
+        fun consumeRoundRobin(limitPerSource: Int?) {
+            val countsBySource = mutableMapOf<Long, Int>()
             var addedInPass = false
-            for (bucket in sourceBuckets) {
-                if (selected.size >= maxResults) break
-                if (bucket.isNotEmpty()) {
+            while (selected.size < maxResults) {
+                addedInPass = false
+                for (bucket in sourceBuckets) {
+                    if (selected.size >= maxResults) break
+                    val next = bucket.firstOrNull() ?: continue
+                    val nextSource = sourceId(next)
+                    val currentCount = countsBySource.getOrDefault(nextSource, 0)
+                    if (limitPerSource != null && currentCount >= limitPerSource) continue
                     selected += bucket.removeAt(0)
+                    countsBySource[nextSource] = currentCount + 1
                     addedInPass = true
                 }
+                if (!addedInPass) break
             }
-            if (!addedInPass) break
+        }
+
+        consumeRoundRobin(maxPerSource)
+        if (selected.size < maxResults && maxPerSource != null && productiveSourceCount > 1) {
+            consumeRoundRobin(limitPerSource = null)
         }
         return selected
     }

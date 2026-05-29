@@ -4,6 +4,7 @@ import eu.kanade.tachiyomi.core.preference.Preference
 import eu.kanade.tachiyomi.data.preference.PreferencesHelper
 import eu.kanade.tachiyomi.source.CatalogueSource
 import eu.kanade.tachiyomi.source.SourceManager
+import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.SManga
@@ -134,6 +135,90 @@ class CandidateRetrieverColdStartTest {
         }
     }
 
+    @Test
+    fun `search recovery page only asks requested page`() = runBlocking {
+        val source = FakeSearchSource(id = 20L, pageOneCount = 3, otherPageCount = 0)
+        val retriever = retrieverWith(source)
+
+        retriever.retrieve(
+            sections = listOf(tagSection()),
+            pageOffset = 2,
+            allowPageBackstop = false,
+        )
+
+        assertTrue(source.searchPages.isNotEmpty())
+        assertTrue(source.searchPages.all { it == 2 }, "pages=${source.searchPages}")
+    }
+
+    @Test
+    fun `malformed source filter list falls back to plain search`() = runBlocking {
+        val source = FakeSearchSource(
+            id = 21L,
+            pageOneCount = 4,
+            otherPageCount = 0,
+            filterThrowable = IllegalStateException("Malformed tag JSON"),
+        )
+        val retriever = retrieverWith(source)
+
+        val results = retriever.retrieve(
+            sections = listOf(tagSection()),
+            allowPageBackstop = false,
+        )
+
+        assertEquals(4, results.single().candidates.size)
+        assertEquals(listOf(1), source.searchPages)
+    }
+
+    @Test
+    fun `dry native tag pages switch source to text fallback page one`() = runBlocking {
+        val source = NativeThenTextSearchSource(id = 22L)
+        val retriever = retrieverWith(source)
+
+        retriever.retrieve(
+            sections = listOf(tagSection()),
+            pageOffset = 1,
+            allowPageBackstop = false,
+        )
+        val fallbackResults = retriever.retrieve(
+            sections = listOf(tagSection()),
+            pageOffset = 2,
+            allowPageBackstop = false,
+        )
+
+        assertEquals(
+            listOf("" to 1, "" to 2, "milf" to 1),
+            source.searchCalls,
+        )
+        assertEquals(4, fallbackResults.single().candidates.size)
+    }
+
+    @Test
+    fun `dry page memory never skips native page one`() = runBlocking {
+        val source = NativeThenTextSearchSource(id = 23L)
+        val retriever = retrieverWith(source)
+
+        retriever.retrieve(
+            sections = listOf(tagSection()),
+            pageOffset = 1,
+            allowPageBackstop = false,
+        )
+        retriever.retrieve(
+            sections = listOf(tagSection()),
+            pageOffset = 2,
+            allowPageBackstop = false,
+        )
+
+        val callCountBeforePageOneRetry = source.searchCalls.size
+        retriever.retrieve(
+            sections = listOf(tagSection()),
+            pageOffset = 1,
+            allowPageBackstop = false,
+        )
+
+        assertEquals("" to 1, source.searchCalls[callCountBeforePageOneRetry])
+    }
+
+
     private fun retrieverWith(
         vararg sources: CatalogueSource,
         lastFetchedSourceIds: Set<String> = emptySet(),
@@ -176,6 +261,16 @@ class CandidateRetrieverColdStartTest {
             canonicalTag = null,
             displayReason = "Popular from your sources",
             searchTerms = emptyList(),
+            sortOrder = SuggestionSortOrder.Popular,
+        )
+
+    private fun tagSection(): PlannedSection =
+        PlannedSection(
+            sectionKey = "tag:milf",
+            type = SectionType.MANAGED_TAG,
+            canonicalTag = "milf",
+            displayReason = "Milf",
+            searchTerms = listOf("milf"),
             sortOrder = SuggestionSortOrder.Popular,
         )
 }
@@ -226,6 +321,71 @@ private class ThrowingColdStartSource(
         getPopularManga(page)
 
     override fun getFilterList(): FilterList = FilterList()
+}
+
+private class FakeSearchSource(
+    override val id: Long,
+    private val pageOneCount: Int,
+    private val otherPageCount: Int,
+    private val filterThrowable: Throwable? = null,
+) : CatalogueSource {
+    val searchPages = mutableListOf<Int>()
+
+    override val name: String = "Search $id"
+    override val lang: String = "en"
+    override val supportsLatest: Boolean = true
+
+    override suspend fun getSearchManga(page: Int, query: String, filters: FilterList): MangasPage {
+        searchPages += page
+        val count = if (page == 1) pageOneCount else otherPageCount
+        return MangasPage(
+            (0 until count).map { index ->
+                SManga.create().apply {
+                    url = "/$id/search/$page/$index"
+                    title = "Search $page-$index"
+                    initialized = true
+                }
+            },
+            hasNextPage = true,
+        )
+    }
+
+    override fun getFilterList(): FilterList {
+        filterThrowable?.let { throw it }
+        return FilterList()
+    }
+}
+
+private class NativeThenTextSearchSource(
+    override val id: Long,
+) : CatalogueSource {
+    val searchCalls = mutableListOf<Pair<String, Int>>()
+
+    override val name: String = "Native Then Text $id"
+    override val lang: String = "en"
+    override val supportsLatest: Boolean = true
+
+    override suspend fun getSearchManga(page: Int, query: String, filters: FilterList): MangasPage {
+        searchCalls += query to page
+        val count = when {
+            query.isBlank() -> 0
+            query == "milf" && page == 1 -> 4
+            else -> 0
+        }
+        return MangasPage(
+            (0 until count).map { index ->
+                SManga.create().apply {
+                    url = "/$id/$query/$page/$index"
+                    title = "$query $page-$index"
+                    initialized = true
+                }
+            },
+            hasNextPage = true,
+        )
+    }
+
+    override fun getFilterList(): FilterList =
+        FilterList(object : Filter.Text("Tags") {})
 }
 
 private class CandidateRetrieverPreference<T>(initialValue: T) : Preference<T> {

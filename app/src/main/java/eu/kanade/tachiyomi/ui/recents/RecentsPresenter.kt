@@ -475,6 +475,7 @@ class RecentsPresenter(
             ) {
                 val accumulatedPairs = recentItems
                     .filter { it.historyBucket == null && it.mch.manga.id != null }
+                    .distinctBy { it.mch.manga.id to it.mch.chapter.id }
                     .map { it.mch to it.chapter }
                 recentItems = buildHistoryBucketItems(accumulatedPairs)
             }
@@ -493,8 +494,14 @@ class RecentsPresenter(
         pairs: List<Pair<MangaChapterHistory, Chapter>>,
     ): List<RecentMangaItem> {
         val collapsedBuckets = preferences.collapsedHistoryBuckets().get()
-        val byBucket = pairs.groupBy { HistoryBucket.fromLastRead(it.first.history.last_read) }
+        // Dedupe by (mangaId, chapterId) before grouping. Defensive: in observed bugs
+        // pagination or queueState collectLatest occasionally re-emitted the same pair
+        // and bucket headers ended up rendered twice in a row.
+        val dedupedPairs = pairs.distinctBy { it.first.manga.id to it.first.chapter.id }
+        val byBucket = dedupedPairs.groupBy { HistoryBucket.fromLastRead(it.first.history.last_read) }
+        val seenBuckets = mutableSetOf<HistoryBucket>()
         return HistoryBucket.entries.flatMap { bucket ->
+            if (!seenBuckets.add(bucket)) return@flatMap emptyList()
             val bucketPairs = byBucket[bucket].orEmpty()
             if (bucketPairs.isEmpty() && bucket.id !in collapsedBuckets) return@flatMap emptyList()
             buildList {

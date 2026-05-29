@@ -20,6 +20,7 @@ enum class LogType {
     PROFILE_UPDATE,
     REFRESH_MODE,
     SOURCE_CAP_HIT,
+    SOURCE_RESULT,
 }
 
 class SuggestionsDebugLog(

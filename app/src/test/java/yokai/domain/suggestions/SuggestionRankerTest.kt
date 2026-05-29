@@ -158,8 +158,9 @@ class SuggestionRankerTest {
             sessionContext = SessionContext(),
         )
 
+        assertEquals(9, ranked.size)
         assertEquals(
-            listOf(1L, 2L, 1L, 2L, 1L),
+            listOf(1L, 2L, 1L, 2L, 1L, 1L, 1L, 1L, 1L),
             ranked.map { it.source },
         )
     }

@@ -30,7 +30,7 @@ class SuggestionMetadataVerifierTest {
     }
 
     @Test
-    fun `detail failure skips unknown candidate while blacklist is active`() = runBlocking {
+    fun `detail failure keeps unknown candidate while blacklist is active`() = runBlocking {
         val source = DetailSource(
             id = 2L,
             detailGenres = null,
@@ -44,7 +44,7 @@ class SuggestionMetadataVerifierTest {
             blacklistedTags = blacklist,
         )
 
-        assertEquals(emptyList<SuggestedManga>(), filtered)
+        assertEquals(listOf(2L to "/unknown"), filtered.map { it.source to it.url })
         assertEquals(1, source.detailCalls)
     }
 

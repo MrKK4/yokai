@@ -26,6 +26,7 @@ object TagRegistry {
             exact = setOf(
                 "romcom",
                 "rom-com",
+                "rom com",
                 "romantic comedy",
                 "love story",
                 "love stories",
@@ -178,8 +179,11 @@ object TagRegistry {
         tag(
             "milf",
             "MILF",
-            exact = setOf("milfs", "milves", "m.i.l.f", "m.i.l.f."),
-            regexes = listOf("""^m\.?i\.?l\.?f\.?$"""),
+            // "m.i.l.f" is collapsed to "m i l f" once TagCanonicalizer replaces internal
+            // punctuation; keep both forms in the exact set + a permissive regex so the
+            // lookup hits no matter which punctuation a source uses.
+            exact = setOf("milfs", "milves", "m.i.l.f", "m.i.l.f.", "m i l f"),
+            regexes = listOf("""^m[.\s]?i[.\s]?l[.\s]?f[.\s]?$"""),
         ),
         tag(
             "office",
@@ -491,7 +495,12 @@ object TagRegistry {
         ),
         tag("sole female", "Sole Female", exact = setOf("1girl", "female solo")),
         tag("sole male", "Sole Male", exact = setOf("1boy", "male solo")),
-        tag("big breasts", "Big Breasts", exact = setOf("large breasts", "huge breasts", "oppai")),
+        tag(
+            "big breasts",
+            "Big Breasts",
+            exact = setOf("large breasts", "huge breasts", "oppai", "big breast", "bigbreasts"),
+            regexes = listOf("""^big[\s\-]?breasts?$"""),
+        ),
         tag("nakadashi", "Nakadashi", exact = setOf("creampie")),
         tag("blowjob", "Blowjob", exact = setOf("fellatio", "oral sex")),
         tag("anal", "Anal", exact = setOf("anal sex")),

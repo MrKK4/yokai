@@ -88,7 +88,7 @@ import yokai.domain.storage.StorageManager
 import yokai.i18n.MR
 import yokai.util.lang.getString
 
-open class App : Application(), DefaultLifecycleObserver, SingletonImageLoader.Factory {
+open class App : Application(), DefaultLifecycleObserver, SingletonImageLoader.Factory, org.koin.core.component.KoinComponent {
 
     val preferences: PreferencesHelper by injectLazy()
     val basePreferences: BasePreferences by injectLazy()
@@ -154,6 +154,20 @@ open class App : Application(), DefaultLifecycleObserver, SingletonImageLoader.F
 
         scope.launchIO {
             with(TachiyomiWidgetManager()) { this@App.init() }
+        }
+
+        // Pre-warm the source-filter audit on app start so the lazy genre fetch
+        // (5s delay) has time to complete before the user opens the Suggestions tab.
+        // Without this, the first refresh after cold start always hits an empty
+        // tag_alias and Phase A fails — sections render thin until the second pull.
+        scope.launchIO {
+            try {
+                val retriever: yokai.domain.suggestions.CandidateRetriever = getKoin().get()
+                retriever.prewarmSourceFilters()
+            } catch (_: Throwable) {
+                // Koin not ready or source manager empty — auditor will run lazily on
+                // first retrieve instead. No regression vs. the previous behavior.
+            }
         }
 
         // Show notification to disable Incognito Mode when it's enabled

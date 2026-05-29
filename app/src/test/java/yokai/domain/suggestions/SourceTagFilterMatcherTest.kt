@@ -5,6 +5,7 @@ import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Test
 
@@ -64,10 +65,35 @@ class SourceTagFilterMatcherTest {
         assertEquals(1, order.state)
     }
 
-    private fun sourceWithFilters(filters: FilterList): CatalogueSource =
+    @Test
+    fun `matcher skips broken hentaihand text tag resolver`() = runBlocking {
+        val repository = FakeTagProfileRepository()
+        val canonicalizer = TagCanonicalizer(repository)
+        val tagText = object : Filter.Text("Tags") {}
+        val source = sourceWithFilters(
+            filters = FilterList(tagText),
+            name = "HentaiHand",
+        )
+
+        val filters = source.tryIncludeTagFilter("big breasts", canonicalizer)
+
+        assertNull(filters)
+        assertEquals("", tagText.state)
+    }
+
+    @Test
+    fun `seed provides source specific tag terms`() {
+        assertEquals("big-breasts", SourceVocabularySeed.seedFor("nHentai.com")?.get("big breasts"))
+        assertEquals("m.i.l.f", SourceVocabularySeed.seedFor("Hentai Hand")?.get("milf"))
+    }
+
+    private fun sourceWithFilters(
+        filters: FilterList,
+        name: String = "Test Source",
+    ): CatalogueSource =
         object : CatalogueSource {
             override val id: Long = 1L
-            override val name: String = "Test Source"
+            override val name: String = name
             override val lang: String = "en"
             override val supportsLatest: Boolean = true
 

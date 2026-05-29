@@ -221,7 +221,7 @@ class SuggestionsWorker(
             if (sectionSuggestions.size >= SuggestionsConfig.MAX_RESULTS_PER_SECTION) continue
 
             var combinedResult = result
-            var nextPage = 3
+            var nextPage = 2
             val fillDeadline = System.currentTimeMillis() + SuggestionsConfig.SECTION_TIMEOUT_MS
             while (
                 sectionSuggestions.size < SuggestionsConfig.MAX_RESULTS_PER_SECTION &&
@@ -235,7 +235,12 @@ class SuggestionsWorker(
                     globalSeenKeys = globalSeenKeys,
                     sectionSeenKeys = sectionSeenKeys,
                     sectionTimeoutMs = remainingMs,
-                ).singleOrNull() ?: break
+                    allowPageBackstop = false,
+                ).singleOrNull()
+                if (extraResult == null) {
+                    nextPage++
+                    continue
+                }
                 val verifiedExtra = if (rankingContext.blacklistedTags.isEmpty()) {
                     extraResult
                 } else {

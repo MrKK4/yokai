@@ -46,14 +46,37 @@ internal suspend fun CatalogueSource.tryIncludeTagFilter(
                     filterInjected = true
                 }
             }
+            is Filter.Text -> {
+                // HentaiNexus and Madara's TagsFilter expose tag
+                // search as a free-text input. The filter name signals what the field
+                // is for ("Tags", "Genre", "Tag", "Genres" — case/punct-insensitive).
+                // Some HentaiHand-theme extensions resolve that text through a broken
+                // tag-ID API, so Suggestions must not inject their text tag filter.
+                if (filter.name.looksLikeTagInputField() && supportsTextTagFilterInjection()) {
+                    filter.state = canonicalTag
+                    filterInjected = true
+                }
+            }
             else -> {
-                // Header, Separator, Text, and Sort do not include a tag directly.
+                // Header, Separator, and Sort do not include a tag directly.
             }
         }
     }
 
     return if (filterInjected) filters else null
 }
+
+private fun String.looksLikeTagInputField(): Boolean {
+    val normalized = lowercase().replace(Regex("[^a-z]+"), "")
+    return normalized == "tag" || normalized == "tags" ||
+        normalized == "genre" || normalized == "genres"
+}
+
+private fun CatalogueSource.supportsTextTagFilterInjection(): Boolean =
+    normalizedSourceName() !in TEXT_TAG_FILTER_INJECTION_DENYLIST
+
+private fun CatalogueSource.normalizedSourceName(): String =
+    name.lowercase().replace(NON_ALNUM, "")
 
 internal fun FilterList.tryApplySuggestionSort(sortOrder: SuggestionSortOrder): Boolean {
     var sortApplied = false
@@ -136,6 +159,12 @@ private fun String.normalizedSortText(): String =
 
 private val SORT_PUNCTUATION = Regex("[^a-z0-9]+")
 private val WHITESPACE = Regex("\\s+")
+private val NON_ALNUM = Regex("[^a-z0-9]+")
+private val TEXT_TAG_FILTER_INJECTION_DENYLIST = setOf(
+    "hentaihand",
+    "nhentaicom",
+    "nhentai",
+)
 private val LATEST_SORT_TERMS = listOf(
     "latest",
     "last update",

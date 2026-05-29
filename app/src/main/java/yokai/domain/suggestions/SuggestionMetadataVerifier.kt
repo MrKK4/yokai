@@ -13,10 +13,12 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
- * Strict blacklist verifier for suggestions.
+ * Positive-match blacklist verifier for suggestions.
  *
  * Many catalogue search/list results do not include full genres. When a blacklist
- * is active, those weak rows must be detail-checked before they are shown.
+ * is active, weak rows are detail-checked, but missing/unverifiable metadata is not
+ * treated as a blacklist match. Otherwise one source with sparse metadata can lose
+ * its entire contribution even when it did not return blacklisted manga.
  */
 class SuggestionMetadataVerifier(
     private val sourceManager: SourceManager,
@@ -115,8 +117,8 @@ class SuggestionMetadataVerifier(
             }
             cachedTags.tags.isNotEmpty() -> true
             else -> {
-                debugLog.add(LogType.ITEM_FILTERED, "[$mangaKey] filtered - missing verifiable tags while blacklist active in $context")
-                false
+                debugLog.add(LogType.SORT_FALLBACK, "[$mangaKey] allowed - missing verifiable tags while blacklist active in $context")
+                true
             }
         }
     }
@@ -124,7 +126,7 @@ class SuggestionMetadataVerifier(
     private suspend fun fetchDetailTags(sourceId: Long, manga: SManga, context: String): CachedTags {
         val source = sourceManager.get(sourceId)
         if (source == null) {
-            debugLog.add(LogType.ITEM_FILTERED, "[${mangaKey(sourceId, manga.url)}] filtered - source missing for detail verification in $context")
+            debugLog.add(LogType.SORT_FALLBACK, "[${mangaKey(sourceId, manga.url)}] allowed - source missing for detail verification in $context")
             return CachedTags(emptySet())
         }
         val details = sourceResult(source, sourceId, manga)
@@ -143,8 +145,8 @@ class SuggestionMetadataVerifier(
             throw e
         } catch (e: Throwable) {
             debugLog.add(
-                LogType.ITEM_FILTERED,
-                "[${mangaKey(sourceId, manga.url)}] filtered - detail verification failed: ${e.javaClass.simpleName}: ${e.message}",
+                LogType.SORT_FALLBACK,
+                "[${mangaKey(sourceId, manga.url)}] allowed - detail verification failed: ${e.javaClass.simpleName}: ${e.message}",
             )
             null
         }

@@ -17,7 +17,11 @@ class TagCanonicalizer(
     suspend fun canonicalize(rawTag: String, sourceId: Long? = null): CanonicalTag {
         ensureDefaultAliases()
 
-        val displayName = rawTag.trim()
+        // Strip decorative symbols + count suffixes from the display copy so the UI
+        // does not render "MILF ◆" or "Action 1.5k" — but keep original casing and
+        // word punctuation so "Boys' Love" stays "Boys' Love" instead of collapsing
+        // to "boys love".
+        val displayName = cleanDisplayName(rawTag)
         val rawKey = normalizeToLookupKey(rawTag)
         if (rawKey.isBlank()) {
             return CanonicalTag(canonicalKey = "", displayName = displayName)
@@ -37,6 +41,14 @@ class TagCanonicalizer(
             displayName = bestDisplayName,
         )
     }
+
+    private fun cleanDisplayName(rawTag: String): String =
+        Normalizer.normalize(rawTag.trim(), Normalizer.Form.NFKC)
+            .replace(DECORATIVE_SYMBOLS, "")
+            .replace(COUNT_OR_PAREN, "")
+            .trim(PUNCTUATION_TO_TRIM::contains)
+            .replace(WHITESPACE, " ")
+            .trim()
 
     suspend fun canonicalizeToLookupKey(rawTag: String, sourceId: Long? = null): String {
         ensureDefaultAliases()
@@ -80,17 +92,26 @@ class TagCanonicalizer(
     }
 
     private suspend fun ensureDefaultAliases() {
-        if (defaultsSeeded.get()) return
-        repository.seedAliases(TagRegistry.defaultAliases.map { (rawKey, canonicalTag) ->
-            TagAlias(
-                rawTag = rawKey,
-                rawKey = rawKey,
-                canonicalTag = canonicalTag,
-                sourceId = null,
-                sourceKey = GLOBAL_SOURCE_KEY,
-            )
-        })
-        defaultsSeeded.set(true)
+        // compareAndSet so two concurrent canonicalize() callers do not both fire
+        // the seedAliases DB write. insertAlias uses INSERT OR REPLACE so duplicate
+        // writes would not corrupt data, but the doubled transaction is wasteful.
+        if (!defaultsSeeded.compareAndSet(false, true)) return
+        try {
+            repository.seedAliases(TagRegistry.defaultAliases.map { (rawKey, canonicalTag) ->
+                TagAlias(
+                    rawTag = rawKey,
+                    rawKey = rawKey,
+                    canonicalTag = canonicalTag,
+                    sourceId = null,
+                    sourceKey = GLOBAL_SOURCE_KEY,
+                )
+            })
+        } catch (e: Throwable) {
+            // Reset the flag so the next canonicalize() call re-attempts; otherwise a
+            // one-time DB error would permanently strand the registry without aliases.
+            defaultsSeeded.set(false)
+            throw e
+        }
     }
 
     private fun String.toDisplayTag(): String =
@@ -107,7 +128,11 @@ class TagCanonicalizer(
         private val COUNT_OR_PAREN = Regex(
             "(?i)(?<=\\S)\\s*[\\[(].*?[\\])]\\s*$|\\s+\\d+(?:[.,]\\d+)?[kKmMbB]?\\s*$",
         )
-        private val INTERNAL_PUNCTUATION = Regex("[/_]")
+        // Replace any internal punctuation that some sources use as a word separator
+        // ("big-breasts", "school:life", "sci-fi") with a space so the lookup key matches
+        // the canonical "space-separated" form. PUNCTUATION_TO_TRIM still strips these
+        // from the edges of the raw tag.
+        private val INTERNAL_PUNCTUATION = Regex("[/_\\-:;,.]")
         private val APOSTROPHES = Regex("[`'’]")
         private val PUNCTUATION_TO_TRIM = setOf(
             '-',

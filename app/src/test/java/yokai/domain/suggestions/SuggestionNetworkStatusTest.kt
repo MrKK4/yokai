@@ -22,8 +22,21 @@ class SuggestionNetworkStatusTest {
     }
 
     @Test
-    fun `unknown host is transient`() {
-        assertTrue(UnknownHostException("Unable to resolve host").isTransientSuggestionNetworkFailure(isOnline = true))
+    fun `unknown host while online is source-specific not transient`() {
+        // A single host failing DNS (NXDOMAIN, ISP filter, extension's domain dead)
+        // does not mean the device is offline. Classifying it as transient would
+        // propagate the exception through the chunk's coroutineScope and cancel
+        // sibling source fetches that could have succeeded. Treat UHE as source-
+        // specific while online so only that source contributes zero, not the entire
+        // chunk.
+        assertFalse(UnknownHostException("Unable to resolve host").isTransientSuggestionNetworkFailure(isOnline = true))
+    }
+
+    @Test
+    fun `unknown host while offline is transient`() {
+        // No network at all — every host will fail to resolve. Pause the section
+        // rather than mark every source as exhausted.
+        assertTrue(UnknownHostException("Unable to resolve host").isTransientSuggestionNetworkFailure(isOnline = false))
     }
 
     @Test

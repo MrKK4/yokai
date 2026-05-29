@@ -142,7 +142,7 @@ fun SuggestionsExpandedSheet(
                         }
                     }
                 }
-                error != null -> {
+                error != null && results.isEmpty() -> {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
