@@ -8,12 +8,14 @@ I am not releasing APKs. If you want to try it, build it yourself.
 
 ## What I Changed
 
-The main thing I worked on is the new Suggestions V2 page.
+The main thing I worked on is the Suggestions page. Both Suggestions V1 and V2 are my additions, with V2 being the newer experiment I have been actively improving.
 
 It is not perfect. There are still flaws, some sources are weird, and suggestions can still be thin or slow sometimes. But for my use case, it gets the job done.
 
-Current Suggestions page stuff:
+Suggestions page stuff:
 
+* Full custom Suggestions page.
+* Suggestions V1 and Suggestions V2 modes.
 * New Suggestions V2 page.
 * Pull-to-refresh to replace suggestion rows.
 * Popular and Latest sorting.
@@ -23,6 +25,8 @@ Current Suggestions page stuff:
 * Blacklisted tags are respected when the app can verify the manga tags.
 * Larger "View more" sheet for a section.
 * Progressive loading so results can appear sooner instead of waiting for every source.
+
+I also made changes to the Recents page, including extra categorizing/grouping changes to make it easier for me to browse what changed recently.
 
 If you use it and something feels broken, repetitive, slow, or just annoying, let me know.
 
