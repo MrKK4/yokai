@@ -90,9 +90,30 @@ class SourceDiversityTest {
         assertEquals(SuggestionsConfig.MAIN_FEED_MAX_RESULTS_PER_SOURCE, selected.size)
     }
 
+    @Test
+    fun `source selection order beats tiny score differences between sources`() {
+        val candidates = listOf(
+            Candidate(sourceId = 1L, sourceIndex = 0, position = 0, score = 1.0),
+            Candidate(sourceId = 2L, sourceIndex = 1, position = 0, score = 10.0),
+            Candidate(sourceId = 3L, sourceIndex = 2, position = 0, score = 20.0),
+        )
+
+        val selected = SourceDiversity.roundRobinBySource(
+            items = candidates,
+            maxResults = SuggestionsConfig.MAX_RESULTS_PER_SECTION,
+            maxPerSource = SuggestionsConfig.MAIN_FEED_MAX_RESULTS_PER_SOURCE,
+            sourceId = { it.sourceId },
+            sourceIndex = { it.sourceIndex },
+            score = { it.score },
+        )
+
+        assertEquals(listOf(1L, 2L, 3L), selected.map { it.sourceId })
+    }
+
     private data class Candidate(
         val sourceId: Long,
         val sourceIndex: Int,
         val position: Int,
+        val score: Double = -position.toDouble(),
     )
 }

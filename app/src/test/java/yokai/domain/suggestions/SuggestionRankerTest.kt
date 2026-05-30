@@ -204,6 +204,43 @@ class SuggestionRankerTest {
         assertEquals(setOf(1L), ranked.map { it.source }.toSet())
     }
 
+    @Test
+    fun `ranker prefers native tag results before text fallback results`() = runBlocking {
+        val tagRepository = FakeTagProfileRepository()
+        val ranker = SuggestionRanker(
+            mangaRepository = mockk<MangaRepository>(relaxed = true),
+            tagCanonicalizer = TagCanonicalizer(tagRepository),
+            tagProfileRepository = tagRepository,
+            debugLog = SuggestionsDebugLog(),
+            random = ZeroRandom,
+        )
+
+        val section = section()
+        val textFallback = (1L..6L).map { sourceId ->
+            candidate(section = section, sourceId = sourceId, sourceIndex = sourceId.toInt() - 1, searchTerm = "action")
+        }
+        val nativeTag = listOf(
+            candidate(section = section, sourceId = 10L, sourceIndex = 9, searchTerm = ""),
+            candidate(section = section, sourceId = 11L, sourceIndex = 10, searchTerm = ""),
+            candidate(section = section, sourceId = 12L, sourceIndex = 11, searchTerm = ""),
+        )
+
+        val ranked = ranker.rankWithContext(
+            retrievalResults = listOf(CandidateRetrievalResult(section, textFallback + nativeTag)),
+            context = RankingContext(
+                localKeys = emptySet(),
+                localTitles = emptySet(),
+                profiles = mapOf("action" to profile("action", recent = 10.0)),
+                blacklistedTags = emptySet(),
+            ),
+            globalSeenKeys = emptySet(),
+            sectionSeenKeys = emptyMap(),
+            sessionContext = SessionContext(),
+        )
+
+        assertEquals(listOf(10L, 11L, 12L), ranked.take(3).map { it.source })
+    }
+
     private fun section(): PlannedSection =
         PlannedSection(
             sectionKey = "tag:action",
@@ -229,6 +266,7 @@ class SuggestionRankerTest {
         sourceId: Long,
         sourceIndex: Int,
         position: Int = 0,
+        searchTerm: String? = "action",
     ): SuggestionCandidate =
         SuggestionCandidate(
             section = section,
@@ -239,7 +277,7 @@ class SuggestionRankerTest {
                 genre = "Action"
                 initialized = true
             },
-            searchTerm = "action",
+            searchTerm = searchTerm,
             sourceIndex = sourceIndex,
             position = position,
         )

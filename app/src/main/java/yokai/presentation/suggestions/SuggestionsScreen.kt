@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridState
@@ -24,6 +25,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.Icon
@@ -66,6 +68,7 @@ fun SuggestionsScreen(
     onCanScrollUpChanged: (Boolean) -> Unit,
     onVisibleSectionChanged: (String?) -> Unit,
     onExpandSection: (String) -> Unit,
+    onRefreshSection: (String) -> Unit,
 ) {
     val state by presenter.state.collectAsState()
     val gridState = remember(presenter) {
@@ -99,11 +102,21 @@ fun SuggestionsScreen(
         effectivePlannedSections,
         state.nextBatchStartIndex,
         state.isFetchingBatch,
+        state.isForegroundRefresh,
+        state.activeRefreshingSectionKey,
         state.allSectionsLoaded,
         state.selectedSectionKey,
+        visibleSuggestions,
     ) {
         if (state.selectedSectionKey != null) {
             effectivePlannedSections
+        } else if (state.isForegroundRefresh) {
+            val loadedKeys = visibleSuggestions
+                .filterValues { it.isNotEmpty() }
+                .keys
+            effectivePlannedSections.filter { section ->
+                section.sectionKey in loadedKeys || section.sectionKey == state.activeRefreshingSectionKey
+            }
         } else {
             val loadingSectionCount = if (state.isFetchingBatch && !state.allSectionsLoaded) 1 else 0
             val visibleCount = (state.nextBatchStartIndex + loadingSectionCount)
@@ -228,7 +241,9 @@ fun SuggestionsScreen(
                         ) {
                             SuggestionHeader(
                                 displayName = loadingSectionTitle(state.sortOrder),
+                                isRefreshing = false,
                                 hasExpandButton = false,
+                                onRefresh = null,
                                 onExpand = null,
                             )
                         }
@@ -246,6 +261,7 @@ fun SuggestionsScreen(
                             val mangaList = visibleSuggestions[sectionKey]
                             val isLoadingSection = index >= state.nextBatchStartIndex && state.isFetchingBatch
                             val isRefreshingSection = sectionKey in state.refreshingSectionKeys
+                            val isActivelyRefreshingSection = sectionKey == state.activeRefreshingSectionKey
                             if (!isLoadingSection && !isRefreshingSection && mangaList.isNullOrEmpty()) return@forEachIndexed
                             item(
                                 key = "header:$sectionKey",
@@ -254,7 +270,9 @@ fun SuggestionsScreen(
                                 val canExpand = remember(sectionKey, state.sortOrder) { presenter.canExpandSection(sectionKey) }
                                 SuggestionHeader(
                                     displayName = state.sectionDisplayNames[sectionKey] ?: section.displayReason,
+                                    isRefreshing = isActivelyRefreshingSection,
                                     hasExpandButton = canExpand,
+                                    onRefresh = { onRefreshSection(sectionKey) },
                                     onExpand = if (canExpand) {
                                         { onExpandSection(sectionKey) }
                                     } else {
@@ -273,7 +291,7 @@ fun SuggestionsScreen(
                                 ) { manga ->
                                     SuggestionItem(manga = manga, onClick = { onMangaClick(manga) })
                                 }
-                            } else if (isLoadingSection || isRefreshingSection) {
+                            } else if (isLoadingSection || isActivelyRefreshingSection) {
                                 repeat(SKELETON_CARDS_PER_SECTION) { index ->
                                     item(key = "skeleton:$sectionKey:$index") {
                                         SuggestionSkeletonCard()
@@ -298,6 +316,7 @@ fun SuggestionsScreen(
                         // V1 / legacy: iterate loaded sections directly.
                         visibleSuggestions.forEach { (sectionKey, mangaList) ->
                             val isRefreshingSection = sectionKey in state.refreshingSectionKeys
+                            val isActivelyRefreshingSection = sectionKey == state.activeRefreshingSectionKey
                             item(
                                 key = "header:$sectionKey",
                                 span = { GridItemSpan(maxLineSpan) },
@@ -305,7 +324,9 @@ fun SuggestionsScreen(
                                 val canExpand = remember(sectionKey, state.sortOrder) { presenter.canExpandSection(sectionKey) }
                                 SuggestionHeader(
                                     displayName = state.sectionDisplayNames[sectionKey] ?: sectionKey,
+                                    isRefreshing = isActivelyRefreshingSection,
                                     hasExpandButton = canExpand,
+                                    onRefresh = { onRefreshSection(sectionKey) },
                                     onExpand = if (canExpand) {
                                         { onExpandSection(sectionKey) }
                                     } else {
@@ -322,7 +343,7 @@ fun SuggestionsScreen(
                                 ) { manga ->
                                     SuggestionItem(manga = manga, onClick = { onMangaClick(manga) })
                                 }
-                            } else if (isRefreshingSection) {
+                            } else if (isActivelyRefreshingSection) {
                                 repeat(SKELETON_CARDS_PER_SECTION) { index ->
                                     item(key = "skeleton:$sectionKey:$index") {
                                         SuggestionSkeletonCard()
@@ -582,7 +603,9 @@ private fun EndOfFeedFooter(message: String) {
 @Composable
 private fun SuggestionHeader(
     displayName: String,
+    isRefreshing: Boolean,
     hasExpandButton: Boolean,
+    onRefresh: (() -> Unit)?,
     onExpand: (() -> Unit)?,
 ) {
     Row(
@@ -600,6 +623,27 @@ private fun SuggestionHeader(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
+        if (isRefreshing) {
+            CircularProgressIndicator(
+                modifier = Modifier
+                    .padding(horizontal = 8.dp)
+                    .size(18.dp),
+                strokeWidth = 2.dp,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+        onRefresh?.let { refresh ->
+            IconButton(
+                onClick = refresh,
+                enabled = !isRefreshing,
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Refresh,
+                    contentDescription = stringResource(MR.strings.refresh),
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+            }
+        }
         if (hasExpandButton) {
             IconButton(onClick = { onExpand?.invoke() }) {
                 Icon(

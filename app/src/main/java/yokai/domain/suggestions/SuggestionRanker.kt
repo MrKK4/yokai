@@ -174,7 +174,12 @@ class SuggestionRanker(
             } else {
                 null
             }
-            val selected = bestByTitle.values.roundRobinBySource(effectiveMax, maxPerSource)
+            val rankedCandidates = bestByTitle.values
+            val selected = if (!coldStartDiscovery && result.section.canonicalTag != null) {
+                rankedCandidates.preferNativeTagResults(effectiveMax, maxPerSource)
+            } else {
+                rankedCandidates.roundRobinBySource(effectiveMax, maxPerSource)
+            }
             selected
                 .map { it.toSuggestedManga() }
         }
@@ -214,13 +219,15 @@ class SuggestionRanker(
         val velocityBoost = ((bestProfile?.velocity ?: 0.0).coerceAtLeast(0.0)) * SuggestionsConfig.VELOCITY_WEIGHT
         val explorationNoise = random.nextDouble() * EXPLORATION_NOISE_CEILING
         val sourcePenalty = candidate.sourceIndex * SOURCE_PENALTY + candidate.position * POSITION_PENALTY
+        val fallbackPenalty = if (!candidate.searchTerm.isNullOrEmpty()) FALLBACK_PENALTY else 0.0
 
         return tagAffinityScore * TAG_AFFINITY_WEIGHT +
             freshnessScore * FRESHNESS_WEIGHT +
             sessionBoost +
             velocityBoost +
             explorationNoise -
-            sourcePenalty
+            sourcePenalty -
+            fallbackPenalty
     }
 
     private fun SuggestionCandidate.mangaKey(): String =
@@ -261,6 +268,29 @@ class SuggestionRanker(
         )
     }
 
+    private fun Collection<ScoredCandidate>.preferNativeTagResults(
+        maxResults: Int,
+        maxPerSource: Int? = null,
+    ): List<ScoredCandidate> {
+        val nativeTagResults = filter { it.candidate.searchTerm == "" }
+        val textFallbackResults = filterNot { it.candidate.searchTerm == "" }
+        val selected = nativeTagResults.roundRobinBySource(maxResults, maxPerSource).toMutableList()
+        if (selected.size >= maxResults || textFallbackResults.isEmpty()) {
+            return selected
+        }
+        val remaining = maxResults - selected.size
+        val fallbackPool = if (maxPerSource != null) {
+            val selectedCounts = selected.groupingBy { it.candidate.sourceId }.eachCount()
+            textFallbackResults.filter { item ->
+                selectedCounts.getOrDefault(item.candidate.sourceId, 0) < maxPerSource
+            }
+        } else {
+            textFallbackResults
+        }
+        selected += fallbackPool.roundRobinBySource(remaining, maxPerSource)
+        return selected
+    }
+
     private fun Collection<SuggestedManga>.roundRobinBySourceSuggested(maxResults: Int): List<SuggestedManga> {
         return SourceDiversity.roundRobinBySource(
             items = this,
@@ -274,6 +304,7 @@ class SuggestionRanker(
     private companion object {
         private const val SOURCE_PENALTY = 0.001
         private const val POSITION_PENALTY = 0.01
+        private const val FALLBACK_PENALTY = 0.10  // text-search results rank below native-tag results
         // Scoring weights for compositeScore()
         private const val TAG_AFFINITY_WEIGHT = 0.50
         private const val FRESHNESS_WEIGHT = 0.20

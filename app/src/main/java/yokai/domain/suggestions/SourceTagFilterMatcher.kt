@@ -4,12 +4,34 @@ import eu.kanade.tachiyomi.source.CatalogueSource
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 
+internal data class SourceTagFilterMatch(
+    val filters: FilterList?,
+    val matchedLabel: String? = null,
+    val matchedKind: String? = null,
+    val scannedLabels: Int = 0,
+    val textTagFieldName: String? = null,
+    val textTagFieldDenied: Boolean = false,
+) {
+    val matched: Boolean get() = filters != null
+}
+
 internal suspend fun CatalogueSource.tryIncludeTagFilter(
     canonicalTag: String,
     tagCanonicalizer: TagCanonicalizer,
-): FilterList? {
+): FilterList? =
+    tryIncludeTagFilterWithDiagnostics(canonicalTag, tagCanonicalizer).filters
+
+internal suspend fun CatalogueSource.tryIncludeTagFilterWithDiagnostics(
+    canonicalTag: String,
+    tagCanonicalizer: TagCanonicalizer,
+): SourceTagFilterMatch {
     val filters = getFilterList()
     var filterInjected = false
+    var matchedLabel: String? = null
+    var matchedKind: String? = null
+    var scannedLabels = 0
+    var textTagFieldName: String? = null
+    var textTagFieldDenied = false
 
     filters.forEach { filter ->
         when (filter) {
@@ -17,16 +39,22 @@ internal suspend fun CatalogueSource.tryIncludeTagFilter(
                 filter.state.forEach { item ->
                     val matched = when (item) {
                         is Filter.CheckBox -> {
+                            scannedLabels++
                             if (tagCanonicalizer.matchesCanonicalTag(item.name, canonicalTag, id)) {
                                 item.state = true
+                                matchedLabel = item.name
+                                matchedKind = "CHECKBOX"
                                 true
                             } else {
                                 false
                             }
                         }
                         is Filter.TriState -> {
+                            scannedLabels++
                             if (tagCanonicalizer.matchesCanonicalTag(item.name, canonicalTag, id)) {
                                 item.state = Filter.TriState.STATE_INCLUDE
+                                matchedLabel = item.name
+                                matchedKind = "TRISTATE"
                                 true
                             } else {
                                 false
@@ -39,11 +67,14 @@ internal suspend fun CatalogueSource.tryIncludeTagFilter(
             }
             is Filter.Select<*> -> {
                 val matchIndex = filter.values.indexOfFirst { value ->
+                    scannedLabels++
                     tagCanonicalizer.matchesCanonicalTag(value.toString(), canonicalTag, id)
                 }
                 if (matchIndex >= 0) {
                     filter.state = matchIndex
                     filterInjected = true
+                    matchedLabel = filter.values[matchIndex].toString()
+                    matchedKind = "SELECT"
                 }
             }
             is Filter.Text -> {
@@ -52,9 +83,16 @@ internal suspend fun CatalogueSource.tryIncludeTagFilter(
                 // is for ("Tags", "Genre", "Tag", "Genres" — case/punct-insensitive).
                 // Some HentaiHand-theme extensions resolve that text through a broken
                 // tag-ID API, so Suggestions must not inject their text tag filter.
-                if (filter.name.looksLikeTagInputField() && supportsTextTagFilterInjection()) {
-                    filter.state = canonicalTag
-                    filterInjected = true
+                if (filter.name.looksLikeTagInputField()) {
+                    textTagFieldName = filter.name
+                    if (supportsTextTagFilterInjection()) {
+                        filter.state = canonicalTag
+                        filterInjected = true
+                        matchedLabel = filter.name
+                        matchedKind = "TEXT_FIELD"
+                    } else {
+                        textTagFieldDenied = true
+                    }
                 }
             }
             else -> {
@@ -63,7 +101,14 @@ internal suspend fun CatalogueSource.tryIncludeTagFilter(
         }
     }
 
-    return if (filterInjected) filters else null
+    return SourceTagFilterMatch(
+        filters = filters.takeIf { filterInjected },
+        matchedLabel = matchedLabel,
+        matchedKind = matchedKind,
+        scannedLabels = scannedLabels,
+        textTagFieldName = textTagFieldName,
+        textTagFieldDenied = textTagFieldDenied,
+    )
 }
 
 private fun String.looksLikeTagInputField(): Boolean {
@@ -73,7 +118,9 @@ private fun String.looksLikeTagInputField(): Boolean {
 }
 
 private fun CatalogueSource.supportsTextTagFilterInjection(): Boolean =
-    normalizedSourceName() !in TEXT_TAG_FILTER_INJECTION_DENYLIST
+    TEXT_TAG_FILTER_INJECTION_DENYLIST.none { blockedName ->
+        normalizedSourceName().contains(blockedName)
+    }
 
 private fun CatalogueSource.normalizedSourceName(): String =
     name.lowercase().replace(NON_ALNUM, "")

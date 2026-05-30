@@ -50,16 +50,16 @@ object SourceVocabularySeed {
         // returns it as a number. Seeding source-specific raw terms lets
         // CandidateRetriever use plain search instead of the broken resolver path.
         "hentaihand" to mapOf(
-            "milf" to "m.i.l.f",
-            "big breasts" to "big-breasts",
+            "milf" to "milf",
+            "big breasts" to "big breasts",
         ),
         "nhentaicom" to mapOf(
             "milf" to "milf",
-            "big breasts" to "big-breasts",
+            "big breasts" to "big breasts",
         ),
         "nhentai" to mapOf(
             "milf" to "milf",
-            "big breasts" to "big-breasts",
+            "big breasts" to "big breasts",
         ),
     )
 
@@ -68,7 +68,11 @@ object SourceVocabularySeed {
      * is defined.
      */
     fun seedFor(sourceName: String): Map<String, String>? =
-        byNormalizedSourceName[normalize(sourceName)]
+        normalize(sourceName).let { normalizedName ->
+            byNormalizedSourceName.entries
+                .firstOrNull { (seedName, _) -> normalizedName.contains(seedName) }
+                ?.value
+        }
 
     /** Total seed entries across all sources. Useful for debug logging. */
     fun totalEntries(): Int =

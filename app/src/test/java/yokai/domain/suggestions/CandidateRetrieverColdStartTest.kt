@@ -218,6 +218,19 @@ class CandidateRetrieverColdStartTest {
         assertEquals("" to 1, source.searchCalls[callCountBeforePageOneRetry])
     }
 
+    @Test
+    fun `text fallback tries one query per source and does not burn alias variants`() = runBlocking {
+        val source = FakeSearchSource(id = 24L, pageOneCount = 0, otherPageCount = 0)
+        val retriever = retrieverWith(source)
+
+        retriever.retrieve(
+            sections = listOf(tagSection(searchTerms = listOf("milf", "m.i.l.f", "milves"))),
+            allowPageBackstop = false,
+        )
+
+        assertEquals(listOf("milf"), source.searchQueries)
+    }
+
 
     private fun retrieverWith(
         vararg sources: CatalogueSource,
@@ -264,13 +277,13 @@ class CandidateRetrieverColdStartTest {
             sortOrder = SuggestionSortOrder.Popular,
         )
 
-    private fun tagSection(): PlannedSection =
+    private fun tagSection(searchTerms: List<String> = listOf("milf")): PlannedSection =
         PlannedSection(
             sectionKey = "tag:milf",
             type = SectionType.MANAGED_TAG,
             canonicalTag = "milf",
             displayReason = "Milf",
-            searchTerms = listOf("milf"),
+            searchTerms = searchTerms,
             sortOrder = SuggestionSortOrder.Popular,
         )
 }
@@ -330,6 +343,7 @@ private class FakeSearchSource(
     private val filterThrowable: Throwable? = null,
 ) : CatalogueSource {
     val searchPages = mutableListOf<Int>()
+    val searchQueries = mutableListOf<String>()
 
     override val name: String = "Search $id"
     override val lang: String = "en"
@@ -337,6 +351,7 @@ private class FakeSearchSource(
 
     override suspend fun getSearchManga(page: Int, query: String, filters: FilterList): MangasPage {
         searchPages += page
+        searchQueries += query
         val count = if (page == 1) pageOneCount else otherPageCount
         return MangasPage(
             (0 until count).map { index ->

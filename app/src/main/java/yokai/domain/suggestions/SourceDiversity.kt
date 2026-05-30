@@ -21,8 +21,8 @@ internal object SourceDiversity {
             }
             .sortedWith(
                 compareBy<MutableList<T>>(
-                    { -(it.firstOrNull()?.let(score) ?: Double.NEGATIVE_INFINITY) },
                     { it.firstOrNull()?.let(sourceIndex) ?: Int.MAX_VALUE },
+                    { -(it.firstOrNull()?.let(score) ?: Double.NEGATIVE_INFINITY) },
                     { it.firstOrNull()?.let(sourceId) ?: Long.MAX_VALUE },
                 ),
             )

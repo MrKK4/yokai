@@ -69,6 +69,7 @@ class SuggestionsController(
     private var statusBarHeight = 0
     private val appBarScrollProxy = ComposeAppBarScrollProxy()
     private var isNavigatingToManga = false
+    private var isForegroundRefreshInProgress = false
 
     private val connectivityCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
@@ -100,9 +101,10 @@ class SuggestionsController(
         binding.swipeRefresh.setStyle()
         binding.swipeRefresh.setOnRefreshListener { presenter.refresh() }
         binding.swipeRefresh.setOnChildScrollUpCallback { _, _ ->
-            // When already refreshing, tell SwipeRefreshLayout the child can scroll up so it
-            // doesn't re-engage the pull gesture and visually "stop" the in-progress refresh.
-            suggestionsCanScrollUp || binding.swipeRefresh.isRefreshing
+            // While a foreground refresh is already running, keep SwipeRefreshLayout from
+            // re-engaging the pull gesture. The Compose section skeletons show progress;
+            // the outer pull spinner is intentionally hidden.
+            suggestionsCanScrollUp || isForegroundRefreshInProgress
         }
         binding.root.doOnApplyWindowInsetsCompat { _, insets, _ ->
             statusBarHeight = insets.getInsets(systemBars()).top
@@ -112,11 +114,8 @@ class SuggestionsController(
 
         presenter.state
             .onEach { state ->
-                // Show SwipeRefresh spinner only for user-triggered foreground refresh when
-                // content already exists. Cold-start and background loads use the Compose
-                // EmptySuggestions spinner so we never show two spinners simultaneously.
-                binding.swipeRefresh.isRefreshing =
-                    state.isForegroundRefresh && state.suggestions.isNotEmpty()
+                isForegroundRefreshInProgress = state.isForegroundRefresh
+                binding.swipeRefresh.isRefreshing = false
             }
             .launchIn(viewScope)
 
@@ -144,6 +143,7 @@ class SuggestionsController(
                     onCanScrollUpChanged = ::onSuggestionsCanScrollUpChanged,
                     onVisibleSectionChanged = presenter::setVisibleSectionKey,
                     onExpandSection = presenter::expandSection,
+                    onRefreshSection = presenter::refreshSection,
                 )
             }
         }

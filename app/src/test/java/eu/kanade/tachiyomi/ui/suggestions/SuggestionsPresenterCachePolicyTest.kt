@@ -73,6 +73,58 @@ class SuggestionsPresenterCachePolicyTest {
     }
 
     @Test
+    fun `explicit section refresh targets requested section before visible section`() {
+        assertEquals(
+            "tag:big breasts",
+            resolveManualRefreshTargetSectionKey(
+                explicitSectionKey = "tag:big breasts",
+                selectedSectionKey = null,
+                visibleSectionKey = "discovery",
+                loadedSectionKeys = setOf("discovery", "tag:milf", "tag:big breasts"),
+                plannedSectionKeys = setOf("discovery", "tag:milf", "tag:big breasts"),
+            ),
+        )
+    }
+
+    @Test
+    fun `pull refresh still falls back to visible section when no explicit section is requested`() {
+        assertEquals(
+            "tag:milf",
+            resolveManualRefreshTargetSectionKey(
+                explicitSectionKey = null,
+                selectedSectionKey = null,
+                visibleSectionKey = "tag:milf",
+                loadedSectionKeys = setOf("discovery", "tag:milf"),
+                plannedSectionKeys = setOf("discovery", "tag:milf", "tag:big breasts"),
+            ),
+        )
+    }
+
+    @Test
+    fun `explicit section refresh selects only the requested section for network refresh`() {
+        assertEquals(
+            listOf("tag:solo male"),
+            selectSoftRefreshSectionKeys(
+                plannedSectionKeys = listOf("discovery", "tag:big breasts", "tag:milf", "tag:solo male"),
+                previouslyLoadedCount = 3,
+                refreshTargetSectionKey = "tag:solo male",
+            ),
+        )
+    }
+
+    @Test
+    fun `normal pull refresh keeps refreshing the loaded top sections`() {
+        assertEquals(
+            listOf("discovery", "tag:big breasts", "tag:milf"),
+            selectSoftRefreshSectionKeys(
+                plannedSectionKeys = listOf("discovery", "tag:big breasts", "tag:milf", "tag:solo male"),
+                previouslyLoadedCount = 3,
+                refreshTargetSectionKey = null,
+            ),
+        )
+    }
+
+    @Test
     fun `expanded sheet dismiss closes visible sheet`() {
         assertTrue(shouldCloseExpandedSheetOnDismiss(sheetSuppressed = false))
     }

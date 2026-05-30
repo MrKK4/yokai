@@ -432,6 +432,41 @@ class CandidateRetriever(
         val page = pageOffset.coerceAtLeast(1)
         val candidates = fetchPageProgressive(page, countBySource, onSourceComplete).toMutableList()
 
+        // If a tag source produced nothing through its first branch (usually native
+        // tag/filter lookup), try that dry source's text path before asking already
+        // productive sources for top-up. This keeps the row diverse: every source in
+        // the batch gets a fair chance to contribute after seen/blacklist filtering.
+        if (
+            allowPageBackstop &&
+            section.type != SectionType.DISCOVERY &&
+            candidates.distinctBy { it.sourceId to it.manga.url }.size < SuggestionsConfig.MAX_RESULTS_PER_SECTION
+        ) {
+            val drySources = sources.filter { source ->
+                (countBySource[source.id]?.get() ?: 0) == 0
+            }
+            for (source in drySources) {
+                val currentBlockedMangaKeys = blockedMangaKeys + candidates.map { mangaKey(it.sourceId, it.manga.url) }
+                val textFallback = fetchSearchSource(
+                    section = section,
+                    source = source,
+                    sourceIndex = sources.indexOf(source),
+                    page = page,
+                    requestGate = requestGate,
+                    countBySource = countBySource,
+                    maxPerSourceFetch = maxPerSourceFetch,
+                    blockedMangaKeys = currentBlockedMangaKeys,
+                    forceTextSearch = true,
+                )
+                candidates.addAll(textFallback)
+                if (textFallback.isNotEmpty() && onSourceComplete != null) {
+                    onSourceComplete(textFallback)
+                }
+                if (candidates.distinctBy { it.sourceId to it.manga.url }.size >= SuggestionsConfig.MAX_RESULTS_PER_SECTION) {
+                    break
+                }
+            }
+        }
+
         // ── Source-rotation backfill ───────────────────────────────────────────
         val canOverfillSourceCap = maxPerSourceFetch == null ||
             maxPerSourceFetch > SuggestionsConfig.MANUAL_REFRESH_MAX_PER_SOURCE_FETCH
@@ -452,7 +487,14 @@ class CandidateRetriever(
                         section, source, sources.indexOf(source), page, requestGate, countBySource, maxPerSourceFetch, currentBlockedMangaKeys,
                     )
                     else -> fetchSearchSource(
-                        section, source, sources.indexOf(source), page, requestGate, countBySource, maxPerSourceFetch, currentBlockedMangaKeys,
+                        section,
+                        source,
+                        sources.indexOf(source),
+                        page,
+                        requestGate,
+                        countBySource,
+                        maxPerSourceFetch,
+                        currentBlockedMangaKeys,
                     )
                 }
                 candidates.addAll(topUp)
@@ -656,6 +698,7 @@ class CandidateRetriever(
         countBySource: ConcurrentHashMap<Long, AtomicInteger>,
         maxPerSourceFetch: Int? = null,
         blockedMangaKeys: Set<String> = emptySet(),
+        forceTextSearch: Boolean = false,
     ): List<SuggestionCandidate> {
         if (isSourceCooldownActive(source.id)) {
             debugLog.add(
@@ -681,18 +724,6 @@ class CandidateRetriever(
                         add(canonicalTag)
                         seenQueries.add(canonicalTag)
                     }
-                    val titleCase = initialQuery.replaceFirstChar {
-                        if (it.isLowerCase()) it.uppercase() else it.toString()
-                    }
-                    if (titleCase !in seenQueries) {
-                        add(titleCase)
-                        seenQueries.add(titleCase)
-                    }
-                    val upper = initialQuery.uppercase()
-                    if (upper !in seenQueries) {
-                        add(upper)
-                        seenQueries.add(upper)
-                    }
                 }
             }.distinct()
         }
@@ -710,75 +741,77 @@ class CandidateRetriever(
                 )
                 return emptyList()
             }
-            var sawResponse = false
-            for ((qIndex, q) in textQueryCandidates(initialQuery).withIndex()) {
-                if (qIndex > 0) {
-                    debugLog.add(
-                        LogType.SORT_FALLBACK,
-                        "Source ${source.id} (${source.name}): text fallback retry with query '$q' for $reason",
-                    )
-                }
-                val filters = safeFreshFilterList(source).also {
-                    it.tryApplySuggestionSort(section.sortOrder)
-                }
-                val result = requestGate.withPermit {
-                    sourceResult(sourceId = source.id) {
-                        source.getSearchManga(normalizedPage, q, filters)
-                    }
-                } ?: continue
-                sawResponse = true
-                learnVocabulary(result.mangas, source.id)
-                val candidates = cappedCandidates(
-                    section = section,
-                    sourceId = source.id,
-                    sourceIndex = sourceIndex,
-                    searchTerm = q,
-                    mangas = result.mangas,
-                    countBySource = countBySource,
-                    maxPerSourceFetch = maxPerSourceFetch,
-                    blockedMangaKeys = blockedMangaKeys,
-                )
-                logSourceResult(
-                    section = section,
-                    source = source,
-                    mode = "TEXT",
-                    page = normalizedPage,
-                    query = q,
-                    rawCount = result.mangas.size,
-                    usableCount = candidates.size,
-                    reason = reason,
-                )
-                if (candidates.isNotEmpty()) {
-                    if (qIndex > 0 || reason != "primary text search") {
-                        debugLog.add(
-                            LogType.SECTION_SELECTED,
-                            "Source ${source.id} (${source.name}): text fallback '$q' page $normalizedPage produced ${candidates.size} usable results for '${section.sectionKey}'",
-                        )
-                    }
-                    return candidates
-                }
+            val q = textQueryCandidates(initialQuery).firstOrNull() ?: return emptyList()
+            val filters = safeFreshFilterList(source).also {
+                it.tryApplySuggestionSort(section.sortOrder)
             }
-            if (sawResponse) {
+            val result = requestGate.withPermit {
+                sourceResult(sourceId = source.id) {
+                    source.getSearchManga(normalizedPage, q, filters)
+                }
+            } ?: return emptyList()
+            learnVocabulary(result.mangas, source.id)
+            val candidates = cappedCandidates(
+                section = section,
+                sourceId = source.id,
+                sourceIndex = sourceIndex,
+                searchTerm = q,
+                mangas = result.mangas,
+                countBySource = countBySource,
+                maxPerSourceFetch = maxPerSourceFetch,
+                blockedMangaKeys = blockedMangaKeys,
+            )
+            logSourceResult(
+                section = section,
+                source = source,
+                mode = "TEXT",
+                page = normalizedPage,
+                query = q,
+                rawCount = result.mangas.size,
+                usableCount = candidates.size,
+                reason = reason,
+            )
+            if (candidates.isNotEmpty() && reason != "primary text search") {
+                debugLog.add(
+                    LogType.SECTION_SELECTED,
+                    "Source ${source.id} (${source.name}): text fallback '$q' page $normalizedPage produced ${candidates.size} usable results for '${section.sectionKey}'",
+                )
+            }
+            if (candidates.isEmpty()) {
                 markDrySearchPage(source, section, SearchQueryMode.TEXT, normalizedPage)
             }
-            return emptyList()
+            return candidates
         }
 
         // ── Phase A: tag/genre filter injection ──────────────────────────────────
-        val injectedFilters = canonicalTag?.let { tag ->
+        val tagFilterMatch = canonicalTag?.let { tag ->
             sourceResult(sourceId = source.id, countFailure = false) {
-                source.tryIncludeTagFilter(tag, tagCanonicalizer)
+                source.tryIncludeTagFilterWithDiagnostics(tag, tagCanonicalizer)
             }
         }
+        val injectedFilters = tagFilterMatch?.filters
 
         val fallbackPage = textFallbackPage(source, section, page)
         val exactTerm = canonicalTag?.let {
             tagProfileRepository.getExactTermForSource(it, source.id)
         }
         val textQuery = exactTerm
+            ?.takeUnless { source.requiresHumanTextFallback() && it.looksLikeTagSlugOrCode() }
             ?: section.searchTerms.firstOrNull()
             ?: canonicalTag
             ?: return emptyList()
+
+        if (forceTextSearch) {
+            debugLog.add(
+                LogType.SORT_FALLBACK,
+                "Source ${source.id} (${source.name}): dry first branch for '${section.sectionKey}' - prioritized text fallback with '$textQuery'",
+            )
+            return fetchTextSearch(
+                textPage = page,
+                initialQuery = textQuery,
+                reason = "dry source text fallback",
+            )
+        }
 
         if (fallbackPage != null) {
             return fetchTextSearch(
@@ -791,7 +824,9 @@ class CandidateRetriever(
         if (injectedFilters != null) {
             debugLog.add(
                 LogType.SECTION_SELECTED,
-                "Source ${source.id} (${source.name}): tag filter injected for '$canonicalTag'",
+                "Source ${source.id} (${source.name}): tag filter injected for '$canonicalTag' " +
+                    "via ${tagFilterMatch.matchedKind ?: "UNKNOWN"} '${tagFilterMatch.matchedLabel.orEmpty()}' " +
+                    "(scanned=${tagFilterMatch.scannedLabels})",
             )
             val normalizedPage = page.coerceAtLeast(1)
             if (isDrySearchPage(source, section, SearchQueryMode.NATIVE_TAG, normalizedPage)) {
@@ -853,9 +888,19 @@ class CandidateRetriever(
         }
 
         if (exactTerm == null && canonicalTag != null) {
+            val audit = when {
+                tagFilterMatch == null ->
+                    "filter audit unavailable"
+                tagFilterMatch.textTagFieldDenied ->
+                    "text tag field '${tagFilterMatch.textTagFieldName}' denied for broken resolver; scanned=${tagFilterMatch.scannedLabels}"
+                tagFilterMatch.textTagFieldName != null ->
+                    "text tag field '${tagFilterMatch.textTagFieldName}' did not inject; scanned=${tagFilterMatch.scannedLabels}"
+                else ->
+                    "no matching tag label; scanned=${tagFilterMatch.scannedLabels}"
+            }
             debugLog.add(
                 LogType.SORT_FALLBACK,
-                "Source ${source.id} (${source.name}): no tag filter for '$canonicalTag' - text search with '$textQuery'",
+                "Source ${source.id} (${source.name}): no tag filter for '$canonicalTag' ($audit) - text search with '$textQuery'",
             )
         }
         return fetchTextSearch(
@@ -914,9 +959,20 @@ class CandidateRetriever(
         }
     }
 
+    private fun CatalogueSource.requiresHumanTextFallback(): Boolean {
+        val normalized = name.lowercase().replace(NON_ALNUM, "")
+        return normalized.contains("hentaihand") ||
+            normalized.contains("nhentaicom") ||
+            normalized.contains("nhentai")
+    }
+
+    private fun String.looksLikeTagSlugOrCode(): Boolean =
+        '-' in this || '.' in this
+
     private companion object {
         private const val LEARN_VOCAB_MAX_ATTEMPTS = 2
         private const val LEARN_VOCAB_RETRY_BACKOFF_MS = 250L
+        private val NON_ALNUM = Regex("[^a-z0-9]+")
     }
 
     private fun logSourceResult(

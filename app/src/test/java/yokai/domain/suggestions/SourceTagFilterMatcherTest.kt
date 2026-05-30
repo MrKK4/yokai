@@ -29,6 +29,25 @@ class SourceTagFilterMatcherTest {
     }
 
     @Test
+    fun `matcher reports real tag filter label diagnostics`() = runBlocking {
+        val repository = FakeTagProfileRepository()
+        val canonicalizer = TagCanonicalizer(repository)
+        val label = object : Filter.CheckBox("Big Breasts") {}
+        val source = sourceWithFilters(
+            FilterList(
+                object : Filter.Group<Filter<*>>("Tags", listOf(label)) {},
+            ),
+        )
+
+        val match = source.tryIncludeTagFilterWithDiagnostics("big breasts", canonicalizer)
+
+        assertNotNull(match.filters)
+        assertEquals("Big Breasts", match.matchedLabel)
+        assertEquals("CHECKBOX", match.matchedKind)
+        assertEquals(1, match.scannedLabels)
+    }
+
+    @Test
     fun `matcher canonicalizes select genre filters`() = runBlocking {
         val repository = FakeTagProfileRepository()
         val canonicalizer = TagCanonicalizer(repository)
@@ -82,8 +101,42 @@ class SourceTagFilterMatcherTest {
     }
 
     @Test
+    fun `matcher skips broken nhentai variants with suffixes`() = runBlocking {
+        val repository = FakeTagProfileRepository()
+        val canonicalizer = TagCanonicalizer(repository)
+        val tagText = object : Filter.Text("Tags") {}
+        val source = sourceWithFilters(
+            filters = FilterList(tagText),
+            name = "nHentai.com (unoriginal)",
+        )
+
+        val filters = source.tryIncludeTagFilter("milf", canonicalizer)
+
+        assertNull(filters)
+        assertEquals("", tagText.state)
+    }
+
+    @Test
+    fun `matcher reports denied broken text tag field diagnostics`() = runBlocking {
+        val repository = FakeTagProfileRepository()
+        val canonicalizer = TagCanonicalizer(repository)
+        val tagText = object : Filter.Text("Tags") {}
+        val source = sourceWithFilters(
+            filters = FilterList(tagText),
+            name = "nHentai.com (unoriginal)",
+        )
+
+        val match = source.tryIncludeTagFilterWithDiagnostics("milf", canonicalizer)
+
+        assertNull(match.filters)
+        assertEquals("Tags", match.textTagFieldName)
+        assertEquals(true, match.textTagFieldDenied)
+    }
+
+    @Test
     fun `seed provides source specific tag terms`() {
         assertEquals("big-breasts", SourceVocabularySeed.seedFor("nHentai.com")?.get("big breasts"))
+        assertEquals("big-breasts", SourceVocabularySeed.seedFor("nHentai.com (unoriginal)")?.get("big breasts"))
         assertEquals("m.i.l.f", SourceVocabularySeed.seedFor("Hentai Hand")?.get("milf"))
     }
 

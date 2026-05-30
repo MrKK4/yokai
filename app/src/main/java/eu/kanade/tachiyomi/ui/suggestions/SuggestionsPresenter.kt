@@ -46,6 +46,7 @@ import yokai.domain.suggestions.PlannedSectionRepository
 import yokai.domain.suggestions.SectionPlanner
 import yokai.domain.suggestions.SectionBatcher
 import yokai.domain.suggestions.SectionType
+import yokai.domain.suggestions.isColdStartDiscovery
 import yokai.domain.suggestions.SessionContext
 import yokai.domain.suggestions.ShownMangaHistoryRepository
 import yokai.domain.suggestions.SuggestionRanker
@@ -97,6 +98,7 @@ data class SuggestionsState(
     val sheetError: String? = null,
     val sheetSuppressed: Boolean = false,
     val refreshingSectionKeys: Set<String> = emptySet(),
+    val activeRefreshingSectionKey: String? = null,
     val refreshBannerMessage: String? = null,
     val isPausedForNetwork: Boolean = false,
 )
@@ -119,6 +121,36 @@ internal fun shouldShowBlockingRefreshLockMessage(): Boolean =
 
 internal fun shouldCloseExpandedSheetOnDismiss(sheetSuppressed: Boolean): Boolean =
     !sheetSuppressed
+
+internal fun resolveManualRefreshTargetSectionKey(
+    explicitSectionKey: String?,
+    selectedSectionKey: String?,
+    visibleSectionKey: String?,
+    loadedSectionKeys: Set<String>,
+    plannedSectionKeys: Set<String>,
+): String? {
+    fun String.isKnownSection(): Boolean = this in loadedSectionKeys || this in plannedSectionKeys
+
+    return explicitSectionKey
+        ?.takeIf { it.isKnownSection() }
+        ?: selectedSectionKey
+            ?.takeIf { it.isKnownSection() }
+        ?: visibleSectionKey
+            ?.takeIf { it.isKnownSection() }
+        ?: loadedSectionKeys.firstOrNull()
+        ?: plannedSectionKeys.firstOrNull()
+}
+
+internal fun selectSoftRefreshSectionKeys(
+    plannedSectionKeys: List<String>,
+    previouslyLoadedCount: Int,
+    refreshTargetSectionKey: String?,
+): List<String> =
+    if (refreshTargetSectionKey != null) {
+        plannedSectionKeys.filter { it == refreshTargetSectionKey }.take(1)
+    } else {
+        plannedSectionKeys.take(previouslyLoadedCount.coerceAtLeast(0))
+    }
 
 internal fun sourceSortOrderForExpandableSection(
     sectionKey: String,
@@ -602,6 +634,7 @@ class SuggestionsPresenter(
     fun refresh(
         hardRefresh: Boolean = false,
         reason: SuggestionRefreshReason = SuggestionRefreshReason.Manual,
+        targetSectionKey: String? = null,
     ) {
         pendingRefreshMessage = null
         SuggestionsWorker.cancelManual(context)
@@ -621,11 +654,13 @@ class SuggestionsPresenter(
         // Load persisted tag rotation so we pick up where we left off
         usedTags.addAll(preferences.usedSuggestionTags().get())
         val v2RefreshTargetSectionKey = if (!hardRefresh && preferences.suggestionsV2Enabled().get()) {
-            manualRefreshTargetSectionKey()
+            manualRefreshTargetSectionKey(targetSectionKey)
         } else {
             null
         }
-        val initialRefreshingSectionKeys = if (v2RefreshTargetSectionKey != null) {
+        val initialRefreshingSectionKeys = if (targetSectionKey != null && v2RefreshTargetSectionKey != null) {
+            setOf(v2RefreshTargetSectionKey)
+        } else if (v2RefreshTargetSectionKey != null) {
             setOfNotNull("discovery", COLD_START_DISCOVERY_SECTION_KEY, v2RefreshTargetSectionKey)
         } else {
             emptySet()
@@ -735,6 +770,7 @@ class SuggestionsPresenter(
                             isPausedForNetwork = true,
                             refreshBannerMessage = waitingForNetworkMessage(),
                             refreshingSectionKeys = emptySet(),
+                            activeRefreshingSectionKey = null,
                             isFetching = false,
                             isFetchingBatch = false,
                             isLoading = false,
@@ -761,6 +797,7 @@ class SuggestionsPresenter(
                     isFetchingBatch = false,
                     isFetching = false,
                     refreshingSectionKeys = emptySet(),
+                    activeRefreshingSectionKey = null,
                 ) }
                 }
             } catch (_: Exception) {
@@ -788,6 +825,7 @@ class SuggestionsPresenter(
                     _state.update {
                         it.copy(
                             refreshingSectionKeys = emptySet(),
+                            activeRefreshingSectionKey = null,
                             refreshBannerMessage = null,
                             isPausedForNetwork = false,
                         )
@@ -811,6 +849,11 @@ class SuggestionsPresenter(
                 }
             }
         }
+    }
+
+    fun refreshSection(sectionKey: String) {
+        if (sectionKey.isBlank()) return
+        refresh(targetSectionKey = sectionKey)
     }
 
     fun loadNextPage() {
@@ -910,14 +953,15 @@ class SuggestionsPresenter(
         visibleSectionKey = sectionKey
     }
 
-    private fun manualRefreshTargetSectionKey(): String? {
+    private fun manualRefreshTargetSectionKey(explicitSectionKey: String? = null): String? {
         val state = _state.value
-        return state.selectedSectionKey
-            ?.takeIf { selected -> selected in state.suggestions.keys || state.plannedSections.any { it.sectionKey == selected } }
-            ?: visibleSectionKey
-                ?.takeIf { visible -> visible in state.suggestions.keys || state.plannedSections.any { it.sectionKey == visible } }
-            ?: state.suggestions.keys.firstOrNull()
-            ?: state.plannedSections.firstOrNull()?.sectionKey
+        return resolveManualRefreshTargetSectionKey(
+            explicitSectionKey = explicitSectionKey,
+            selectedSectionKey = state.selectedSectionKey,
+            visibleSectionKey = visibleSectionKey,
+            loadedSectionKeys = state.suggestions.keys,
+            plannedSectionKeys = state.plannedSections.map { it.sectionKey }.toSet(),
+        )
     }
 
     fun setSortOrder(sortOrder: SuggestionSortOrder) {
@@ -1114,6 +1158,7 @@ class SuggestionsPresenter(
                     _state.update {
                         it.copy(
                             refreshingSectionKeys = emptySet(),
+                            activeRefreshingSectionKey = null,
                             refreshBannerMessage = null,
                             isPausedForNetwork = false,
                         )
@@ -1352,6 +1397,7 @@ class SuggestionsPresenter(
             allSectionsLoaded = false,
             hasReachedEnd = false,
             refreshingSectionKeys = emptySet(),
+            activeRefreshingSectionKey = null,
             sheetSectionKey = null,
             sheetResults = emptyList(),
             sheetIsLoading = false,
@@ -1531,7 +1577,9 @@ class SuggestionsPresenter(
                     refreshSessionId = session.sessionId,
                 )
                 renderedSectionKeys = reRanked.map { it.sectionKey }.toSet()
-                renderStoredSuggestions()
+                if (!isForegroundRefreshing.get()) {
+                    renderStoredSuggestions()
+                }
                 debugLog.add(LogType.REFRESH_MODE, "Soft refresh: re-ranked ${reRanked.size} items across ${plannedSections.size} sections")
             }
         }
@@ -1550,40 +1598,15 @@ class SuggestionsPresenter(
             .keys
         val previouslyLoadedCount = previouslyLoadedKeys.size
 
-        val refreshTopN = when {
-            previouslyLoadedCount > 0 -> {
-                val topLoadedSections = plannedSections.take(previouslyLoadedCount)
-                val targetSection = refreshTargetSectionKey
-                    ?.let { targetKey -> plannedSections.firstOrNull { it.sectionKey == targetKey } }
-                if (targetSection != null && topLoadedSections.none { it.sectionKey == targetSection.sectionKey }) {
-                    topLoadedSections + targetSection
-                } else {
-                    topLoadedSections
-                }
-            }
-            // First-time refresh with nothing loaded yet falls back to whatever the
-            // explicit target requested (visible / selected section), preserving the
-            // old single-section behaviour for callers that pass a target key.
-            refreshTargetSectionKey != null -> plannedSections
-                .firstOrNull { it.sectionKey == refreshTargetSectionKey }
-                ?.let(::listOf)
-                .orEmpty()
-            else -> emptyList()
-        }
+        val refreshSectionKeys = selectSoftRefreshSectionKeys(
+            plannedSectionKeys = plannedSections.map { it.sectionKey },
+            previouslyLoadedCount = previouslyLoadedCount,
+            refreshTargetSectionKey = refreshTargetSectionKey,
+        ).toSet()
+        val refreshTopN = plannedSections.filter { it.sectionKey in refreshSectionKeys }
         val refreshTopNKeys = refreshTopN.map { it.sectionKey }.toSet()
 
-        // Step 5: Evict any previously-loaded section that fell out of the top N so
-        // the UI doesn't keep a stale tag visible after the user explicitly asked
-        // for fresh suggestions. The DB rows are removed too, otherwise the next
-        // DB-observer emission would resurrect them.
-        val evictedKeys = previouslyLoadedKeys - refreshTopNKeys
-        if (evictedKeys.isNotEmpty()) {
-            evictedKeys.forEach { key ->
-                suggestionsRepository.deleteBySectionKey(key, session.mode.resultVersion)
-            }
-        }
-
-        // Step 6: Mark every section in the new top N as refreshable so a manual
+        // Step 5: Mark every section in the new top N as refreshable so a manual
         // pull replaces each loaded section instead of only swapping the first row.
         refreshTopN.forEach { section ->
             sectionLastFetchedAt.remove(section.sectionKey)
@@ -1601,13 +1624,8 @@ class SuggestionsPresenter(
         if (!isCurrentRefresh(session, generation)) return
         val displayNames = plannedSections.associate { it.sectionKey to it.displayReason }
         _state.update { state ->
-            val keptSuggestions = if (evictedKeys.isNotEmpty()) {
-                state.suggestions.filterKeys { it !in evictedKeys }
-            } else {
-                state.suggestions
-            }
             state.copy(
-                suggestions = keptSuggestions,
+                suggestions = state.suggestions,
                 plannedSections = plannedSections,
                 sectionDisplayNames = displayNames,
                 // Start at the first top-N section. The foreground refresh below will
@@ -1623,6 +1641,7 @@ class SuggestionsPresenter(
                 endMessage = null,
                 emptyMessage = null,
                 refreshingSectionKeys = refreshTopNKeys,
+                activeRefreshingSectionKey = refreshTopN.firstOrNull()?.sectionKey,
             )
         }
 
@@ -1682,6 +1701,7 @@ class SuggestionsPresenter(
         _state.update { it.copy(
             isFetchingBatch = true,
             isFetching = !isForegroundRefreshing.get(),
+            activeRefreshingSectionKey = section.sectionKey.takeIf { isForegroundRefreshing.get() },
             emptyMessage = null,
         )}
 
@@ -1739,6 +1759,7 @@ class SuggestionsPresenter(
                     isFetchingBatch = false,
                     isFetching = false,
                     refreshingSectionKeys = it.refreshingSectionKeys - section.sectionKey,
+                    activeRefreshingSectionKey = null,
                 )}
             } else {
                 updateLoadingState()
@@ -1793,6 +1814,48 @@ class SuggestionsPresenter(
             sectionSeenKeys = sectionSeenKeys,
             sessionContext = sessionContext,
         ).withSectionDisplayRanks(result.section)
+    }
+
+    private suspend fun buildStableProgressivePreview(
+        result: CandidateRetrievalResult,
+        rankingContext: RankingContext,
+        sectionSeenKeys: Map<String, Set<String>>,
+    ): List<SuggestedManga> {
+        val verifiedResult = verifyCandidateResult(result, rankingContext)
+        val sectionSeen = sectionSeenKeys[result.section.sectionKey].orEmpty()
+        val seenTitles = linkedSetOf<String>()
+        val coldStartDiscovery = result.section.isColdStartDiscovery()
+        return verifiedResult.candidates
+            .asSequence()
+            .filterNot { candidate ->
+                val mangaKey = "${candidate.sourceId}:${candidate.manga.url}"
+                val titleKey = candidate.manga.title.previewTitleKey()
+                when {
+                    candidate.sourceId to candidate.manga.url in rankingContext.localKeys -> true
+                    !coldStartDiscovery && mangaKey in seenMangaUrls -> true
+                    !coldStartDiscovery && mangaKey in sectionSeen -> true
+                    titleKey in rankingContext.localTitles -> true
+                    titleKey in seenTitles -> true
+                    else -> {
+                        seenTitles += titleKey
+                        false
+                    }
+                }
+            }
+            .distinctBy { it.sourceId to it.manga.url }
+            .take(SuggestionsConfig.MAX_RESULTS_PER_SECTION)
+            .mapIndexed { index, candidate ->
+                SuggestedManga(
+                    source = candidate.sourceId,
+                    url = candidate.manga.url,
+                    title = candidate.manga.title,
+                    thumbnailUrl = candidate.manga.thumbnail_url,
+                    sectionKey = result.section.sectionKey,
+                    relevanceScore = (SuggestionsConfig.MAX_RESULTS_PER_SECTION - index).toDouble(),
+                )
+            }
+            .toList()
+            .withSectionDisplayRanks(result.section)
     }
 
     private suspend fun verifyCandidateResult(
@@ -2025,6 +2088,7 @@ class SuggestionsPresenter(
         _state.update { it.copy(
             isFetchingBatch = true,
             isFetching = !isForegroundRefreshing.get(),
+            activeRefreshingSectionKey = batch.firstOrNull()?.sectionKey.takeIf { isForegroundRefreshing.get() },
             emptyMessage = null,
         )}
 
@@ -2075,6 +2139,9 @@ class SuggestionsPresenter(
             ) { result ->
                 if (session?.let { isCurrentRefresh(it, generation) } ?: (generation == feedGeneration.get())) {
                     val sectionKey = result.section.sectionKey
+                    if (isForegroundRefreshing.get()) {
+                        _state.update { it.copy(activeRefreshingSectionKey = sectionKey) }
+                    }
                     val acc = accumulatedCandidates.getOrPut(sectionKey) { mutableListOf() }
                     acc.addAll(result.candidates)
 
@@ -2105,12 +2172,14 @@ class SuggestionsPresenter(
                                 candidates = acc.distinctBy { it.sourceId to it.manga.url },
                                 isSectionComplete = false,
                             )
-                            val previewSuggestions = rankSectionPreview(
+                            val previewSuggestions = buildStableProgressivePreview(
                                 result = partialResult,
                                 rankingContext = rankingContext,
                                 sectionSeenKeys = allSectionSeenKeys,
                             )
-                            if (previewSuggestions.isNotEmpty()) {
+                            val hasExistingSectionCards = _state.value.suggestions[sectionKey]
+                                ?.isNotEmpty() == true
+                            if (previewSuggestions.isNotEmpty() && !hasExistingSectionCards) {
                                 renderSectionPreview(result.section, previewSuggestions)
                             }
                         }
@@ -2145,6 +2214,7 @@ class SuggestionsPresenter(
                         nextBatchStartIndex = nextIndex,
                         isFetchingBatch = false,
                         isFetching = false,
+                        activeRefreshingSectionKey = null,
                         allSectionsLoaded = allLoaded,
                         hasReachedEnd = allLoaded && hasAnySuggestions,
                         endMessage = sectionEndMessage(nextIndex, current.plannedSections.size)
@@ -2258,7 +2328,11 @@ class SuggestionsPresenter(
             resultVersion = resultVersion,
             refreshSessionId = refreshSessionId,
         )
-        renderStoredSuggestions()
+        if (isForegroundRefreshing.get()) {
+            renderCommittedSection(result.section, suggestions)
+        } else {
+            renderStoredSuggestions()
+        }
         shownHistoryRepository.insertAll(suggestions.map { it.source to it.url })
         seenMangaUrls.addAll(suggestions.map { it.memoryKey() })
         rememberDisplayedSuggestionSources(suggestions)
@@ -2348,6 +2422,26 @@ class SuggestionsPresenter(
 
     private suspend fun renderStoredSuggestions(warmSession: Boolean = false) {
         renderSuggestedList(getCurrentSuggestions(), warmSession = warmSession)
+    }
+
+    private fun renderCommittedSection(
+        section: PlannedSection,
+        suggestions: List<SuggestedManga>,
+    ) {
+        val committed = suggestions
+            .distinctBy { it.source to it.url }
+            .take(SuggestionsConfig.MAX_RESULTS_PER_SECTION)
+            .map { it.toDisplayManga() }
+        if (committed.isEmpty()) return
+
+        _state.update { state ->
+            state.copy(
+                suggestions = state.suggestions + (section.sectionKey to committed),
+                sectionDisplayNames = state.sectionDisplayNames + (section.sectionKey to section.displayReason),
+                selectedSectionKey = state.selectedSectionKey?.takeIf { it in state.suggestions || it == section.sectionKey },
+                emptyMessage = null,
+            )
+        }
     }
 
     private fun renderSectionPreview(
@@ -2443,6 +2537,11 @@ class SuggestionsPresenter(
 
     private fun SuggestedManga.memoryKey(): String =
         "$source:$url"
+
+    private fun String.previewTitleKey(): String =
+        lowercase()
+            .replace(Regex("[^a-z0-9]+"), " ")
+            .trim()
 
     private suspend fun appendExpandedPage(page: ExpandedSectionPage) {
         val displayNow = mutableListOf<SuggestedManga>()
