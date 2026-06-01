@@ -1,6 +1,7 @@
 package yokai.presentation.suggestions
 
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
@@ -43,6 +44,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -270,7 +272,10 @@ fun SuggestionsScreen(
                                 val canExpand = remember(sectionKey, state.sortOrder) { presenter.canExpandSection(sectionKey) }
                                 SuggestionHeader(
                                     displayName = state.sectionDisplayNames[sectionKey] ?: section.displayReason,
-                                    isRefreshing = isActivelyRefreshingSection,
+                                    // Membership in refreshingSectionKeys, not the single
+                                    // activeRefreshingSectionKey, so concurrent per-section
+                                    // refreshes each spin their own header.
+                                    isRefreshing = isRefreshingSection,
                                     hasExpandButton = canExpand,
                                     onRefresh = { onRefreshSection(sectionKey) },
                                     onExpand = if (canExpand) {
@@ -324,7 +329,7 @@ fun SuggestionsScreen(
                                 val canExpand = remember(sectionKey, state.sortOrder) { presenter.canExpandSection(sectionKey) }
                                 SuggestionHeader(
                                     displayName = state.sectionDisplayNames[sectionKey] ?: sectionKey,
-                                    isRefreshing = isActivelyRefreshingSection,
+                                    isRefreshing = isRefreshingSection,
                                     hasExpandButton = canExpand,
                                     onRefresh = { onRefreshSection(sectionKey) },
                                     onExpand = if (canExpand) {
@@ -623,16 +628,21 @@ private fun SuggestionHeader(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
-        if (isRefreshing) {
-            CircularProgressIndicator(
-                modifier = Modifier
-                    .padding(horizontal = 8.dp)
-                    .size(18.dp),
-                strokeWidth = 2.dp,
-                color = MaterialTheme.colorScheme.primary,
-            )
-        }
         onRefresh?.let { refresh ->
+            val refreshRotation = if (isRefreshing) {
+                val transition = rememberInfiniteTransition(label = "section_refresh")
+                val rotation by transition.animateFloat(
+                    initialValue = 0f,
+                    targetValue = 360f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(durationMillis = 850, easing = LinearEasing),
+                    ),
+                    label = "section_refresh_rotation",
+                )
+                rotation
+            } else {
+                0f
+            }
             IconButton(
                 onClick = refresh,
                 enabled = !isRefreshing,
@@ -640,6 +650,7 @@ private fun SuggestionHeader(
                 Icon(
                     imageVector = Icons.Outlined.Refresh,
                     contentDescription = stringResource(MR.strings.refresh),
+                    modifier = Modifier.rotate(refreshRotation),
                     tint = MaterialTheme.colorScheme.primary,
                 )
             }

@@ -97,6 +97,18 @@ class TagProfileRepositoryImpl(
             tag_aliasQueries.findRawTagsBySourceAndCanonical(canonicalTag, sourceId)
         }
 
+    override suspend fun getExactTermsForSource(canonicalTag: String, sourceId: Long): List<String> =
+        handler.awaitList {
+            tag_aliasQueries.findAllRawTagsBySourceAndCanonical(canonicalTag, sourceId)
+        }
+
+    override suspend fun getCommonTermsForCanonical(canonicalTag: String, limit: Int): List<String> =
+        handler.awaitList {
+            tag_aliasQueries.findCommonRawTagsForCanonical(canonicalTag, limit.toLong()) { rawTag ->
+                rawTag.orEmpty()
+            }
+        }.filter { it.isNotBlank() }
+
     override suspend fun recordSourceVocabulary(rawTag: String, canonicalTag: String, sourceId: Long) {
         val rawKey = rawTag.trim().lowercase()
         if (rawKey.isBlank() || canonicalTag.isBlank()) return

@@ -41,17 +41,37 @@ object SuggestionsConfig {
     const val SOURCE_REQUEST_TIMEOUT_MS = 15_000L
     const val SECTION_TIMEOUT_MS = 22_000L
     const val MAX_CANDIDATES_PER_SECTION = 500
-    const val MAX_PER_SOURCE_FETCH = 6
+    // Retrieval needs headroom above the 9-card display target because library/title/blacklist
+    // filtering happens later in SuggestionRanker. If we keep only 9 raw candidates from a rich
+    // source and 2 are already in the user's library, the section can strand at 7-8 even though the
+    // source had enough good manga later on the page. Ranking still controls the final 9-card
+    // display diversity; this cap only decides how much fallback material the ranker may choose from.
+    const val MAX_PER_SOURCE_FETCH = MAX_RESULTS_PER_SECTION * 3
     // Top-up walks deeper pages until the section fills or SECTION_TIMEOUT_MS expires.
     // This matters for heavily-read popular tags: page 1/2 can be fully consumed by
     // seen/history filters, while page 3+ still contains valid unseen manga.
     const val TAG_NATIVE_DRY_PAGE_FALLBACK_THRESHOLD = 2
+    // SourceFilterAuditor genre warmup: poll a source's filter list up to this many times,
+    // waiting this long between reads, for its async genre list to load before recording labels.
+    const val GENRE_WARMUP_POLL_ATTEMPTS = 8
+    const val GENRE_WARMUP_POLL_INTERVAL_MS = 2_000L
+    const val MAX_TEXT_QUERY_TERMS_PER_SOURCE = 5
     const val DRY_SEARCH_PAGE_TTL_MS = 6 * 60 * 60 * 1000L
     // After this many consecutive failures (timeouts or non-transient throwables), a
     // source is skipped at the start of each fetch instead of consuming
     // SOURCE_REQUEST_TIMEOUT_MS again. Resets on any successful fetch. Process-lifetime
     // only — re-evaluated when the app restarts.
     const val SOURCE_COOLDOWN_FAILURE_THRESHOLD = 3
+    // After this many consecutive section fetches where a source's TEXT search returned zero usable
+    // candidates, bench its text search. Benches sources whose text search is structurally broken
+    // for tags (return 0 for everything) so they stop consuming request slots + the section timeout
+    // budget. Native-tag injection is unaffected; any text success resets the streak.
+    const val CHRONIC_EMPTY_TEXT_THRESHOLD = 2
+    // The bench is time-limited, not permanent: after this window a benched source gets one probe.
+    // If it's still empty it re-benches (so a truly-dead source like HentaiHand stays out); if it
+    // produces, the streak resets. Prevents permanently stranding a good source that was merely
+    // unlucky on a couple of niche tags it doesn't carry.
+    const val CHRONIC_EMPTY_TEXT_REPROBE_MS = 30 * 60 * 1000L
     const val MANUAL_REFRESH_MAX_PER_SOURCE_FETCH = 2
     const val EXPANDED_MAX_PER_SOURCE_FETCH = 5
     const val COLD_START_HISTORY_THRESHOLD = 12
@@ -78,6 +98,11 @@ object SuggestionsConfig {
     const val DISCOVERY_CACHE_TTL_MS = 30 * 60 * 1000L
     const val TAG_SECTION_CACHE_TTL_MS = 90 * 60 * 1000L
     const val SEEN_LOG_TTL_MS = 24 * 60 * 60 * 1000L
+    // Candidate cache: filter-passed surplus from a fetch is stored per section and drained on the
+    // next refresh before any network call. TTL matches the seen-log window; capped per section so
+    // the table stays small.
+    const val CANDIDATE_CACHE_TTL_MS = SEEN_LOG_TTL_MS
+    const val CANDIDATE_CACHE_MAX_PER_SECTION = 30
     /** Hard-refresh seen-log retention. Long enough to avoid repeats across a few back-to-back
      *  hard refreshes, short enough that popular titles can resurface within a couple of days. */
     const val SEEN_LOG_HARD_REFRESH_RETENTION_MS = 3 * 24 * 60 * 60 * 1000L

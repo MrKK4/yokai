@@ -23,6 +23,9 @@ class RecentMangaItem(
     header: AbstractHeaderItem<*>?,
     val historyBucket: HistoryBucket? = null,
     val historyBucketCollapsed: Boolean = false,
+    // Empty-state row shown under an expanded history bucket that has no entries, so the
+    // section stays visible (with a "no reading history" message) instead of vanishing.
+    val emptyHistoryBucket: HistoryBucket? = null,
 ) :
     BaseChapterItem<BaseChapterHolder, AbstractHeaderItem<*>>(chapter, header) {
 
@@ -30,6 +33,7 @@ class RecentMangaItem(
 
     override fun getLayoutRes(): Int {
         return when {
+            emptyHistoryBucket != null -> R.layout.recents_history_bucket_empty_item
             historyBucket != null -> R.layout.recents_history_bucket_header_item
             mch.manga.id == null -> R.layout.recents_footer_item
             else -> R.layout.manga_grid_item
@@ -40,7 +44,9 @@ class RecentMangaItem(
         view: View,
         adapter: FlexibleAdapter<IFlexible<RecyclerView.ViewHolder>>,
     ): BaseChapterHolder {
-        return if (historyBucket != null) {
+        return if (emptyHistoryBucket != null) {
+            HistoryBucketEmptyHolder(view, adapter as RecentMangaAdapter)
+        } else if (historyBucket != null) {
             HistoryBucketHeaderHolder(view, adapter as RecentMangaAdapter)
         } else if (mch.manga.id == null) {
             RecentMangaFooterHolder(view, adapter as RecentMangaAdapter)
@@ -50,13 +56,15 @@ class RecentMangaItem(
     }
 
     override fun isSwipeable(): Boolean {
-        return mch.manga.id != null
+        return emptyHistoryBucket == null && mch.manga.id != null
     }
 
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other is RecentMangaItem) {
-            return if (historyBucket != null || other.historyBucket != null) {
+            return if (emptyHistoryBucket != null || other.emptyHistoryBucket != null) {
+                emptyHistoryBucket == other.emptyHistoryBucket
+            } else if (historyBucket != null || other.historyBucket != null) {
                 historyBucket == other.historyBucket
             } else if (mch.manga.id == null) {
                 (header as? RecentMangaHeaderItem)?.recentsType ==
@@ -69,7 +77,10 @@ class RecentMangaItem(
     }
 
     override fun hashCode(): Int {
-        return if (historyBucket != null) {
+        return if (emptyHistoryBucket != null) {
+            // Offset so an empty-state row never collides with its bucket header.
+            31 * emptyHistoryBucket.hashCode() + 1
+        } else if (historyBucket != null) {
             historyBucket.hashCode()
         } else if (mch.manga.id == null) {
             -((header as? RecentMangaHeaderItem)?.recentsType ?: 0).hashCode()
@@ -84,7 +95,9 @@ class RecentMangaItem(
         position: Int,
         payloads: MutableList<Any?>?,
     ) {
-        if (historyBucket != null) {
+        if (emptyHistoryBucket != null) {
+            (holder as? HistoryBucketEmptyHolder)?.bind()
+        } else if (historyBucket != null) {
             (holder as? HistoryBucketHeaderHolder)?.bind(this)
         } else if (mch.manga.id == null) {
             (holder as? RecentMangaFooterHolder)?.bind((header as? RecentMangaHeaderItem)?.recentsType ?: 0)
@@ -97,6 +110,12 @@ class RecentMangaItem(
                 header = null,
                 historyBucket = bucket,
                 historyBucketCollapsed = collapsed,
+            )
+
+        fun historyBucketEmpty(bucket: HistoryBucket): RecentMangaItem =
+            RecentMangaItem(
+                header = null,
+                emptyHistoryBucket = bucket,
             )
     }
 

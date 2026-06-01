@@ -49,7 +49,7 @@ internal object SourceDiversity {
         }
 
         consumeRoundRobin(maxPerSource)
-        if (selected.size < maxResults && maxPerSource != null && productiveSourceCount > 1) {
+        if (selected.size < maxResults && maxPerSource != null) {
             consumeRoundRobin(limitPerSource = null)
         }
         return selected

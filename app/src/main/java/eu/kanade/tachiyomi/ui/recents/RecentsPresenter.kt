@@ -498,16 +498,25 @@ class RecentsPresenter(
         // pagination or queueState collectLatest occasionally re-emitted the same pair
         // and bucket headers ended up rendered twice in a row.
         val dedupedPairs = pairs.distinctBy { it.first.manga.id to it.first.chapter.id }
+        // No history at all → let the page-level empty view show instead of rendering
+        // nine empty bucket placeholders.
+        if (dedupedPairs.isEmpty()) return emptyList()
         val byBucket = dedupedPairs.groupBy { HistoryBucket.fromLastRead(it.first.history.last_read) }
-        val seenBuckets = mutableSetOf<HistoryBucket>()
+        // Every bucket is always rendered with its header. An expanded bucket with no
+        // entries shows an empty-state row ("No reading history in this period") instead
+        // of vanishing — previously an empty expanded bucket was dropped entirely, so
+        // tapping to expand a collapsed-empty bucket made it disappear.
         return HistoryBucket.entries.flatMap { bucket ->
-            if (!seenBuckets.add(bucket)) return@flatMap emptyList()
             val bucketPairs = byBucket[bucket].orEmpty()
-            if (bucketPairs.isEmpty() && bucket.id !in collapsedBuckets) return@flatMap emptyList()
+            val collapsed = bucket.id in collapsedBuckets
             buildList {
-                add(RecentMangaItem.historyBucketHeader(bucket, collapsed = bucket.id in collapsedBuckets))
-                if (bucket.id !in collapsedBuckets) {
-                    addAll(bucketPairs.map { RecentMangaItem(it.first, it.second, null) })
+                add(RecentMangaItem.historyBucketHeader(bucket, collapsed = collapsed))
+                if (!collapsed) {
+                    if (bucketPairs.isEmpty()) {
+                        add(RecentMangaItem.historyBucketEmpty(bucket))
+                    } else {
+                        addAll(bucketPairs.map { RecentMangaItem(it.first, it.second, null) })
+                    }
                 }
             }
         }

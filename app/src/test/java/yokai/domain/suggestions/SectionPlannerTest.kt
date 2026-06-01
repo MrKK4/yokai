@@ -317,6 +317,23 @@ internal class FakeTagProfileRepository : TagProfileRepository {
             .firstOrNull { it.canonicalTag == canonicalTag && it.sourceKey == sourceId }
             ?.rawTag
 
+    override suspend fun getExactTermsForSource(canonicalTag: String, sourceId: Long): List<String> =
+        aliases.values
+            .filter { it.canonicalTag == canonicalTag && it.sourceKey == sourceId }
+            .map { it.rawTag }
+
+    override suspend fun getCommonTermsForCanonical(canonicalTag: String, limit: Int): List<String> =
+        aliases.values
+            .filter { it.canonicalTag == canonicalTag }
+            .groupBy { it.rawKey }
+            .entries
+            .sortedWith(
+                compareByDescending<Map.Entry<String, List<TagAlias>>> { it.value.size }
+                    .thenBy { it.value.first().rawTag.lowercase() },
+            )
+            .map { it.value.first().rawTag }
+            .take(limit)
+
     override suspend fun recordSourceVocabulary(rawTag: String, canonicalTag: String, sourceId: Long) {
         aliases[rawTag.lowercase() to sourceId] = TagAlias(
             rawTag = rawTag,

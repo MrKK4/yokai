@@ -87,7 +87,7 @@ class SourceDiversityTest {
             score = { -it.position.toDouble() },
         )
 
-        assertEquals(SuggestionsConfig.MAIN_FEED_MAX_RESULTS_PER_SOURCE, selected.size)
+        assertEquals(SuggestionsConfig.MAX_RESULTS_PER_SECTION, selected.size)
     }
 
     @Test

@@ -7,7 +7,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -95,66 +95,52 @@ class SourceFilterAuditor(
     private suspend fun runFilterListAudit(sources: List<CatalogueSource>) {
         val gate = Semaphore(AUDIT_PARALLELISM)
 
-        // ── Pass 1 — warmup (no collection) ───────────────────────────────────────
-        // Many extension themes (GalleryAdults, Madara) lazy-fetch their genre list
-        // on the first `getFilterList()` call via a background coroutine, so the
-        // first synchronous return is just Sort/Status/Category — no genre group.
-        // Hitting `getFilterList()` here kicks off that background fetch for every
-        // source in parallel. We discard the returned list; the goal is the side
-        // effect.
-        sources.forEach { source ->
-            try {
-                gate.withPermit {
+        // Poll each source's filter list concurrently until its async genre list loads, then
+        // collect labels. Replaces the old single fixed 5s warmup, which silently captured
+        // nothing whenever a source's genre fetch (GalleryAdults requestTags, Cloudflare, etc.)
+        // took longer than the window — the root cause of tag sections returning 0.
+        val entries = java.util.Collections.synchronizedList(mutableListOf<Triple<String, String, Long>>())
+        coroutineScope {
+            sources.forEach { source ->
+                launch {
                     try {
-                        source.getFilterList()
+                        gate.withPermit {
+                            val filters = try {
+                                source.awaitLoadedFilterList(
+                                    attempts = SuggestionsConfig.GENRE_WARMUP_POLL_ATTEMPTS,
+                                    intervalMs = SuggestionsConfig.GENRE_WARMUP_POLL_INTERVAL_MS,
+                                )
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (_: Throwable) {
+                                return@withPermit
+                            }
+                            val out = mutableListOf<Triple<String, String, Long>>()
+                            filters.forEach { filter -> filter.collectLabels(source.id, out) }
+                            entries.addAll(out)
+                        }
                     } catch (e: CancellationException) {
                         throw e
                     } catch (_: Throwable) {
-                        // Warmup failure is fine — pass 2 will retry and either
-                        // capture nothing or pick up whatever loaded async.
+                        // Single-source failure must never abort the whole audit.
                     }
                 }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Throwable) {
-                // Single-source failure must never abort the whole audit.
             }
         }
 
-        // Give every source's background genre fetch time to commit before the
-        // collection pass. 5s is conservative; most sources finish under 2s. We are
-        // already on Dispatchers.IO running fire-and-forget, so this delay does not
-        // block the caller's `retrieve` call.
-        delay(GENRE_WARMUP_DELAY_MS)
-
-        // ── Pass 2 — collect labels ───────────────────────────────────────────────
-        val entries = mutableListOf<Triple<String, String, Long>>()
-        sources.forEach { source ->
-            try {
-                gate.withPermit {
-                    val filters = try {
-                        source.getFilterList()
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (_: Throwable) {
-                        return@withPermit
-                    }
-                    filters.forEach { filter -> filter.collectLabels(source.id, entries) }
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Throwable) {
-                // Single-source failure must never abort the whole audit.
-            }
+        if (entries.isEmpty()) {
+            // Nothing loaded this run (cold start / every source Cloudflare-gated). Un-latch so a
+            // later refresh re-attempts the warmup instead of giving up for the whole process.
+            audited.set(false)
+            return
         }
 
-        if (entries.isEmpty()) return
-
+        val collected = entries.toList()
         try {
-            tagProfileRepository.recordSourceVocabularyBatch(entries)
+            tagProfileRepository.recordSourceVocabularyBatch(collected)
             debugLog.add(
                 LogType.SECTION_SELECTED,
-                "SourceFilterAuditor wrote ${entries.size} filter-label aliases across ${sources.size} sources (after ${GENRE_WARMUP_DELAY_MS}ms genre warmup)",
+                "SourceFilterAuditor wrote ${collected.size} filter-label aliases across ${sources.size} sources (poll-until-loaded genre warmup)",
             )
         } catch (e: CancellationException) {
             throw e
@@ -199,11 +185,5 @@ class SourceFilterAuditor(
 
     private companion object {
         private const val AUDIT_PARALLELISM = 4
-        // Time given to lazy genre-fetch coroutines (GalleryAdults/Madara themes
-        // launchIO their `/tags/popular/` or `/genres/` request inside `getFilterList`
-        // and populate a mutable field on completion). 5s covers most sources; the
-        // ones that miss this window simply contribute zero filter-label aliases —
-        // not a regression, just no upgrade.
-        private const val GENRE_WARMUP_DELAY_MS = 5_000L
     }
 }

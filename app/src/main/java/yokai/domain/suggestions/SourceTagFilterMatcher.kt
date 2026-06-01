@@ -3,6 +3,10 @@ package yokai.domain.suggestions
 import eu.kanade.tachiyomi.source.CatalogueSource
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
+import kotlinx.coroutines.delay
+
+/** Default backoff between filter-list re-reads while waiting for async genre lists to load. */
+internal const val DEFAULT_FILTER_RELOAD_DELAY_MS = 400L
 
 internal data class SourceTagFilterMatch(
     val filters: FilterList?,
@@ -21,11 +25,68 @@ internal suspend fun CatalogueSource.tryIncludeTagFilter(
 ): FilterList? =
     tryIncludeTagFilterWithDiagnostics(canonicalTag, tagCanonicalizer).filters
 
+/** True once the filter list exposes injectable genre/tag labels (a populated CheckBox/TriState
+ *  group or a multi-value Select). Used to detect when an async genre fetch has landed. */
+internal fun FilterList.hasInjectableTagLabels(): Boolean =
+    any { filter ->
+        when (filter) {
+            is Filter.Group<*> -> filter.state.any { it is Filter.CheckBox || it is Filter.TriState }
+            is Filter.Select<*> -> filter.values.size > 1
+            else -> false
+        }
+    }
+
+/**
+ * Re-reads [getFilterList] up to [attempts] times (waiting [intervalMs] between reads) until the
+ * source's async genre list has loaded ([hasInjectableTagLabels]). Returns the first loaded list,
+ * or the last read if it never loads. Sources whose filters are already populated return on the
+ * first read with no waiting.
+ */
+internal suspend fun CatalogueSource.awaitLoadedFilterList(
+    attempts: Int,
+    intervalMs: Long,
+): FilterList {
+    var filters = getFilterList()
+    var tries = 0
+    while (!filters.hasInjectableTagLabels() && tries < attempts) {
+        if (intervalMs > 0) delay(intervalMs)
+        tries++
+        filters = getFilterList()
+    }
+    return filters
+}
+
 internal suspend fun CatalogueSource.tryIncludeTagFilterWithDiagnostics(
     canonicalTag: String,
     tagCanonicalizer: TagCanonicalizer,
+    maxFilterReloads: Int = 0,
+    reloadDelayMs: Long = DEFAULT_FILTER_RELOAD_DELAY_MS,
 ): SourceTagFilterMatch {
-    val filters = getFilterList()
+    var match = scanFilterListForTag(getFilterList(), canonicalTag, tagCanonicalizer)
+    var reloads = 0
+    // GalleryAdults-style themes fetch their genre list asynchronously, so the first
+    // getFilterList() can return no genre group at all (scannedLabels == 0 and no text tag
+    // field). Re-read with backoff to let that async load land before conceding to text
+    // fallback. A populated-but-non-matching list (scannedLabels > 0) or a text tag field is a
+    // genuine miss, not a load race, so we stop immediately in those cases.
+    while (
+        !match.matched &&
+        match.scannedLabels == 0 &&
+        match.textTagFieldName == null &&
+        reloads < maxFilterReloads
+    ) {
+        if (reloadDelayMs > 0) delay(reloadDelayMs)
+        reloads++
+        match = scanFilterListForTag(getFilterList(), canonicalTag, tagCanonicalizer)
+    }
+    return match
+}
+
+private suspend fun CatalogueSource.scanFilterListForTag(
+    filters: FilterList,
+    canonicalTag: String,
+    tagCanonicalizer: TagCanonicalizer,
+): SourceTagFilterMatch {
     var filterInjected = false
     var matchedLabel: String? = null
     var matchedKind: String? = null
@@ -33,10 +94,12 @@ internal suspend fun CatalogueSource.tryIncludeTagFilterWithDiagnostics(
     var textTagFieldName: String? = null
     var textTagFieldDenied = false
 
-    filters.forEach { filter ->
+    for (filter in filters) {
+        if (filterInjected) break
         when (filter) {
             is Filter.Group<*> -> {
-                filter.state.forEach { item ->
+                for (item in filter.state) {
+                    if (filterInjected) break
                     val matched = when (item) {
                         is Filter.CheckBox -> {
                             scannedLabels++
@@ -66,9 +129,13 @@ internal suspend fun CatalogueSource.tryIncludeTagFilterWithDiagnostics(
                 }
             }
             is Filter.Select<*> -> {
-                val matchIndex = filter.values.indexOfFirst { value ->
+                var matchIndex = -1
+                for ((index, value) in filter.values.withIndex()) {
                     scannedLabels++
-                    tagCanonicalizer.matchesCanonicalTag(value.toString(), canonicalTag, id)
+                    if (tagCanonicalizer.matchesCanonicalTag(value.toString(), canonicalTag, id)) {
+                        matchIndex = index
+                        break
+                    }
                 }
                 if (matchIndex >= 0) {
                     filter.state = matchIndex
@@ -207,6 +274,12 @@ private fun String.normalizedSortText(): String =
 private val SORT_PUNCTUATION = Regex("[^a-z0-9]+")
 private val WHITESPACE = Regex("\\s+")
 private val NON_ALNUM = Regex("[^a-z0-9]+")
+// Sources whose free-text "Tags" field must NOT be injected because their text→tag resolver is
+// broken in practice. HentaiHand's /api/tags?q= lookup throws JsonDecodingException in real use
+// (verified 2026-06-01: injecting its Tags field produced only SECTION_DROPPED errors, zero
+// results — the popular /api/comics endpoint works but the tag-lookup endpoint does not parse).
+// Its TEXT search returns 0 for tag terms, so the chronic-empty cooldown benches it quietly.
+// nhentai keeps its own `tag:` query syntax, so its plain Tags field stays denied too.
 private val TEXT_TAG_FILTER_INJECTION_DENYLIST = setOf(
     "hentaihand",
     "nhentaicom",

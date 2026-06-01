@@ -1,0 +1,49 @@
+CREATE TABLE suggestion_candidate_cache(
+    result_version INTEGER NOT NULL DEFAULT 0,
+    section_key TEXT NOT NULL,
+    source INTEGER NOT NULL,
+    url TEXT NOT NULL,
+    title TEXT NOT NULL,
+    thumbnail_url TEXT,
+    relevance_score REAL NOT NULL DEFAULT 0.0,
+    cached_at INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(result_version, section_key, source, url)
+);
+
+CREATE INDEX suggestion_candidate_cache_section_index
+    ON suggestion_candidate_cache(result_version, section_key, relevance_score);
+CREATE INDEX suggestion_candidate_cache_cached_at_index
+    ON suggestion_candidate_cache(cached_at);
+
+insertCandidate:
+INSERT OR REPLACE INTO suggestion_candidate_cache(result_version, section_key, source, url, title, thumbnail_url, relevance_score, cached_at)
+VALUES(:resultVersion, :sectionKey, :source, :url, :title, :thumbnailUrl, :relevanceScore, :cachedAt);
+
+findBySection:
+SELECT *
+FROM suggestion_candidate_cache
+WHERE result_version = :resultVersion AND section_key = :sectionKey
+ORDER BY relevance_score DESC
+LIMIT :limit;
+
+countBySection:
+SELECT COUNT(*)
+FROM suggestion_candidate_cache
+WHERE result_version = :resultVersion AND section_key = :sectionKey;
+
+deleteEntry:
+DELETE FROM suggestion_candidate_cache
+WHERE result_version = :resultVersion AND section_key = :sectionKey AND source = :source AND url = :url;
+
+deleteBySection:
+DELETE FROM suggestion_candidate_cache
+WHERE result_version = :resultVersion AND section_key = :sectionKey;
+
+deleteOlderThan:
+DELETE FROM suggestion_candidate_cache WHERE cached_at < :cutoff;
+
+deleteByResultVersion:
+DELETE FROM suggestion_candidate_cache WHERE result_version = :resultVersion;
+
+deleteAll:
+DELETE FROM suggestion_candidate_cache;

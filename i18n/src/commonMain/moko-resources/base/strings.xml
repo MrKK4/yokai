@@ -339,6 +339,7 @@
     <string name="history_up_to_90_days">Up to 90 days</string>
     <string name="history_up_to_120_days">Up to 120 days</string>
     <string name="history_over_120_days">120+ days</string>
+    <string name="history_bucket_empty">No reading history in this period</string>
     <string name="uniform_covers">Uniform covers</string>
     <string name="affects_library_grid">Affects library grid covers</string>
     <string name="only_unread">Only unread</string>

@@ -47,6 +47,21 @@ AND source_key = :sourceId
 ORDER BY raw_tag COLLATE NOCASE ASC
 LIMIT 1;
 
+findAllRawTagsBySourceAndCanonical:
+SELECT raw_tag
+FROM tag_alias
+WHERE canonical_tag = :canonicalTag
+AND source_key = :sourceId
+ORDER BY raw_tag COLLATE NOCASE ASC;
+
+findCommonRawTagsForCanonical:
+SELECT MIN(raw_tag) AS raw_tag
+FROM tag_alias
+WHERE canonical_tag = :canonicalTag
+GROUP BY raw_key
+ORDER BY COUNT(*) DESC, raw_tag COLLATE NOCASE ASC
+LIMIT :limit;
+
 -- Idempotent insert — never overwrites existing aliases (global or hand-crafted).
 -- Used by the self-learning vocabulary path inside CandidateRetriever.
 insertOrIgnoreAlias:

@@ -39,6 +39,7 @@ import yokai.data.DatabaseHandler
 import yokai.data.suggestions.PlannedSectionRepositoryImpl
 import yokai.data.suggestions.AndroidSuggestionNetworkStatus
 import yokai.data.suggestions.ShownMangaHistoryRepositoryImpl
+import yokai.data.suggestions.SuggestionCandidateCacheRepositoryImpl
 import yokai.data.suggestions.SuggestionSeenLogRepositoryImpl
 import yokai.data.suggestions.SuggestionsRepositoryImpl
 import yokai.data.suggestions.TagProfileRepositoryImpl
@@ -46,6 +47,7 @@ import yokai.domain.SplashState
 import yokai.domain.storage.StorageManager
 import yokai.domain.suggestions.PlannedSectionRepository
 import yokai.domain.suggestions.ShownMangaHistoryRepository
+import yokai.domain.suggestions.SuggestionCandidateCacheRepository
 import yokai.domain.suggestions.SuggestionSeenLogRepository
 import yokai.domain.suggestions.SuggestionNetworkStatus
 import yokai.domain.suggestions.SuggestionsRepository
@@ -59,6 +61,7 @@ fun appModule(app: Application) = module {
     single<ShownMangaHistoryRepository> { ShownMangaHistoryRepositoryImpl(get()) }
     single<TagProfileRepository> { TagProfileRepositoryImpl(get()) }
     single<SuggestionSeenLogRepository> { SuggestionSeenLogRepositoryImpl(get()) }
+    single<SuggestionCandidateCacheRepository> { SuggestionCandidateCacheRepositoryImpl(get()) }
     single<PlannedSectionRepository> { PlannedSectionRepositoryImpl(get()) }
     single<SuggestionNetworkStatus> { AndroidSuggestionNetworkStatus(get()) }
 

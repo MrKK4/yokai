@@ -14,6 +14,8 @@ weblate.conf
 
 # Local profiling artifacts
 /profiling/
+/report/
+/reports/
 
 # Local AI assistant / configuration directories
 .claude/

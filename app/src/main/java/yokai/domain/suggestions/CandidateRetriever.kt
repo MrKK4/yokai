@@ -78,9 +78,20 @@ class CandidateRetriever(
      * refresh.
      */
     private val consecutiveSourceFailures = ConcurrentHashMap<Long, AtomicInteger>()
+    /**
+     * Consecutive section fetches where a source's TEXT search produced zero usable candidates.
+     * Process-lifetime; reset on any text success. Used by [isTextSearchCooledDown] to bench
+     * sources whose text search is structurally empty for tags (e.g. a title-only search that
+     * never matches tag terms) so they stop burning request slots on every section.
+     */
+    private val consecutiveEmptyTextFetches = ConcurrentHashMap<Long, AtomicInteger>()
+    /** Epoch-millis until which a chronically-empty source's text search stays benched. After it
+     *  passes, the source gets one probe (re-benches if still empty, resets on success). */
+    private val textBenchUntil = ConcurrentHashMap<Long, Long>()
     private val drySearchPages = ConcurrentHashMap<String, Long>()
     private val nativeDryPageStreaks = ConcurrentHashMap<String, AtomicInteger>()
     private val textFallbackStartPages = ConcurrentHashMap<String, Int>()
+    private val productiveTextQueries = ConcurrentHashMap<String, String>()
 
     private fun isSourceCooldownActive(sourceId: Long): Boolean {
         val count = consecutiveSourceFailures[sourceId]?.get() ?: 0
@@ -97,15 +108,42 @@ class CandidateRetriever(
         consecutiveSourceFailures[sourceId]?.set(0)
     }
 
+    private fun isTextSearchCooledDown(sourceId: Long): Boolean {
+        val count = consecutiveEmptyTextFetches[sourceId]?.get() ?: 0
+        if (count < SuggestionsConfig.CHRONIC_EMPTY_TEXT_THRESHOLD) return false
+        // Benched only until the re-probe window elapses; after that, allow one probe through.
+        val benchUntil = textBenchUntil[sourceId] ?: 0L
+        return System.currentTimeMillis() < benchUntil
+    }
+
+    private fun recordEmptyTextFetch(sourceId: Long) {
+        val count = consecutiveEmptyTextFetches
+            .getOrPut(sourceId) { AtomicInteger(0) }
+            .incrementAndGet()
+        if (count >= SuggestionsConfig.CHRONIC_EMPTY_TEXT_THRESHOLD) {
+            // (Re-)bench: a probe that came back empty extends the window.
+            textBenchUntil[sourceId] = System.currentTimeMillis() + SuggestionsConfig.CHRONIC_EMPTY_TEXT_REPROBE_MS
+        }
+    }
+
+    private fun recordTextFetchSuccess(sourceId: Long) {
+        consecutiveEmptyTextFetches[sourceId]?.set(0)
+        textBenchUntil.remove(sourceId)
+    }
+
     private fun dryPageKey(
         source: CatalogueSource,
         section: PlannedSection,
         mode: SearchQueryMode,
         page: Int,
+        query: String? = null,
     ): String =
-        "${source.id}:${section.sectionKey}:${section.sortOrder}:${mode.name}:${page.coerceAtLeast(1)}"
+        "${source.id}:${section.sectionKey}:${section.sortOrder}:${mode.name}:${page.coerceAtLeast(1)}:${query?.normalizedTextQueryKey().orEmpty()}"
 
     private fun dryStreakKey(source: CatalogueSource, section: PlannedSection): String =
+        "${source.id}:${section.sectionKey}:${section.sortOrder}"
+
+    private fun textSuccessKey(source: CatalogueSource, section: PlannedSection): String =
         "${source.id}:${section.sectionKey}:${section.sortOrder}"
 
     private fun isDrySearchPage(
@@ -113,10 +151,11 @@ class CandidateRetriever(
         section: PlannedSection,
         mode: SearchQueryMode,
         page: Int,
+        query: String? = null,
     ): Boolean {
         val normalizedPage = page.coerceAtLeast(1)
         if (normalizedPage == 1) return false
-        val key = dryPageKey(source, section, mode, normalizedPage)
+        val key = dryPageKey(source, section, mode, normalizedPage, query)
         val markedAt = drySearchPages[key] ?: return false
         return if (System.currentTimeMillis() - markedAt <= SuggestionsConfig.DRY_SEARCH_PAGE_TTL_MS) {
             true
@@ -131,10 +170,11 @@ class CandidateRetriever(
         section: PlannedSection,
         mode: SearchQueryMode,
         page: Int,
+        query: String? = null,
     ) {
         val normalizedPage = page.coerceAtLeast(1)
         if (normalizedPage == 1) return
-        drySearchPages[dryPageKey(source, section, mode, normalizedPage)] = System.currentTimeMillis()
+        drySearchPages[dryPageKey(source, section, mode, normalizedPage, query)] = System.currentTimeMillis()
     }
 
     private fun recordNativeSearchPageResult(
@@ -420,7 +460,15 @@ class CandidateRetriever(
                         }
                         allCandidates.addAll(batch)
                     }
-                    if (allCandidates.distinctBy { it.sourceId to it.manga.url }.size >= targetCandidateCount) {
+                    // Only DISCOVERY (popular/latest) sections early-break on raw count — those
+                    // sources are abundant and interchangeable. Tag sections must query EVERY
+                    // source: raw count is a poor proxy (cross-mirror title dedup collapses it),
+                    // and which sources actually support a niche tag rotates, so stopping after the
+                    // first chunk silently strands the section. SECTION_TIMEOUT_MS bounds wall time.
+                    if (
+                        section.type == SectionType.DISCOVERY &&
+                        allCandidates.distinctBy { it.sourceId to it.manga.url }.size >= targetCandidateCount
+                    ) {
                         break
                     }
                 }
@@ -620,19 +668,18 @@ class CandidateRetriever(
         }
         suspend fun fetchPage(p: Int) = requestGate.withPermit {
             when (section.sortOrder) {
-                SuggestionSortOrder.Latest -> {
-                    val latest = if (source.supportsLatest) {
+                SuggestionSortOrder.Latest ->
+                    if (source.supportsLatest) {
                         sourceResult(sourceId = source.id) {
                             source.getLatestUpdates(p)
                         }
                     } else {
+                        debugLog.add(
+                            LogType.SORT_FALLBACK,
+                            "Source ${source.id} (${source.name}): skipped discovery Latest because source does not support latest updates",
+                        )
                         null
                     }
-                    latest?.takeIf { it.mangas.isNotEmpty() }
-                        ?: sourceResult(sourceId = source.id) {
-                            source.getPopularManga(p)
-                        }
-                }
                 SuggestionSortOrder.Popular ->
                     sourceResult(sourceId = source.id) {
                         source.getPopularManga(p)
@@ -709,83 +756,97 @@ class CandidateRetriever(
         }
         val canonicalTag = section.canonicalTag
 
-        fun textQueryCandidates(initialQuery: String): List<String> {
-            val seenQueries = mutableSetOf(initialQuery)
-            return buildList {
-                add(initialQuery)
-                if (canonicalTag != null) {
-                    section.searchTerms.drop(1).forEach {
-                        if (it !in seenQueries) {
-                            add(it)
-                            seenQueries.add(it)
-                        }
-                    }
-                    if (canonicalTag !in seenQueries) {
-                        add(canonicalTag)
-                        seenQueries.add(canonicalTag)
-                    }
-                }
-            }.distinct()
-        }
-
         suspend fun fetchTextSearch(
             textPage: Int,
-            initialQuery: String,
+            queryCandidates: List<String>,
             reason: String,
         ): List<SuggestionCandidate> {
             val normalizedPage = textPage.coerceAtLeast(1)
-            if (isDrySearchPage(source, section, SearchQueryMode.TEXT, normalizedPage)) {
+            if (queryCandidates.isEmpty()) return emptyList()
+            // Chronic-empty bench: a source whose text search returned zero across the last N
+            // section fetches is skipped here so it stops burning a request slot + section-timeout
+            // budget on every refresh (the dominant waste from broken title-only search sources).
+            if (isTextSearchCooledDown(source.id)) {
                 debugLog.add(
-                    LogType.SORT_FALLBACK,
-                    "Source ${source.id} (${source.name}): skipped dry text page $normalizedPage for '${section.sectionKey}'",
+                    LogType.SOURCE_CAP_HIT,
+                    "Source ${source.id} (${source.name}): text search benched — " +
+                        "${SuggestionsConfig.CHRONIC_EMPTY_TEXT_THRESHOLD}+ consecutive empty text fetches",
                 )
                 return emptyList()
             }
-            val q = textQueryCandidates(initialQuery).firstOrNull() ?: return emptyList()
             val filters = safeFreshFilterList(source).also {
                 it.tryApplySuggestionSort(section.sortOrder)
             }
-            val result = requestGate.withPermit {
-                sourceResult(sourceId = source.id) {
-                    source.getSearchManga(normalizedPage, q, filters)
+            var skippedDryQueries = 0
+            for (q in queryCandidates) {
+                if (isDrySearchPage(source, section, SearchQueryMode.TEXT, normalizedPage, q)) {
+                    skippedDryQueries++
+                    debugLog.add(
+                        LogType.SORT_FALLBACK,
+                        "Source ${source.id} (${source.name}): skipped dry text page $normalizedPage query '$q' for '${section.sectionKey}'",
+                    )
+                    continue
                 }
-            } ?: return emptyList()
-            learnVocabulary(result.mangas, source.id)
-            val candidates = cappedCandidates(
-                section = section,
-                sourceId = source.id,
-                sourceIndex = sourceIndex,
-                searchTerm = q,
-                mangas = result.mangas,
-                countBySource = countBySource,
-                maxPerSourceFetch = maxPerSourceFetch,
-                blockedMangaKeys = blockedMangaKeys,
-            )
-            logSourceResult(
-                section = section,
-                source = source,
-                mode = "TEXT",
-                page = normalizedPage,
-                query = q,
-                rawCount = result.mangas.size,
-                usableCount = candidates.size,
-                reason = reason,
-            )
-            if (candidates.isNotEmpty() && reason != "primary text search") {
+                val result = requestGate.withPermit {
+                    sourceResult(sourceId = source.id) {
+                        source.getSearchManga(normalizedPage, q, filters)
+                    }
+                } ?: return emptyList()
+                learnVocabulary(result.mangas, source.id)
+                val candidates = cappedCandidates(
+                    section = section,
+                    sourceId = source.id,
+                    sourceIndex = sourceIndex,
+                    searchTerm = q,
+                    mangas = result.mangas,
+                    countBySource = countBySource,
+                    maxPerSourceFetch = maxPerSourceFetch,
+                    blockedMangaKeys = blockedMangaKeys,
+                )
+                logSourceResult(
+                    section = section,
+                    source = source,
+                    mode = "TEXT",
+                    page = normalizedPage,
+                    query = q,
+                    rawCount = result.mangas.size,
+                    usableCount = candidates.size,
+                    reason = reason,
+                )
+                if (candidates.isNotEmpty()) {
+                    productiveTextQueries[textSuccessKey(source, section)] = q
+                    recordTextFetchSuccess(source.id)
+                    if (reason != "primary text search") {
+                        debugLog.add(
+                            LogType.SECTION_SELECTED,
+                            "Source ${source.id} (${source.name}): text fallback '$q' page $normalizedPage produced ${candidates.size} usable results for '${section.sectionKey}'",
+                        )
+                    }
+                    return candidates
+                }
+                markDrySearchPage(source, section, SearchQueryMode.TEXT, normalizedPage, q)
+            }
+            // At least one query actually hit the network and all returned zero usable candidates —
+            // count it toward the chronic-empty bench (reset above on any success). If every query
+            // was skipped as a known-dry page, no real attempt happened, so don't count it.
+            if (skippedDryQueries < queryCandidates.size) {
+                recordEmptyTextFetch(source.id)
+            }
+            if (skippedDryQueries == queryCandidates.size) {
                 debugLog.add(
-                    LogType.SECTION_SELECTED,
-                    "Source ${source.id} (${source.name}): text fallback '$q' page $normalizedPage produced ${candidates.size} usable results for '${section.sectionKey}'",
+                    LogType.SORT_FALLBACK,
+                    "Source ${source.id} (${source.name}): skipped all dry text queries on page $normalizedPage for '${section.sectionKey}'",
                 )
             }
-            if (candidates.isEmpty()) {
-                markDrySearchPage(source, section, SearchQueryMode.TEXT, normalizedPage)
-            }
-            return candidates
+            return emptyList()
         }
 
         // ── Phase A: tag/genre filter injection ──────────────────────────────────
         val tagFilterMatch = canonicalTag?.let { tag ->
             sourceResult(sourceId = source.id, countFailure = false) {
+                // Genre warming is done once at startup by SourceFilterAuditor (poll-until-loaded),
+                // so by fetch time the source singleton's genres are cached. No per-fetch reload
+                // here — that would waste backoff on every genuinely filter-less search source.
                 source.tryIncludeTagFilterWithDiagnostics(tag, tagCanonicalizer)
             }
         }
@@ -795,11 +856,27 @@ class CandidateRetriever(
         val exactTerm = canonicalTag?.let {
             tagProfileRepository.getExactTermForSource(it, source.id)
         }
-        val textQuery = exactTerm
-            ?.takeUnless { source.requiresHumanTextFallback() && it.looksLikeTagSlugOrCode() }
-            ?: section.searchTerms.firstOrNull()
+        val exactTerms = canonicalTag?.let {
+            tagProfileRepository.getExactTermsForSource(it, source.id)
+        }.orEmpty()
+        val commonTerms = canonicalTag?.let {
+            tagProfileRepository.getCommonTermsForCanonical(
+                canonicalTag = it,
+                limit = SuggestionsConfig.MAX_TEXT_QUERY_TERMS_PER_SOURCE,
+            )
+        }.orEmpty()
+        val initialTextQuery = exactTerm
             ?: canonicalTag
+            ?: section.searchTerms.firstOrNull()
             ?: return emptyList()
+        val textQueries = textQueryCandidates(
+            source = source,
+            section = section,
+            initialQuery = initialTextQuery,
+            sourceTerms = exactTerms,
+            commonTerms = commonTerms,
+        )
+        val textQuery = textQueries.firstOrNull() ?: return emptyList()
 
         if (forceTextSearch) {
             debugLog.add(
@@ -808,7 +885,7 @@ class CandidateRetriever(
             )
             return fetchTextSearch(
                 textPage = page,
-                initialQuery = textQuery,
+                queryCandidates = textQueries,
                 reason = "dry source text fallback",
             )
         }
@@ -816,7 +893,7 @@ class CandidateRetriever(
         if (fallbackPage != null) {
             return fetchTextSearch(
                 textPage = fallbackPage,
-                initialQuery = textQuery,
+                queryCandidates = textQueries,
                 reason = "native tag dry-page fallback",
             )
         }
@@ -880,7 +957,7 @@ class CandidateRetriever(
                 )
                 return fetchTextSearch(
                     textPage = 1,
-                    initialQuery = textQuery,
+                    queryCandidates = textQueries,
                     reason = "native tag dry-page fallback",
                 )
             }
@@ -905,10 +982,64 @@ class CandidateRetriever(
         }
         return fetchTextSearch(
             textPage = page,
-            initialQuery = textQuery,
+            queryCandidates = textQueries,
             reason = "primary text search",
         )
     }
+
+    private fun textQueryCandidates(
+        source: CatalogueSource,
+        section: PlannedSection,
+        initialQuery: String,
+        sourceTerms: List<String>,
+        commonTerms: List<String>,
+    ): List<String> {
+        val canonicalTag = section.canonicalTag
+        val sourceNeedsHumanText = source.requiresHumanTextFallback()
+        val successfulQuery = productiveTextQueries[textSuccessKey(source, section)]
+        val naturalSourceTerms = sourceTerms.naturalTextOrder()
+        val naturalSectionTerms = section.searchTerms.naturalTextOrder()
+
+        val ordered = buildList {
+            addTextTerm(successfulQuery)
+            if (sourceNeedsHumanText) {
+                addTextTerm(canonicalTag)
+                addTextTerms(naturalSourceTerms.filterNot { it.looksLikeTagSlugOrCode() })
+                addTextTerms(commonTerms.naturalTextOrder())
+                addTextTerms(naturalSectionTerms)
+                addTextTerms(naturalSourceTerms.filter { it.looksLikeTagSlugOrCode() })
+                addTextTerm(initialQuery)
+            } else {
+                addTextTerms(sourceTerms)
+                addTextTerm(initialQuery)
+                addTextTerm(canonicalTag)
+                addTextTerms(commonTerms.naturalTextOrder())
+                addTextTerms(naturalSectionTerms)
+            }
+        }
+
+        return ordered
+            .flatMap(::splitTextQueryAlternatives)
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinctBy { it.normalizedTextQueryKey() }
+            .take(SuggestionsConfig.MAX_TEXT_QUERY_TERMS_PER_SOURCE)
+    }
+
+    private fun MutableList<String>.addTextTerm(term: String?) {
+        if (!term.isNullOrBlank()) add(term)
+    }
+
+    private fun MutableList<String>.addTextTerms(terms: Iterable<String>) {
+        terms.forEach { addTextTerm(it) }
+    }
+
+    private fun List<String>.naturalTextOrder(): List<String> =
+        sortedWith(
+            compareBy<String> { it.looksLikeTagSlugOrCode() }
+                .thenBy { it.normalizedTextQueryKey().length }
+                .thenBy { it.normalizedTextQueryKey() },
+        )
 
     /**
      * Record raw genre strings returned by [sourceId] into the alias table so future
@@ -967,12 +1098,20 @@ class CandidateRetriever(
     }
 
     private fun String.looksLikeTagSlugOrCode(): Boolean =
-        '-' in this || '.' in this
+        '-' in this || '.' in this || TAG_CODE_PATTERN.matches(trim())
+
+    private fun String.normalizedTextQueryKey(): String =
+        lowercase()
+            .replace(NON_ALNUM, " ")
+            .replace(WHITESPACE, " ")
+            .trim()
 
     private companion object {
         private const val LEARN_VOCAB_MAX_ATTEMPTS = 2
         private const val LEARN_VOCAB_RETRY_BACKOFF_MS = 250L
         private val NON_ALNUM = Regex("[^a-z0-9]+")
+        private val WHITESPACE = Regex("\\s+")
+        private val TAG_CODE_PATTERN = Regex("""\d+[a-z]+""")
     }
 
     private fun logSourceResult(
@@ -1093,6 +1232,13 @@ class CandidateRetriever(
 
     private fun mangaKey(sourceId: Long, url: String): String = "$sourceId:$url"
 
+    private fun splitTextQueryAlternatives(query: String): List<String> =
+        query
+            .split(TEXT_QUERY_ALTERNATIVE_SEPARATOR)
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .ifEmpty { listOf(query.trim()) }
+
     private suspend fun <T> sourceResult(
         sourceId: Long? = null,
         countFailure: Boolean = true,
@@ -1160,6 +1306,8 @@ class CandidateRetriever(
         }
 
 }
+
+private val TEXT_QUERY_ALTERNATIVE_SEPARATOR = Regex("[,;|]+")
 
 private enum class SearchQueryMode {
     NATIVE_TAG,

@@ -19,6 +19,16 @@ data class RankingContext(
     val blacklistedTags: Set<String>,
 )
 
+/**
+ * Result of ranking one section: [shown] are the selected, display-ranked cards; [surplus] are the
+ * remaining candidates that passed every filter and were ranked but didn't fit the display target
+ * (highest score first). Surplus is what the candidate cache persists for the next refresh.
+ */
+data class RankedSection(
+    val shown: List<SuggestedManga>,
+    val surplus: List<SuggestedManga>,
+)
+
 class SuggestionRanker(
     private val mangaRepository: MangaRepository,
     private val tagCanonicalizer: TagCanonicalizer,
@@ -65,9 +75,38 @@ class SuggestionRanker(
                 blacklistedTags = context.blacklistedTags,
                 recentSessionTags = recentSessionTags,
                 maxResults = maxResults,
-            )
+            ).shown
         }
         return rankedBySection.mapIndexed { index, suggestion -> suggestion.copy(displayRank = index.toLong()) }
+    }
+
+    /**
+     * Ranks a SINGLE section and returns both the shown cards (display-ranked) and the leftover
+     * [RankedSection.surplus] that passed all filters but didn't fit the target. Used by the
+     * candidate-cache path so surplus can be persisted and drained on the next refresh.
+     */
+    suspend fun rankSectionWithSurplus(
+        result: CandidateRetrievalResult,
+        context: RankingContext,
+        globalSeenKeys: Set<String>,
+        sectionSeenKeys: Map<String, Set<String>>,
+        sessionContext: SessionContext,
+        maxResults: Int = SuggestionsConfig.MAX_RESULTS_PER_SECTION,
+    ): RankedSection {
+        val ranked = rankSection(
+            result = result,
+            localKeys = context.localKeys,
+            localTitles = context.localTitles,
+            globalSeenKeys = globalSeenKeys,
+            sectionSeenKeys = sectionSeenKeys[result.section.sectionKey].orEmpty(),
+            profiles = context.profiles,
+            blacklistedTags = context.blacklistedTags,
+            recentSessionTags = sessionContext.getRecentTags(),
+            maxResults = maxResults,
+        )
+        return ranked.copy(
+            shown = ranked.shown.mapIndexed { index, suggestion -> suggestion.copy(displayRank = index.toLong()) },
+        )
     }
 
     /**
@@ -112,7 +151,7 @@ class SuggestionRanker(
         blacklistedTags: Set<String>,
         recentSessionTags: Set<String>,
         maxResults: Int = SuggestionsConfig.MAX_RESULTS_PER_SECTION,
-    ): List<SuggestedManga> {
+    ): RankedSection {
 
         val coldStartDiscovery = result.section.isColdStartDiscovery()
         val bestByTitle = linkedMapOf<String, ScoredCandidate>()
@@ -175,13 +214,36 @@ class SuggestionRanker(
                 null
             }
             val rankedCandidates = bestByTitle.values
-            val selected = if (!coldStartDiscovery && result.section.canonicalTag != null) {
-                rankedCandidates.preferNativeTagResults(effectiveMax, maxPerSource)
+            // Diversity-first selection. roundRobinBySource caps each source at maxPerSource, then
+            // relaxes that cap to fill toward the target ONLY when more than one source produced
+            // results — so multiple thin sources still fill the row, but a lone surviving source
+            // never dominates the whole section (see SourceDiversity.roundRobinBySource).
+            val selected =
+                if (!coldStartDiscovery && result.section.canonicalTag != null) {
+                    rankedCandidates.preferNativeTagResults(effectiveMax, maxPerSource)
+                } else {
+                    rankedCandidates.roundRobinBySource(effectiveMax, maxPerSource)
+                }
+
+            // Surplus: filter-passed, ranked candidates that didn't fit the display target. The
+            // candidate cache persists these so the next refresh can show them without a network
+            // call. Skipped for cold-start (no cache there) to avoid materializing a huge list.
+            val surplus = if (coldStartDiscovery) {
+                emptyList()
             } else {
-                rankedCandidates.roundRobinBySource(effectiveMax, maxPerSource)
+                val chosen = selected.toHashSet()
+                rankedCandidates
+                    .asSequence()
+                    .filterNot { it in chosen }
+                    .sortedByDescending { it.score }
+                    .map { it.toSuggestedManga() }
+                    .toList()
             }
-            selected
-                .map { it.toSuggestedManga() }
+
+            RankedSection(
+                shown = selected.map { it.toSuggestedManga() },
+                surplus = surplus,
+            )
         }
     }
 

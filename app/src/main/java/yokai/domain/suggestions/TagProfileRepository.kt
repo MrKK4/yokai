@@ -18,6 +18,8 @@ interface TagProfileRepository {
      * so we send the source's own vocabulary instead of a generic canonical key.
      */
     suspend fun getExactTermForSource(canonicalTag: String, sourceId: Long): String?
+    suspend fun getExactTermsForSource(canonicalTag: String, sourceId: Long): List<String>
+    suspend fun getCommonTermsForCanonical(canonicalTag: String, limit: Int): List<String>
     /**
      * Persists a (sourceId, rawTag → canonicalTag) alias learned from a live source
      * result so future fetches from the same source can use the exact string the source

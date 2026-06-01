@@ -43,6 +43,75 @@ class CandidateRetrieverColdStartTest {
     }
 
     @Test
+    fun `keeps a full page of usable results instead of discarding a productive source's extras below target`() = runBlocking {
+        // Regression guard for thin sections: a source returns 8 UNSEEN results on page 1,
+        // but page 2 is entirely already-seen, so the deeper-page backstop can add nothing.
+        // The retriever must surface all 8 page-1 results the section needs instead of
+        // stranding the section below target through an over-tight cap/backfill change.
+        val source = FakeColdStartSource(id = 30L, titlePrefix = "Rich", resultCount = 8)
+        val pageTwoSeen = (0 until 8).map { "30:/30/2/$it" }.toSet()
+        val retriever = retrieverWith(source)
+
+        val results = retriever.retrieve(
+            sections = listOf(normalDiscoverySection()),
+            globalSeenKeys = pageTwoSeen,
+        )
+
+        assertEquals(8, results.single().candidates.size)
+    }
+
+    @Test
+    fun `retrieval keeps source headroom above display target for later ranker filtering`() = runBlocking {
+        val source = FakeColdStartSource(id = 32L, titlePrefix = "Rich", resultCount = 24)
+        val retriever = retrieverWith(source)
+
+        val results = retriever.retrieve(
+            sections = listOf(normalDiscoverySection()),
+            allowPageBackstop = false,
+        )
+
+        assertEquals(24, results.single().candidates.size)
+        assertTrue(results.single().candidates.size > SuggestionsConfig.MAX_RESULTS_PER_SECTION)
+    }
+
+    @Test
+    fun `chronically empty text source is cooled down and stops being queried`() = runBlocking {
+        // A text-only source that returns 0 for every query across consecutive section fetches
+        // (e.g. a broken HentaiHand text search) gets benched so it stops burning request slots.
+        val source = FakeSearchSource(id = 40L, pageOneCount = 0, otherPageCount = 0)
+        val retriever = retrieverWith(source)
+
+        repeat(SuggestionsConfig.CHRONIC_EMPTY_TEXT_THRESHOLD) {
+            retriever.retrieve(sections = listOf(tagSection()), allowPageBackstop = false)
+        }
+        val callsWhileActive = source.searchQueries.size
+
+        // Threshold reached → the next fetch must skip this source's text search entirely.
+        retriever.retrieve(sections = listOf(tagSection()), allowPageBackstop = false)
+
+        assertEquals(callsWhileActive, source.searchQueries.size)
+    }
+
+    @Test
+    fun `tag sections query every source instead of early-breaking after the first chunk`() = runBlocking {
+        // 9 sources, each returns 3 on a text query → chunk 1 (8 sources) already exceeds the raw
+        // early-break threshold. A tag section must still query the 9th source (chunk 2): which
+        // sources support a niche tag rotates, and skipping them is the inconsistent-fill bug.
+        val sources = (1L..9L)
+            .map { id -> FakeSearchSource(id = id, pageOneCount = 3, otherPageCount = 0) }
+            .toTypedArray()
+        val retriever = retrieverWith(*sources)
+
+        val results = retriever.retrieve(
+            sections = listOf(tagSection()),
+            allowPageBackstop = false,
+        )
+
+        val sourceIds = results.single().candidates.map { it.sourceId }.toSet()
+        assertEquals(9, sourceIds.size)
+    }
+
+    @Test
     fun `manual section refresh can cap normal source candidates shallowly`() = runBlocking {
         val source = FakeColdStartSource(id = 3L, titlePrefix = "Wide", resultCount = 10)
         val retriever = retrieverWith(source)
@@ -54,6 +123,27 @@ class CandidateRetrieverColdStartTest {
 
         assertEquals(2, results.single().candidates.size)
         assertEquals(setOf(3L), results.single().candidates.map { it.sourceId }.toSet())
+    }
+
+    @Test
+    fun `latest discovery does not silently fall back to popular results`() = runBlocking {
+        val source = FakeColdStartSource(
+            id = 25L,
+            titlePrefix = "Popular",
+            resultCount = 6,
+            latestResultCount = 0,
+        )
+        val retriever = retrieverWith(source)
+
+        val results = retriever.retrieve(
+            sections = listOf(latestDiscoverySection()),
+            pageOffset = 2,
+            allowPageBackstop = false,
+        )
+
+        assertTrue(results.single().candidates.isEmpty())
+        assertEquals(listOf(2, 1), source.latestPages)
+        assertEquals(emptyList<Int>(), source.popularPages)
     }
 
     @Test
@@ -85,7 +175,11 @@ class CandidateRetrieverColdStartTest {
     }
 
     @Test
-    fun `sections under display target try one page two top up after filtering`() = runBlocking {
+    fun `sections under display target top up across pages keeping ranker headroom`() = runBlocking {
+        // Page 1 has 3 seen + 5 unseen; with the per-source cap raised well above the 9 target for
+        // ranker headroom, a single productive source keeps every unseen result from page 1 AND the
+        // page-2 top-up (5 + 8 = 13) rather than stranding the section. The ranker later trims the
+        // visible 9 from this pool, so retaining the surplus is what makes the fill reliable.
         val source = FakeColdStartSource(id = 6L, titlePrefix = "SeenFiltered", resultCount = 8)
         val retriever = retrieverWith(source)
 
@@ -95,7 +189,10 @@ class CandidateRetrieverColdStartTest {
         )
 
         assertEquals(
-            listOf("/6/1/3", "/6/1/4", "/6/1/5", "/6/1/6", "/6/1/7", "/6/2/0"),
+            listOf(
+                "/6/1/3", "/6/1/4", "/6/1/5", "/6/1/6", "/6/1/7",
+                "/6/2/0", "/6/2/1", "/6/2/2", "/6/2/3", "/6/2/4", "/6/2/5", "/6/2/6", "/6/2/7",
+            ),
             results.single().candidates.map { it.manga.url },
         )
     }
@@ -219,29 +316,172 @@ class CandidateRetrieverColdStartTest {
     }
 
     @Test
-    fun `text fallback tries one query per source and does not burn alias variants`() = runBlocking {
+    fun `text fallback does not repeat case-only query variants`() = runBlocking {
         val source = FakeSearchSource(id = 24L, pageOneCount = 0, otherPageCount = 0)
         val retriever = retrieverWith(source)
 
         retriever.retrieve(
-            sections = listOf(tagSection(searchTerms = listOf("milf", "m.i.l.f", "milves"))),
+            sections = listOf(
+                tagSection(
+                    canonicalTag = "solo male",
+                    searchTerms = listOf("solo male", "Solo Male", "SOLO MALE"),
+                ),
+            ),
             allowPageBackstop = false,
         )
 
-        assertEquals(listOf("milf"), source.searchQueries)
+        assertEquals(listOf("solo male"), source.searchQueries)
+    }
+
+    @Test
+    fun `text fallback splits learned comma aliases instead of sending combined query`() = runBlocking {
+        val repository = FakeTagProfileRepository().apply {
+            recordSourceVocabulary("big breasts,huge breasts", "big breasts", 26L)
+        }
+        val source = FakeSearchSource(
+            id = 26L,
+            pageOneCount = 0,
+            otherPageCount = 0,
+            queryCounts = mapOf(
+                "big breasts,huge breasts" to 0,
+                "big breasts" to 0,
+                "huge breasts" to 3,
+            ),
+        )
+        val retriever = retrieverWith(source, tagProfileRepository = repository)
+
+        val results = retriever.retrieve(
+            sections = listOf(
+                tagSection(
+                    canonicalTag = "big breasts",
+                    searchTerms = listOf("big breasts", "huge breasts", "large breasts"),
+                ),
+            ),
+            allowPageBackstop = false,
+        )
+
+        assertEquals(listOf("big breasts", "huge breasts"), source.searchQueries)
+        assertEquals(3, results.single().candidates.size)
+    }
+
+    @Test
+    fun `text fallback keeps trying split aliases when first alias has no usable cards`() = runBlocking {
+        val repository = FakeTagProfileRepository().apply {
+            recordSourceVocabulary("big breasts,huge breasts", "big breasts", 27L)
+        }
+        val source = FakeSearchSource(
+            id = 27L,
+            pageOneCount = 0,
+            otherPageCount = 0,
+            queryCounts = mapOf(
+                "big breasts" to 2,
+                "huge breasts" to 3,
+            ),
+        )
+        val retriever = retrieverWith(source, tagProfileRepository = repository)
+
+        val results = retriever.retrieve(
+            sections = listOf(
+                tagSection(
+                    canonicalTag = "big breasts",
+                    searchTerms = listOf("big breasts", "huge breasts", "large breasts"),
+                ),
+            ),
+            globalSeenKeys = setOf("27:/27/search/big breasts/1/0", "27:/27/search/big breasts/1/1"),
+            allowPageBackstop = false,
+        )
+
+        assertEquals(listOf("big breasts", "huge breasts"), source.searchQueries)
+        assertEquals(3, results.single().candidates.size)
+    }
+
+    @Test
+    fun `text fallback starts with canonical tag before code-like aliases`() = runBlocking {
+        val source = FakeSearchSource(id = 28L, pageOneCount = 0, otherPageCount = 0)
+        val retriever = retrieverWith(source)
+
+        retriever.retrieve(
+            sections = listOf(
+                tagSection(
+                    canonicalTag = "sole female",
+                    searchTerms = listOf("1girl", "female solo", "sole female"),
+                ),
+            ),
+            allowPageBackstop = false,
+        )
+
+        assertEquals(listOf("sole female", "female solo", "1girl"), source.searchQueries)
+    }
+
+    @Test
+    fun `text fallback uses common learned terms when a source has no vocabulary yet`() = runBlocking {
+        val repository = FakeTagProfileRepository().apply {
+            recordSourceVocabulary("female solo", "sole female", 99L)
+        }
+        val source = FakeSearchSource(
+            id = 29L,
+            pageOneCount = 0,
+            otherPageCount = 0,
+            queryCounts = mapOf(
+                "sole female" to 0,
+                "female solo" to 4,
+            ),
+        )
+        val retriever = retrieverWith(source, tagProfileRepository = repository)
+
+        val results = retriever.retrieve(
+            sections = listOf(tagSection(canonicalTag = "sole female", searchTerms = listOf("sole female"))),
+            allowPageBackstop = false,
+        )
+
+        assertEquals(listOf("sole female", "female solo"), source.searchQueries)
+        assertEquals(4, results.single().candidates.size)
+    }
+
+    @Test
+    fun `successful text fallback query is promoted on the next fetch`() = runBlocking {
+        val source = FakeSearchSource(
+            id = 31L,
+            pageOneCount = 0,
+            otherPageCount = 0,
+            queryCounts = mapOf(
+                "sole female" to 0,
+                "female solo" to 4,
+            ),
+        )
+        val retriever = retrieverWith(source)
+        val section = tagSection(
+            canonicalTag = "sole female",
+            searchTerms = listOf("1girl", "female solo", "sole female"),
+        )
+
+        retriever.retrieve(
+            sections = listOf(section),
+            allowPageBackstop = false,
+        )
+        source.searchQueries.clear()
+
+        val results = retriever.retrieve(
+            sections = listOf(section),
+            allowPageBackstop = false,
+        )
+
+        assertEquals(listOf("female solo"), source.searchQueries)
+        assertEquals(4, results.single().candidates.size)
     }
 
 
     private fun retrieverWith(
         vararg sources: CatalogueSource,
         lastFetchedSourceIds: Set<String> = emptySet(),
+        tagProfileRepository: TagProfileRepository = FakeTagProfileRepository(),
     ): CandidateRetriever {
         return CandidateRetriever(
             sourceManager = mockk(),
             preferences = suggestionsPreferences(lastFetchedSourceIds),
             debugLog = SuggestionsDebugLog(),
             tagCanonicalizer = mockk(relaxed = true),
-            tagProfileRepository = FakeTagProfileRepository(),
+            tagProfileRepository = tagProfileRepository,
             catalogueSourcesProvider = { sources.toList() },
             catalogueSourcesFlowProvider = { MutableStateFlow(sources.toList()) },
         )
@@ -277,12 +517,21 @@ class CandidateRetrieverColdStartTest {
             sortOrder = SuggestionSortOrder.Popular,
         )
 
-    private fun tagSection(searchTerms: List<String> = listOf("milf")): PlannedSection =
+    private fun latestDiscoverySection(): PlannedSection =
+        normalDiscoverySection().copy(
+            displayReason = "Latest from your sources",
+            sortOrder = SuggestionSortOrder.Latest,
+        )
+
+    private fun tagSection(
+        canonicalTag: String = "milf",
+        searchTerms: List<String> = listOf(canonicalTag),
+    ): PlannedSection =
         PlannedSection(
-            sectionKey = "tag:milf",
+            sectionKey = "tag:$canonicalTag",
             type = SectionType.MANAGED_TAG,
-            canonicalTag = "milf",
-            displayReason = "Milf",
+            canonicalTag = canonicalTag,
+            displayReason = canonicalTag,
             searchTerms = searchTerms,
             sortOrder = SuggestionSortOrder.Popular,
         )
@@ -293,12 +542,17 @@ private class FakeColdStartSource(
     private val titlePrefix: String,
     private val delayMs: Long = 0L,
     private val resultCount: Int = 3,
+    private val latestResultCount: Int = resultCount,
 ) : CatalogueSource {
+    val popularPages = mutableListOf<Int>()
+    val latestPages = mutableListOf<Int>()
+
     override val name: String = "Source ${id.toString().padStart(3, '0')}"
     override val lang: String = "en"
     override val supportsLatest: Boolean = true
 
     override suspend fun getPopularManga(page: Int): MangasPage {
+        popularPages += page
         if (delayMs > 0L) delay(delayMs)
         return MangasPage(
             (0 until resultCount).map { index ->
@@ -312,8 +566,20 @@ private class FakeColdStartSource(
         )
     }
 
-    override suspend fun getLatestUpdates(page: Int): MangasPage =
-        getPopularManga(page)
+    override suspend fun getLatestUpdates(page: Int): MangasPage {
+        latestPages += page
+        if (delayMs > 0L) delay(delayMs)
+        return MangasPage(
+            (0 until latestResultCount).map { index ->
+                SManga.create().apply {
+                    url = "/$id/latest/$page/$index"
+                    title = "$titlePrefix Latest $page-$index"
+                    initialized = true
+                }
+            },
+            hasNextPage = true,
+        )
+    }
 
     override fun getFilterList(): FilterList = FilterList()
 }
@@ -341,6 +607,7 @@ private class FakeSearchSource(
     private val pageOneCount: Int,
     private val otherPageCount: Int,
     private val filterThrowable: Throwable? = null,
+    private val queryCounts: Map<String, Int> = emptyMap(),
 ) : CatalogueSource {
     val searchPages = mutableListOf<Int>()
     val searchQueries = mutableListOf<String>()
@@ -352,11 +619,11 @@ private class FakeSearchSource(
     override suspend fun getSearchManga(page: Int, query: String, filters: FilterList): MangasPage {
         searchPages += page
         searchQueries += query
-        val count = if (page == 1) pageOneCount else otherPageCount
+        val count = queryCounts[query] ?: if (page == 1) pageOneCount else otherPageCount
         return MangasPage(
             (0 until count).map { index ->
                 SManga.create().apply {
-                    url = "/$id/search/$page/$index"
+                    url = "/$id/search/$query/$page/$index"
                     title = "Search $page-$index"
                     initialized = true
                 }

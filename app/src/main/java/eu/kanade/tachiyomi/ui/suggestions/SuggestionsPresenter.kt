@@ -36,7 +36,9 @@ import yokai.domain.suggestions.CandidateRetrievalResult
 import yokai.domain.suggestions.COLD_START_DISCOVERY_SECTION_KEY
 import yokai.domain.suggestions.SuggestionCandidate
 import yokai.domain.suggestions.InterestProfileBuilder
+import yokai.domain.suggestions.RankedSection
 import yokai.domain.suggestions.RankingContext
+import yokai.domain.suggestions.SourceDiversity
 import yokai.domain.suggestions.SeenEntry
 import yokai.domain.suggestions.TagCanonicalizer
 import yokai.domain.suggestions.TagProfileRepository
@@ -56,6 +58,7 @@ import yokai.domain.suggestions.SuggestionRefreshReason
 import yokai.domain.suggestions.SuggestionRefreshSession
 import yokai.domain.suggestions.SuggestionRefreshSessionTracker
 import yokai.domain.suggestions.SuggestionResultMode
+import yokai.domain.suggestions.SuggestionCandidateCacheRepository
 import yokai.domain.suggestions.SuggestionSeenLogRepository
 import yokai.domain.suggestions.SuggestedManga
 import yokai.domain.suggestions.SuggestionSortOrder
@@ -152,6 +155,44 @@ internal fun selectSoftRefreshSectionKeys(
         plannedSectionKeys.take(previouslyLoadedCount.coerceAtLeast(0))
     }
 
+/**
+ * Page to fetch when refreshing a SINGLE section. Discovery (popular/latest) rotates pages
+ * 1–7 so back-to-back refreshes surface different titles. Tag sections MUST anchor at page 1:
+ * many sources resolve a tag via text search where pages 4+ are routinely empty, and native
+ * tag pages thin out fast — fetching a random deep page (e.g. page 5) starves the section even
+ * for hugely popular tags. The seen-log already de-duplicates page 1 across refreshes. Mirrors
+ * the batch loader's `pageOffsetFor`, which the per-section refresh paths previously bypassed.
+ */
+internal fun refreshPageOffsetForSection(sectionType: SectionType, discoveryPageOffset: Int): Int =
+    if (sectionType == SectionType.DISCOVERY) discoveryPageOffset else 1
+
+/**
+ * Merges already-cached surplus ([cachedSeed]) with this fetch's freshly-ranked network results so a
+ * partial cache (1..target-1 entries) fills the section instead of being ignored. Cached entries are
+ * shown FIRST (they were last fetch's surplus — show them now so they leave the cache), then network
+ * results fill the rest. Deduped by (source,url) and normalized title across all three lists. Returns
+ * the top [target] as `shown` and the remainder as `surplus` to re-cache.
+ */
+internal fun mergeCachedSeedWithRanked(
+    cachedSeed: List<SuggestedManga>,
+    networkShown: List<SuggestedManga>,
+    networkSurplus: List<SuggestedManga>,
+    target: Int,
+): RankedSection {
+    val seenKeys = HashSet<Pair<Long, String>>()
+    val seenTitles = HashSet<String>()
+    val pool = ArrayList<SuggestedManga>(cachedSeed.size + networkShown.size + networkSurplus.size)
+    for (manga in cachedSeed.asSequence() + networkShown.asSequence() + networkSurplus.asSequence()) {
+        val key = manga.source to manga.url
+        val titleKey = manga.title.lowercase().replace(Regex("\\s+"), " ").trim()
+        if (!seenKeys.add(key)) continue
+        if (titleKey.isNotEmpty() && !seenTitles.add(titleKey)) continue
+        pool += manga
+    }
+    val keep = target.coerceAtLeast(0)
+    return RankedSection(shown = pool.take(keep), surplus = pool.drop(keep))
+}
+
 internal fun sourceSortOrderForExpandableSection(
     sectionKey: String,
     currentSortOrder: SuggestionSortOrder,
@@ -215,6 +256,7 @@ class SuggestionsPresenter(
     private val candidateRetriever: CandidateRetriever = Injekt.get(),
     private val suggestionRanker: SuggestionRanker = Injekt.get(),
     private val suggestionSeenLogRepository: SuggestionSeenLogRepository = Injekt.get(),
+    private val candidateCacheRepository: SuggestionCandidateCacheRepository = Injekt.get(),
     private val sessionContext: SessionContext = Injekt.get(),
     private val debugLog: SuggestionsDebugLog = Injekt.get(),
     private val tagCanonicalizer: TagCanonicalizer = Injekt.get(),
@@ -235,6 +277,12 @@ class SuggestionsPresenter(
     private var isWorkerRefreshing = false
     private var refreshJob: Job? = null
     private var sourceChangeRefreshJob: Job? = null
+    /**
+     * One in-flight refresh per section, keyed by sectionKey. Lets a per-section refresh
+     * ([refreshSection]) run independently — refreshing section B never cancels section A.
+     * Distinct from the single [refreshJob] used by the full-feed [refresh].
+     */
+    private val sectionRefreshJobs = ConcurrentHashMap<String, Job>()
     private var observedActiveNetworkSourceIds: Set<Long>? = null
     private val pendingV2HardRefreshReplace = AtomicBoolean(false)
     /** True while the very first load of suggestions is in flight, so the DB flow
@@ -259,7 +307,10 @@ class SuggestionsPresenter(
      */
     @Volatile private var activeFlowGeneration = 0L
     private val usedTags = linkedSetOf<String>()
-    private val seenMangaUrls = linkedSetOf<String>()
+    // Thread-safe: concurrent per-section refreshes ([refreshSection]) read this via
+    // toSet() while others addAll(). A plain linkedSet would throw ConcurrentModification.
+    // Order is irrelevant — this is a dedupe membership set.
+    private val seenMangaUrls = ConcurrentHashMap.newKeySet<String>()
     private var knownTags = emptyList<String>()
     var gridFirstVisibleItemIndex = 0
         private set
@@ -319,6 +370,10 @@ class SuggestionsPresenter(
         presenterScope.launchIO {
             shownHistoryRepository.deleteOlderThan(
                 System.currentTimeMillis() - HISTORY_TTL_MILLIS,
+            )
+            // Prune stale cached candidates so the drain step never serves day-old results.
+            candidateCacheRepository.deleteOlderThan(
+                System.currentTimeMillis() - SuggestionsConfig.CANDIDATE_CACHE_TTL_MS,
             )
             // Bug 4 fix: only load the last 24 hours of shown history into the in-memory
             // set on startup. The full 30-day DB TTL is unchanged, but seeding the set
@@ -678,7 +733,9 @@ class SuggestionsPresenter(
             val hasRenderedSuggestions = state.suggestions.values.any { section -> section.isNotEmpty() }
             state.copy(
                 emptyMessage = null,
-                refreshBannerMessage = refreshBannerMessage(session).takeIf { hasRenderedSuggestions },
+                // Explicit per-section refresh (targetSectionKey set) stays scoped to that
+                // section's header spinner — no page-wide "Refreshing…" banner.
+                refreshBannerMessage = refreshBannerMessage(session).takeIf { hasRenderedSuggestions && targetSectionKey == null },
                 isPausedForNetwork = false,
                 plannedSections = state.plannedSections.takeIf { hasRenderedSuggestions } ?: emptyList(),
                 sectionDisplayNames = state.sectionDisplayNames.takeIf { hasRenderedSuggestions } ?: emptyMap(),
@@ -726,6 +783,7 @@ class SuggestionsPresenter(
                             pageOffset = pageOffset,
                             session = session,
                             refreshTargetSectionKey = v2RefreshTargetSectionKey,
+                            singleSectionOnly = targetSectionKey != null,
                         )
                     } else {
                         // Hard path: wipe DB and do a full network fetch.
@@ -853,7 +911,60 @@ class SuggestionsPresenter(
 
     fun refreshSection(sectionKey: String) {
         if (sectionKey.isBlank()) return
-        refresh(targetSectionKey = sectionKey)
+        // V1/legacy keeps the old full-feed refresh path. V2 section refresh must never
+        // escalate to a global refresh just because the in-memory plan is temporarily
+        // behind the rendered DB rows.
+        if (!preferences.suggestionsV2Enabled().get()) {
+            refresh(targetSectionKey = sectionKey)
+            return
+        }
+        // A full-feed refresh already drives every section's spinner; don't double-fetch.
+        if (isForegroundRefreshing.get()) return
+        // One in-flight refresh per section. Re-tapping the same section is a no-op (its
+        // header button is disabled while refreshing); every OTHER section is untouched,
+        // so refreshing section B never cancels section A. No feedGeneration bump, no
+        // shared refreshJob — these run truly independently.
+        if (sectionRefreshJobs[sectionKey]?.isActive == true) return
+
+        val job = presenterScope.launchIO {
+            val now = System.currentTimeMillis()
+            _state.update { it.copy(
+                refreshingSectionKeys = it.refreshingSectionKeys + sectionKey,
+                emptyMessage = null,
+            ) }
+            try {
+                val section = _state.value.plannedSections.firstOrNull { it.sectionKey == sectionKey }
+                    ?: plannedSectionRepository
+                        .getPlannedSections(SuggestionsConfig.RESULT_VERSION_V2)
+                        .firstOrNull { it.sectionKey == sectionKey }
+                    ?: return@launchIO
+                // Seed only THIS section's visible cards as "seen" (add-only, no global
+                // clear) so the refetch swaps them for fresh titles without disturbing
+                // other in-flight section refreshes.
+                val visible = _state.value.suggestions[sectionKey].orEmpty()
+                if (visible.isNotEmpty()) {
+                    seenMangaUrls.addAll(visible.map { "${it.source}:${it.url}" })
+                    shownHistoryRepository.insertAll(visible.map { it.source to it.url })
+                }
+                fetchAndCommitSection(
+                    section = section,
+                    pageOffset = Random.nextInt(1, 8),
+                    refreshId = preferences.suggestionsTotalRefreshCount().get().toLong(),
+                    rankingContext = suggestionRanker.buildRankingContext(),
+                    now = now,
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Best-effort: leave the section's existing cards in place on failure.
+            } finally {
+                _state.update { it.copy(
+                    refreshingSectionKeys = it.refreshingSectionKeys - sectionKey,
+                ) }
+                sectionRefreshJobs.remove(sectionKey)
+            }
+        }
+        sectionRefreshJobs[sectionKey] = job
     }
 
     fun loadNextPage() {
@@ -984,6 +1095,8 @@ class SuggestionsPresenter(
         if (preferences.suggestionsV2Enabled().get() == enabled) return false
         preferences.suggestionsV2Enabled().set(enabled)
         preferences.suggestionsResultVersion().set(SuggestionsConfig.RESULT_VERSION_UNKNOWN)
+        // Mode flip invalidates any cached candidates from the previous pipeline.
+        presenterScope.launchIO { candidateCacheRepository.clearAll() }
         // Pin availability flips with V2; refresh the filter-sheet view-model so an open sheet
         // sees the new pin-enabled state on its next show.
         syncTagFilterState(
@@ -1030,6 +1143,11 @@ class SuggestionsPresenter(
         if (pinnedChanged) preferences.suggestionsPinnedTags().set(effectivePinned)
         syncTagFilterState(pendingBlacklist, effectivePinned)
         _state.update { it.copy(isTagFilterSheetVisible = false) }
+        if (blacklistChanged) {
+            // Cached candidates carry no genres, so a newly-blacklisted tag can't be re-filtered
+            // out of them — drop the whole cache so stale blacklisted titles can't resurface.
+            presenterScope.launchIO { candidateCacheRepository.clearAll() }
+        }
         if (blacklistChanged && isSuggestionsV2Enabled()) {
             applyBlacklistIncrementally(pendingBlacklist)
         } else {
@@ -1497,12 +1615,59 @@ class SuggestionsPresenter(
         pageOffset: Int,
         session: SuggestionRefreshSession,
         refreshTargetSectionKey: String?,
+        // True for an explicit per-section refresh (the section header's refresh button).
+        // Such a refresh must touch ONLY that section: it skips the re-plan, plan
+        // replace, orphan prune and top-N fan-out below, so every other section keeps
+        // its currently displayed (stale) cards instead of the whole feed reshuffling.
+        singleSectionOnly: Boolean = false,
     ) {
         val now = System.currentTimeMillis()
         debugLog.add(
             LogType.REFRESH_MODE,
             "Soft refresh - re-ranking locally, target=${refreshTargetSectionKey ?: "stale-sections"}",
         )
+
+        val immediatelyRefreshedSectionKeys = mutableSetOf<String>()
+        if (refreshTargetSectionKey != null) {
+            val targetSection = _state.value.plannedSections
+                .firstOrNull { it.sectionKey == refreshTargetSectionKey }
+            if (targetSection != null && isCurrentRefresh(session, generation)) {
+                seedVisibleSuggestionsForRefresh(now)
+                debugLog.add(
+                    LogType.REFRESH_MODE,
+                    "Soft refresh - immediate network fetch for $refreshTargetSectionKey",
+                )
+                _state.update {
+                    it.copy(
+                        refreshingSectionKeys = setOf(refreshTargetSectionKey),
+                        activeRefreshingSectionKey = refreshTargetSectionKey,
+                        isFetchingBatch = true,
+                        emptyMessage = null,
+                    )
+                }
+                val rankingContext = suggestionRanker.buildRankingContext()
+                val refreshId = preferences.suggestionsTotalRefreshCount().get().toLong()
+                val inserted = refreshV2SingleSection(
+                    section = targetSection,
+                    generation = generation,
+                    pageOffset = pageOffset,
+                    refreshId = refreshId,
+                    rankingContext = rankingContext,
+                    now = now,
+                    session = session,
+                )
+                if (inserted > 0) {
+                    immediatelyRefreshedSectionKeys += refreshTargetSectionKey
+                }
+            }
+        }
+
+        // Per-section refresh stops here. refreshV2SingleSection already replaced just
+        // this section's rows and re-rendered it; running the feed-wide re-plan/orphan
+        // prune below would reshuffle the page and delete other sections' stored rows.
+        if (singleSectionOnly) {
+            return
+        }
 
         // Step 0: Trim the in-memory shown-set down to the persistent 24h window
         // plus whatever is currently visible. Visible cards must not be eligible for
@@ -1515,18 +1680,7 @@ class SuggestionsPresenter(
         // because every recent popular hit was still flagged "seen". Re-seeding
         // from `shownHistoryRepository` keeps the persistent dedupe guarantee
         // (no manga shown twice within 24h) while letting older titles resurface.
-        val recentShownCutoff = now - RECENT_HISTORY_SEED_MILLIS
-        val recentShownKeys = shownHistoryRepository.getKeysShownAfter(recentShownCutoff)
-        val visibleSuggestionKeys = _state.value.suggestions.values
-            .flatten()
-            .map { manga -> "${manga.source}:${manga.url}" }
-        val visibleSuggestionSourceUrls = _state.value.suggestions.values
-            .flatten()
-            .map { manga -> manga.source to manga.url }
-        seenMangaUrls.clear()
-        seenMangaUrls.addAll(recentShownKeys)
-        seenMangaUrls.addAll(visibleSuggestionKeys)
-        shownHistoryRepository.insertAll(visibleSuggestionSourceUrls)
+        seedVisibleSuggestionsForRefresh(now)
 
         // Step 1: Rebuild profile from local DB (no network call).
         interestProfileBuilder.buildProfile(now)
@@ -1598,12 +1752,19 @@ class SuggestionsPresenter(
             .keys
         val previouslyLoadedCount = previouslyLoadedKeys.size
 
+        // An explicit single-section refresh has already returned above (singleSectionOnly), so
+        // reaching here means a full pull-to-refresh: refresh EVERY loaded section, not just the
+        // visible one. Passing null selects the loaded top-N; the visible section was already
+        // refreshed by the immediate fetch and is excluded below via immediatelyRefreshedSectionKeys.
         val refreshSectionKeys = selectSoftRefreshSectionKeys(
             plannedSectionKeys = plannedSections.map { it.sectionKey },
             previouslyLoadedCount = previouslyLoadedCount,
-            refreshTargetSectionKey = refreshTargetSectionKey,
+            refreshTargetSectionKey = null,
         ).toSet()
-        val refreshTopN = plannedSections.filter { it.sectionKey in refreshSectionKeys }
+        val refreshTopN = plannedSections.filter {
+            it.sectionKey in refreshSectionKeys &&
+                it.sectionKey !in immediatelyRefreshedSectionKeys
+        }
         val refreshTopNKeys = refreshTopN.map { it.sectionKey }.toSet()
 
         // Step 5: Mark every section in the new top N as refreshable so a manual
@@ -1687,6 +1848,20 @@ class SuggestionsPresenter(
         }
     }
 
+    private suspend fun seedVisibleSuggestionsForRefresh(now: Long) {
+        val recentShownCutoff = now - RECENT_HISTORY_SEED_MILLIS
+        val recentShownKeys = shownHistoryRepository.getKeysShownAfter(recentShownCutoff)
+        val visibleSuggestions = _state.value.suggestions.values.flatten()
+        seenMangaUrls.clear()
+        seenMangaUrls.addAll(recentShownKeys)
+        seenMangaUrls.addAll(
+            visibleSuggestions.map { manga -> "${manga.source}:${manga.url}" },
+        )
+        shownHistoryRepository.insertAll(
+            visibleSuggestions.map { manga -> manga.source to manga.url },
+        )
+    }
+
     private suspend fun refreshV2SingleSection(
         section: PlannedSection,
         generation: Long,
@@ -1706,49 +1881,12 @@ class SuggestionsPresenter(
         )}
 
         try {
-            val sectionSeenKeys = suggestionSeenLogRepository.recentKeysForSections(
-                sectionKeys = listOf(section.sectionKey),
-                cutoff = now - SuggestionsConfig.SEEN_LOG_TTL_MS,
-            )
-            val shallowResult = retrieveSingleSectionForRefresh(
+            return fetchAndCommitSection(
                 section = section,
                 pageOffset = pageOffset,
-                maxPerSourceFetch = SuggestionsConfig.MANUAL_REFRESH_MAX_PER_SOURCE_FETCH,
-                sectionSeenKeys = sectionSeenKeys,
-            )
-            val shallowPreview = rankSectionPreview(
-                result = shallowResult,
-                rankingContext = rankingContext,
-                sectionSeenKeys = sectionSeenKeys,
-            )
-            var resultToCommit = shallowResult
-            if (
-                shallowResult.candidates.isNotEmpty() &&
-                shallowPreview.size < SuggestionsConfig.MAX_RESULTS_PER_SECTION
-            ) {
-                val fullResult = retrieveSingleSectionForRefresh(
-                    section = section,
-                    pageOffset = pageOffset,
-                    maxPerSourceFetch = null,
-                    sectionSeenKeys = sectionSeenKeys,
-                )
-                val fullPreview = rankSectionPreview(
-                    result = fullResult,
-                    rankingContext = rankingContext,
-                    sectionSeenKeys = sectionSeenKeys,
-                )
-                if (fullResult.candidates.isNotEmpty() && fullPreview.size >= shallowPreview.size) {
-                    resultToCommit = fullResult
-                }
-            }
-
-            return appendSectionResult(
-                result = resultToCommit,
                 refreshId = refreshId,
                 rankingContext = rankingContext,
-                sectionSeenKeys = sectionSeenKeys,
                 now = now,
-                pageOffset = pageOffset,
                 session = session,
                 generation = generation,
             )
@@ -1765,6 +1903,86 @@ class SuggestionsPresenter(
                 updateLoadingState()
             }
         }
+    }
+
+    /**
+     * Fetches and commits a single section's candidates without touching any global
+     * refresh flags ([isSectionBatchFetching], [isForegroundRefreshing], the shared
+     * [feedGeneration]). Safe to run concurrently for different sections — DB writes
+     * are scoped per section via [SuggestionsRepository.replaceSection], and
+     * [seenMangaUrls] is a thread-safe set. Pass session/generation only when the call
+     * is part of a feed-wide refresh that must honour supersede guards.
+     */
+    private suspend fun fetchAndCommitSection(
+        section: PlannedSection,
+        pageOffset: Int,
+        refreshId: Long,
+        rankingContext: RankingContext,
+        now: Long,
+        session: SuggestionRefreshSession? = null,
+        generation: Long? = null,
+    ): Int {
+        // Reuse already-fetched surplus first: if the candidate cache alone can fill this section,
+        // commit from it and skip the network entirely.
+        tryServeSectionFromCache(
+            section = section,
+            rankingContext = rankingContext,
+            now = now,
+            refreshId = refreshId,
+            session = session,
+            generation = generation,
+        )?.let { return it }
+
+        // Cache couldn't fill the section alone — but it may hold a partial set. Seed those into
+        // the network fetch so they're shown (and leave the cache) alongside fresh top-up results.
+        val cachedSeed = cachedSeedForSection(section, rankingContext, now, session)
+
+        val sectionSeenKeys = suggestionSeenLogRepository.recentKeysForSections(
+            sectionKeys = listOf(section.sectionKey),
+            cutoff = now - SuggestionsConfig.SEEN_LOG_TTL_MS,
+        )
+        // Tag sections anchor at page 1; only discovery rotates the deep page offset.
+        val effectivePageOffset = refreshPageOffsetForSection(section.type, pageOffset)
+        val shallowResult = retrieveSingleSectionForRefresh(
+            section = section,
+            pageOffset = effectivePageOffset,
+            maxPerSourceFetch = SuggestionsConfig.MANUAL_REFRESH_MAX_PER_SOURCE_FETCH,
+            sectionSeenKeys = sectionSeenKeys,
+        )
+        val shallowPreview = rankSectionPreview(
+            result = shallowResult,
+            rankingContext = rankingContext,
+            sectionSeenKeys = sectionSeenKeys,
+        )
+        var resultToCommit = shallowResult
+        if (shallowPreview.size < SuggestionsConfig.MAX_RESULTS_PER_SECTION) {
+            val fullResult = retrieveSingleSectionForRefresh(
+                section = section,
+                pageOffset = effectivePageOffset,
+                maxPerSourceFetch = null,
+                sectionSeenKeys = sectionSeenKeys,
+            )
+            val fullPreview = rankSectionPreview(
+                result = fullResult,
+                rankingContext = rankingContext,
+                sectionSeenKeys = sectionSeenKeys,
+            )
+            if (fullPreview.size >= shallowPreview.size) {
+                resultToCommit = fullResult
+            }
+        }
+
+        return appendSectionResult(
+            result = resultToCommit,
+            refreshId = refreshId,
+            rankingContext = rankingContext,
+            sectionSeenKeys = sectionSeenKeys,
+            now = now,
+            pageOffset = effectivePageOffset,
+            session = session,
+            generation = generation,
+            cachedSeed = cachedSeed,
+        )
     }
 
     private suspend fun retrieveSingleSectionForRefresh(
@@ -1874,14 +2092,16 @@ class SuggestionsPresenter(
         result: CandidateRetrievalResult,
         rankingContext: RankingContext,
         sectionSeenKeys: Map<String, Set<String>>,
-    ): List<SuggestedManga> =
-        suggestionRanker.rankWithContext(
-            retrievalResults = listOf(result),
+    ): RankedSection {
+        val ranked = suggestionRanker.rankSectionWithSurplus(
+            result = result,
             context = rankingContext,
             globalSeenKeys = seenMangaUrls.toSet(),
             sectionSeenKeys = sectionSeenKeys,
             sessionContext = sessionContext,
-        ).withSectionDisplayRanks(result.section)
+        )
+        return ranked.copy(shown = ranked.shown.withSectionDisplayRanks(result.section))
+    }
 
     private suspend fun refreshV2(
         generation: Long,
@@ -2113,10 +2333,25 @@ class SuggestionsPresenter(
             )
             // ─────────────────────────────────────────────────────────────────────────
 
+            // Drain the candidate cache first: any section the cache can fully fill is committed
+            // here with NO network call and dropped from the fetch list.
+            val remainingSections = mutableListOf<PlannedSection>()
+            for (section in sectionsToFetch) {
+                val served = tryServeSectionFromCache(
+                    section = section,
+                    rankingContext = rankingContext,
+                    now = now,
+                    refreshId = refreshId,
+                    session = session,
+                    generation = generation,
+                )
+                if (served != null) insertedCount += served else remainingSections += section
+            }
+
             val accumulatedCandidates = mutableMapOf<String, MutableList<SuggestionCandidate>>()
 
             candidateRetriever.retrieveProgressively(
-                sections = sectionsToFetch,
+                sections = remainingSections,
                 pageOffset = pageOffset,
                 // Page strategy:
                 //  • DISCOVERY: rotate across pages 1–7 so back-to-back refreshes do not
@@ -2252,9 +2487,11 @@ class SuggestionsPresenter(
         pageOffset: Int,
         session: SuggestionRefreshSession? = null,
         generation: Long? = null,
+        cachedSeed: List<SuggestedManga> = emptyList(),
     ): Int {
         var resultToRank = verifyCandidateResult(result, rankingContext)
-        var suggestions = rankVerifiedSection(resultToRank, rankingContext, sectionSeenKeys)
+        var ranked = rankVerifiedSection(resultToRank, rankingContext, sectionSeenKeys)
+        var suggestions = ranked.shown
 
         sectionLastFetchedAt[result.section.sectionKey] = now
 
@@ -2288,11 +2525,26 @@ class SuggestionsPresenter(
             if (combinedCandidates.size > resultToRank.candidates.size) {
                 resultToRank = resultToRank.copy(candidates = combinedCandidates)
                 val toppedUp = rankVerifiedSection(resultToRank, rankingContext, sectionSeenKeys)
-                if (toppedUp.size > suggestions.size) {
-                    suggestions = toppedUp
+                if (toppedUp.shown.size > suggestions.size) {
+                    ranked = toppedUp
+                    suggestions = ranked.shown
                 }
             }
             topUpPage++
+        }
+
+        // Cache-partial merge: show the seeded cached entries first, then this fetch's network
+        // results fill the rest. The leftover (network surplus) becomes the new cache via
+        // `ranked.surplus` below. No-op when there's no seed (network path unchanged).
+        if (cachedSeed.isNotEmpty()) {
+            val merged = mergeCachedSeedWithRanked(
+                cachedSeed = cachedSeed,
+                networkShown = ranked.shown,
+                networkSurplus = ranked.surplus,
+                target = SuggestionsConfig.MAX_RESULTS_PER_SECTION,
+            )
+            suggestions = merged.shown.withSectionDisplayRanks(result.section)
+            ranked = merged.copy(shown = suggestions)
         }
 
         if (suggestions.isEmpty()) {
@@ -2347,7 +2599,154 @@ class SuggestionsPresenter(
                 )
             },
         )
+        // Persist the filter-passed surplus (candidates ranked but not shown) so the next refresh
+        // can fill this section from cache before making any network call. Not marked shown, so it
+        // stays eligible until actually displayed.
+        candidateCacheRepository.putSection(
+            resultVersion = resultVersion,
+            sectionKey = result.section.sectionKey,
+            items = ranked.surplus,
+            cap = SuggestionsConfig.CANDIDATE_CACHE_MAX_PER_SECTION,
+        )
         return suggestions.size
+    }
+
+    /**
+     * Fills a section entirely from the candidate cache when enough still-eligible cached candidates
+     * exist, committing them WITHOUT any network call. Returns the shown count, or null when the
+     * cache can't reach the target (caller must then fetch from the network). Re-filters cached rows
+     * against the current library + seen state; blacklist changes invalidate the whole cache, so
+     * cached rows never carry a now-blacklisted tag.
+     */
+    /**
+     * The still-eligible cached candidates for a section, diversity-capped to the display target.
+     * Returns the partial set (1..target) used to SEED a network fetch when the cache can't fill
+     * the section alone; empty when nothing usable is cached. Same filter/diversity rules as
+     * [tryServeSectionFromCache], so a lone source can't dominate the seed either.
+     */
+    private suspend fun cachedSeedForSection(
+        section: PlannedSection,
+        rankingContext: RankingContext,
+        now: Long,
+        session: SuggestionRefreshSession? = null,
+    ): List<SuggestedManga> {
+        if (!preferences.suggestionsV2Enabled().get()) return emptyList()
+        val resultVersion = session?.mode?.resultVersion ?: currentSuggestionsResultVersion()
+        val cached = candidateCacheRepository.getCached(
+            resultVersion = resultVersion,
+            sectionKey = section.sectionKey,
+            limit = SuggestionsConfig.CANDIDATE_CACHE_MAX_PER_SECTION,
+        )
+        if (cached.isEmpty()) return emptyList()
+        val sectionSeen = suggestionSeenLogRepository.recentKeysForSections(
+            sectionKeys = listOf(section.sectionKey),
+            cutoff = now - SuggestionsConfig.SEEN_LOG_TTL_MS,
+        )[section.sectionKey].orEmpty()
+        val eligible = cached.filter { manga ->
+            val key = manga.memoryKey()
+            (manga.source to manga.url) !in rankingContext.localKeys &&
+                key !in seenMangaUrls &&
+                key !in sectionSeen
+        }
+        if (eligible.isEmpty()) return emptyList()
+        val distinctSources = eligible.map { it.source }.distinct().size
+        return SourceDiversity.roundRobinBySource(
+            items = eligible,
+            maxResults = SuggestionsConfig.MAX_RESULTS_PER_SECTION,
+            maxPerSource = SuggestionsConfig.MAIN_FEED_MAX_RESULTS_PER_SOURCE.takeIf { distinctSources > 1 },
+            sourceId = { it.source },
+            sourceIndex = { 0 },
+            score = { it.relevanceScore },
+        )
+    }
+
+    private suspend fun tryServeSectionFromCache(
+        section: PlannedSection,
+        rankingContext: RankingContext,
+        now: Long,
+        refreshId: Long,
+        session: SuggestionRefreshSession? = null,
+        generation: Long? = null,
+    ): Int? {
+        if (!preferences.suggestionsV2Enabled().get()) return null
+        val resultVersion = session?.mode?.resultVersion ?: currentSuggestionsResultVersion()
+        val cached = candidateCacheRepository.getCached(
+            resultVersion = resultVersion,
+            sectionKey = section.sectionKey,
+            limit = SuggestionsConfig.CANDIDATE_CACHE_MAX_PER_SECTION,
+        )
+        if (cached.isEmpty()) return null
+
+        val sectionSeen = suggestionSeenLogRepository.recentKeysForSections(
+            sectionKeys = listOf(section.sectionKey),
+            cutoff = now - SuggestionsConfig.SEEN_LOG_TTL_MS,
+        )[section.sectionKey].orEmpty()
+        val eligible = cached.filter { manga ->
+            val key = manga.memoryKey()
+            (manga.source to manga.url) !in rankingContext.localKeys &&
+                key !in seenMangaUrls &&
+                key !in sectionSeen
+        }
+        // Apply the same source-diversity rule as live ranking so the cache can't reintroduce
+        // single-source dominance: cap per source when multiple sources contributed, relaxing to
+        // fill the target across them. A lone source therefore can't fill the section from cache.
+        val distinctSources = eligible.map { it.source }.distinct().size
+        val diverse = SourceDiversity.roundRobinBySource(
+            items = eligible,
+            maxResults = SuggestionsConfig.MAX_RESULTS_PER_SECTION,
+            maxPerSource = SuggestionsConfig.MAIN_FEED_MAX_RESULTS_PER_SOURCE.takeIf { distinctSources > 1 },
+            sourceId = { it.source },
+            sourceIndex = { 0 },
+            score = { it.relevanceScore },
+        )
+        // Only short-circuit the network when the cache alone can fill the section to target. A
+        // partial fill is left in place and the caller fetches fresh — simpler than merging scores
+        // across fetches, and the cache refills after that fetch's surplus is stored.
+        if (diverse.size < SuggestionsConfig.MAX_RESULTS_PER_SECTION) return null
+        if (session != null && generation != null && !isCurrentRefresh(session, generation)) return null
+
+        val shownSet = diverse.toHashSet()
+        val shown = diverse.withSectionDisplayRanks(section)
+        val surplus = eligible.filterNot { it in shownSet }
+
+        sectionLastFetchedAt[section.sectionKey] = now
+        preferences.suggestionsResultVersion().set(SuggestionsConfig.RESULT_VERSION_V2)
+        suggestionsRepository.replaceSection(
+            section.sectionKey,
+            shown,
+            resultVersion = resultVersion,
+            refreshSessionId = session?.sessionId,
+        )
+        if (isForegroundRefreshing.get()) {
+            renderCommittedSection(section, shown)
+        } else {
+            renderStoredSuggestions()
+        }
+        shownHistoryRepository.insertAll(shown.map { it.source to it.url })
+        seenMangaUrls.addAll(shown.map { it.memoryKey() })
+        rememberDisplayedSuggestionSources(shown)
+        suggestionSeenLogRepository.insertSeenBatch(
+            shown.map { suggestion ->
+                SeenEntry(
+                    sectionKey = section.sectionKey,
+                    mangaKey = suggestion.memoryKey(),
+                    shownAt = now,
+                    refreshId = refreshId,
+                )
+            },
+        )
+        candidateCacheRepository.putSection(
+            resultVersion = resultVersion,
+            sectionKey = section.sectionKey,
+            items = surplus,
+            cap = SuggestionsConfig.CANDIDATE_CACHE_MAX_PER_SECTION,
+        )
+        debugLog.add(
+            LogType.REFRESH_MODE,
+            "Section '${section.sectionKey}' served from candidate cache — ${shown.size} shown, " +
+                "${surplus.size} kept, no network",
+        )
+        return shown.size
     }
 
     private fun markAllV2SectionsLoaded() {

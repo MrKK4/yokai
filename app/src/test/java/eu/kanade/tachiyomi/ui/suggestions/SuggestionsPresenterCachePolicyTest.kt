@@ -6,9 +6,39 @@ import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import yokai.domain.suggestions.COLD_START_DISCOVERY_SECTION_KEY
+import yokai.domain.suggestions.SectionType
+import yokai.domain.suggestions.SuggestedManga
 import yokai.domain.suggestions.SuggestionSortOrder
 
 class SuggestionsPresenterCachePolicyTest {
+
+    private fun sm(source: Long, url: String, title: String = url, score: Double = 0.0) =
+        SuggestedManga(source = source, url = url, title = title, thumbnailUrl = null, sectionKey = "tag:x", relevanceScore = score)
+
+    @Test
+    fun `cache-partial seed is shown first then network fills the target`() {
+        val cached = listOf(sm(1, "a"), sm(2, "b"), sm(3, "c"))
+        val networkShown = (1..9).map { sm(10L + it, "n$it") }
+        val networkSurplus = listOf(sm(99, "s"))
+
+        val merged = mergeCachedSeedWithRanked(cached, networkShown, networkSurplus, target = 9)
+
+        assertEquals(9, merged.shown.size)
+        assertEquals(listOf("a", "b", "c"), merged.shown.take(3).map { it.url }, "cached seed shown first")
+        // 3 cached + 6 network shown = 9; leftover 3 network shown + 1 surplus = 4 re-cached
+        assertEquals(4, merged.surplus.size)
+    }
+
+    @Test
+    fun `merge dedups overlap by source-url and title`() {
+        val cached = listOf(sm(1, "a", title = "Same Title"))
+        val network = listOf(sm(1, "a", title = "Same Title"), sm(2, "b", title = "same  title"), sm(3, "c"))
+
+        val merged = mergeCachedSeedWithRanked(cached, network, emptyList(), target = 9)
+
+        // (1,a) exact dup dropped; (2,b) is same normalized title as cached → dropped; only a + c
+        assertEquals(listOf("a", "c"), merged.shown.map { it.url })
+    }
 
     @Test
     fun `stored suggestions do not auto refresh before stale window`() {
@@ -110,6 +140,19 @@ class SuggestionsPresenterCachePolicyTest {
                 refreshTargetSectionKey = "tag:solo male",
             ),
         )
+    }
+
+    @Test
+    fun `tag section refresh anchors at page one instead of a random deep page`() {
+        // A random deep page (e.g. 5) of a native tag is sparse/already-seen and starves
+        // even hugely popular tags like 'big breasts'. Tag refreshes must use page 1.
+        assertEquals(1, refreshPageOffsetForSection(SectionType.MANAGED_TAG, discoveryPageOffset = 5))
+        assertEquals(1, refreshPageOffsetForSection(SectionType.MANAGED_TAG, discoveryPageOffset = 1))
+    }
+
+    @Test
+    fun `discovery section refresh keeps rotating the deep page for variety`() {
+        assertEquals(5, refreshPageOffsetForSection(SectionType.DISCOVERY, discoveryPageOffset = 5))
     }
 
     @Test
