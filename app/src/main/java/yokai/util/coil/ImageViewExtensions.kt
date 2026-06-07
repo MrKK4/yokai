@@ -9,7 +9,6 @@ import coil3.request.ImageRequest
 import coil3.request.maxBitmapSize
 import coil3.size.Precision
 import coil3.size.Size
-import coil3.size.SizeResolver
 import coil3.target.ImageViewTarget
 import eu.kanade.tachiyomi.data.coil.CoverViewTarget
 import eu.kanade.tachiyomi.data.coil.LibraryMangaImageTarget
@@ -28,7 +27,8 @@ fun ImageView.loadManga(
         .data(manga.cover())
         .target(LibraryMangaImageTarget(this, manga))
         .precision(Precision.INEXACT)
-        .size(SizeResolver.ORIGINAL)
+        // Size resolves from the target ImageView (ViewSizeResolver) so covers are
+        // downsampled to the displayed thumbnail size instead of decoded at full res.
         .maxBitmapSize(Size(MAX_BITMAP_SIZE, MAX_BITMAP_SIZE))
         .apply(builder)
         .build()
@@ -48,7 +48,8 @@ fun ImageView.loadManga(
         .data(cover)
         .target(target ?: CoverViewTarget(this, progress))
         .precision(Precision.INEXACT)
-        .size(SizeResolver.ORIGINAL)
+        // Size resolves from the target ImageView (ViewSizeResolver) so covers are
+        // downsampled to the displayed thumbnail size instead of decoded at full res.
         .maxBitmapSize(Size(MAX_BITMAP_SIZE, MAX_BITMAP_SIZE))
         .apply(builder)
         .build()

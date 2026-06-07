@@ -340,6 +340,8 @@ open class App : Application(), DefaultLifecycleObserver, SingletonImageLoader.F
                 logger(DebugLogger())
             }
 
+            // Keep request mapping/interception off the main thread to reduce scroll jank.
+            interceptorCoroutineContext(Dispatchers.Default)
             fetcherCoroutineContext(Dispatchers.IO.limitedParallelism(8))
             decoderCoroutineContext(Dispatchers.IO.limitedParallelism(3))
         }
