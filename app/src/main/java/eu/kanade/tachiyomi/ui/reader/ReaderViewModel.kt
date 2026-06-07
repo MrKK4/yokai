@@ -188,13 +188,22 @@ class ReaderViewModel(
         if (finished) return
         finished = true
         deletePendingChapters()
-        val currentChapters = state.value.viewerChapters
-        if (currentChapters != null) {
-            currentChapters.unref()
-            chapterToDownload?.let {
-                downloadManager.addDownloadsToStartOfQueue(listOf(it))
-            }
+        releaseReaderChapters()
+    }
+
+    fun releaseReaderChapters() {
+        val currentChapters = state.value.viewerChapters ?: return
+        currentChapters.unref()
+        mutableState.update { it.copy(viewerChapters = null) }
+        chapterToDownload?.let {
+            downloadManager.addDownloadsToStartOfQueue(listOf(it))
+            chapterToDownload = null
         }
+    }
+
+    override fun onCleared() {
+        releaseReaderChapters()
+        super.onCleared()
     }
 
     /**

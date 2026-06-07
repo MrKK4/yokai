@@ -486,6 +486,9 @@ class ReaderActivity : BaseActivity<ReaderActivityBinding>() {
     override fun onDestroy() {
         super.onDestroy()
         viewer?.destroy()
+        if (!isChangingConfigurations) {
+            viewModel.releaseReaderChapters()
+        }
         binding.chaptersSheet.chaptersBottomSheet.adapter = null
         viewer = null
         config = null

@@ -119,7 +119,7 @@ class HttpPageLoader(
 
         val queuedPages = mutableListOf<PriorityPage>()
         if (page.status is Page.State.Queue) {
-            queuedPages += PriorityPage(page, 1).also { queue.offer(it) }
+            offerPage(page, 1)?.let { queuedPages += it }
         }
         queuedPages += preloadNextPages(page, preloadSize)
 
@@ -147,11 +147,20 @@ class HttpPageLoader(
             .subList(pageIndex + 1, min(pageIndex + 1 + amount, pages.size))
             .mapNotNull {
                 if (it.status is Page.State.Queue) {
-                    PriorityPage(it, 0).apply { queue.offer(this) }
+                    offerPage(it, 0)
                 } else {
                     null
                 }
             }
+    }
+
+    private fun offerPage(page: ReaderPage, priority: Int): PriorityPage? {
+        val existing = queue.firstOrNull { it.page === page }
+        if (existing != null) {
+            if (existing.priority >= priority) return null
+            queue.remove(existing)
+        }
+        return PriorityPage(page, priority).also { queue.offer(it) }
     }
 
     /**

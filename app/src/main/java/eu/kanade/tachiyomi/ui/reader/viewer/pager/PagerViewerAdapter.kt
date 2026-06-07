@@ -139,6 +139,19 @@ class PagerViewerAdapter(private val viewer: PagerViewer) : ViewPagerAdapter() {
     }
 
     /**
+     * Recycle the page/transition view as soon as the ViewPager destroys it (i.e. it scrolled
+     * outside the offscreen window). ViewPager always creates a fresh view in [createView], so
+     * the destroyed instance is never reused — freeing its decoded bitmap here keeps memory flat
+     * during long reading sessions instead of waiting for GC.
+     */
+    override fun destroyView(container: ViewGroup, position: Int, view: View) {
+        when (view) {
+            is PagerPageHolder -> view.recycle()
+            is PagerTransitionHolder -> view.recycle()
+        }
+    }
+
+    /**
      * Returns the current position of the given [view] on the adapter.
      */
     override fun getItemPosition(view: Any): Int {

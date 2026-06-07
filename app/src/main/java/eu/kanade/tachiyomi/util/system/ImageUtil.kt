@@ -338,6 +338,8 @@ object ImageUtil {
         progressCallback?.invoke(99)
         val output = Buffer()
         result.compress(Bitmap.CompressFormat.JPEG, 100, output.outputStream())
+        result.recycle()
+        imageBitmap.recycle()
         progressCallback?.invoke(100)
         return output
     }
@@ -419,6 +421,7 @@ object ImageUtil {
         progressCallback?.invoke(99)
         val output = Buffer()
         result.compress(Bitmap.CompressFormat.JPEG, 100, output.outputStream())
+        result.recycle()
         progressCallback?.invoke(100)
         return output
     }
@@ -481,6 +484,15 @@ object ImageUtil {
 
         val output = Buffer()
         result.compress(Bitmap.CompressFormat.JPEG, 100, output.outputStream())
+        if (imageBitmap !== iBitmap) {
+            imageBitmap.recycle()
+        }
+        iBitmap.recycle()
+        if (imageBitmap2 !== iBitmap2) {
+            imageBitmap2.recycle()
+        }
+        iBitmap2.recycle()
+        result.recycle()
         progressCallback?.invoke(100)
         return output
     }
@@ -531,6 +543,8 @@ object ImageUtil {
         progressCallback?.invoke(99)
         val output = Buffer()
         result.compress(Bitmap.CompressFormat.JPEG, 100, output.outputStream())
+        result.recycle()
+        imageBitmap.recycle()
         progressCallback?.invoke(100)
         return output
     }

@@ -7,6 +7,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
+import androidx.core.view.children
 import androidx.core.view.isGone
 import androidx.core.view.isVisible
 import androidx.recyclerview.widget.RecyclerView
@@ -185,6 +186,13 @@ class WebtoonViewer(val activity: ReaderActivity, val hasMargins: Boolean = fals
      */
     override fun destroy() {
         super.destroy()
+        recycler.children.forEach { child ->
+            (recycler.getChildViewHolder(child) as? WebtoonBaseHolder)?.recycle()
+        }
+        recycler.adapter = null
+        recycler.layoutManager = null
+        recycler.tapListener = null
+        recycler.longTapListener = null
         scope.cancel()
     }
 

@@ -176,6 +176,16 @@ abstract class PagerViewer(val activity: ReaderActivity) : BaseViewer {
 
     override fun destroy() {
         super.destroy()
+        pager.children.forEach { child ->
+            when (child) {
+                is PagerPageHolder -> child.recycle()
+                is PagerTransitionHolder -> child.recycle()
+            }
+        }
+        pager.removeOnPageChangeListener(pagerListener)
+        pager.adapter = null
+        pager.tapListener = null
+        pager.longTapListener = null
         scope.cancel()
     }
 

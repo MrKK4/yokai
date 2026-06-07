@@ -23,6 +23,7 @@ import eu.kanade.tachiyomi.util.view.setText
 import eu.kanade.tachiyomi.widget.ViewPagerAdapter
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import yokai.i18n.MR
@@ -85,6 +86,12 @@ class PagerTransitionHolder(
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
         stateJob?.cancel()
+    }
+
+    fun recycle() {
+        stateJob?.cancel()
+        scope.cancel()
+        pagesContainer.removeAllViews()
     }
 
     /**
