@@ -163,6 +163,10 @@ open class GlobalSearchPresenter(
         // Update query
         this.query = query
 
+        // Cancel any in-flight search BEFORE resetting state, otherwise stale results
+        // from the previous query can land after the reset and flash over the new ones.
+        fetchSourcesJob?.cancel()
+
         // Create image fetch subscription
         initializeFetchImageSubscription()
 
@@ -172,7 +176,6 @@ open class GlobalSearchPresenter(
         presenterScope.launchUI { view?.setItems(items) }
         val pinnedSourceIds = preferences.pinnedCatalogues().get()
 
-        fetchSourcesJob?.cancel()
         fetchSourcesJob = presenterScope.launch {
             sources.map { source ->
                 launch mainLaunch@{
