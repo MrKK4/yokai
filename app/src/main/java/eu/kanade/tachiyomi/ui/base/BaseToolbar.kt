@@ -31,12 +31,12 @@ open class BaseToolbar @JvmOverloads constructor(context: Context, attrs: Attrib
     open val searchView: androidx.appcompat.widget.SearchView?
         get() = menu.findItem(R.id.action_search)?.actionView as? androidx.appcompat.widget.SearchView
 
-    fun bindUnifiedSearch(router: Router, triggerCondition: () -> Boolean) {
+    fun bindUnifiedSearch(getRouter: () -> Router, triggerCondition: () -> Boolean) {
         val view = searchView ?: return
         view.setOnQueryTextListener(object : androidx.appcompat.widget.SearchView.OnQueryTextListener {
             override fun onQueryTextSubmit(query: String?): Boolean {
                 if (triggerCondition() && !query.isNullOrBlank()) {
-                    router.pushController(UnifiedSearchController(query).withFadeTransaction())
+                    getRouter().pushController(UnifiedSearchController(query).withFadeTransaction())
                     view.clearFocus()
                     return true
                 }
