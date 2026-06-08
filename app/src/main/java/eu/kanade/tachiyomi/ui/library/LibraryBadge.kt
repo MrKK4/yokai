@@ -15,6 +15,7 @@ import yokai.util.lang.getString
 import dev.icerock.moko.resources.compose.stringResource
 import eu.kanade.tachiyomi.databinding.UnreadDownloadBadgeBinding
 import eu.kanade.tachiyomi.util.system.contextCompatColor
+import eu.kanade.tachiyomi.util.system.contextCompatDrawable
 import eu.kanade.tachiyomi.util.system.dpToPx
 import eu.kanade.tachiyomi.util.system.getResourceColor
 import eu.kanade.tachiyomi.util.view.makeShapeCorners
@@ -69,14 +70,28 @@ class LibraryBadge @JvmOverloads constructor(context: Context, attrs: AttributeS
             if (!isVisible) {
                 return@with
             }
-            text = if (downloads == -2) {
+            val isLocal = downloads == -2
+            text = if (isLocal) {
                 context.getString(MR.strings.local)
             } else {
                 downloads.toString()
             }
 
-            setTextColor(context.getResourceColor(R.attr.colorOnTertiary))
-            setBackgroundColor(context.getResourceColor(R.attr.colorTertiary))
+            val fg = context.contextCompatColor(R.color.download_badge_text)
+            setTextColor(fg)
+            setBackgroundColor(context.contextCompatColor(R.color.download_badge))
+            // Prefix downloaded-count with a download glyph so the badge reads as "downloads"
+            // regardless of theme; uses the fixed legible green pill instead of colorTertiary.
+            val icon = if (isLocal) {
+                null
+            } else {
+                context.contextCompatDrawable(R.drawable.ic_download_24dp)?.mutate()?.apply {
+                    setBounds(0, 0, 12.dpToPx, 12.dpToPx)
+                    setTint(fg)
+                }
+            }
+            setCompoundDrawablesRelative(icon, null, null, null)
+            compoundDrawablePadding = if (icon != null) 2.dpToPx else 0
         }
 
         with(binding.langImage) {
@@ -107,7 +122,7 @@ class LibraryBadge @JvmOverloads constructor(context: Context, attrs: AttributeS
                     val startRadius = if (index == 0) radius else 0f
                     val endRadius = if (index == visibleChildren.size - 1) radius else 0f
                     val bgColor = when (view) {
-                        binding.downloadText -> context.getResourceColor(R.attr.colorTertiary)
+                        binding.downloadText -> context.contextCompatColor(R.color.download_badge)
                         binding.unreadText -> unreadBadgeBackground
                         else -> context.getResourceColor(R.attr.background)
                     }

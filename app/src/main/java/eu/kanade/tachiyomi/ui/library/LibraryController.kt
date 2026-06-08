@@ -1953,6 +1953,14 @@ open class LibraryController(
     override fun onCreateOptionsMenu(menu: Menu, inflater: MenuInflater) {
         inflater.inflate(R.menu.library, menu)
 
+        // ic_download_24dp has a hard-coded black fill and the menu's app:tint isn't applied to it,
+        // so it's invisible on dark themes. Tint it to the action-bar colour like the other actions.
+        view?.context?.let { ctx ->
+            menu.findItem(R.id.action_downloaded)?.icon?.mutate()?.setTint(
+                ctx.getResourceColor(R.attr.actionBarTintColor),
+            )
+        }
+
         val searchItem = activityBinding?.searchToolbar?.searchItem
         val searchView = activityBinding?.searchToolbar?.searchView
         activityBinding?.searchToolbar?.setQueryHint(view?.context?.getString(MR.strings.library_search_hint), query.isEmpty())

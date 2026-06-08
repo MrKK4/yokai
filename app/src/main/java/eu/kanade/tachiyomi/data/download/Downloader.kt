@@ -739,7 +739,7 @@ class Downloader(
         private const val DOWNLOADS_QUEUED_WARNING_THRESHOLD = 30
         // Concurrency caps
         private const val MAX_CONCURRENT_SOURCE_DOWNLOADS = 5  // simultaneous sources in the download queue
-        private const val MAX_CONCURRENT_PAGE_DOWNLOADS = 2    // simultaneous page fetches per chapter
+        private const val MAX_CONCURRENT_PAGE_DOWNLOADS = 4    // simultaneous page fetches per chapter (matches Kotatsu)
 
         // Arbitrary minimum required space to start a download: 200 MB
         const val MIN_DISK_SPACE = 200 * 1024 * 1024
