@@ -223,6 +223,15 @@ open class MainActivity : BaseActivity<MainActivityBinding>() {
             if (to is TabHostController) return
             to?.view?.alpha = 1f
             syncActivityViewWithController(to, from, isPush)
+            // Reset shared app-bar chrome to the new top so leftover chrome (big title, Recents tab
+            // strip, options menu) from the screen underneath doesn't bleed through.
+            binding.appBar.setToolbarModeBy(to)
+            when (to) {
+                is RecentsController -> to.applyAppBarTabs()
+                else -> showTabBar(show = false, animate = false)
+            }
+            tabHost?.updateMenuVisibility()
+            invalidateOptionsMenu()
             binding.appBar.isVisible = !hideAppBar
             binding.appBar.alpha = 1f
             if (binding.backShadow.isVisible && !isPush) {
@@ -1291,9 +1300,27 @@ open class MainActivity : BaseActivity<MainActivityBinding>() {
             binding.toolbar.router = childRouter
             binding.searchToolbar.router = childRouter
         }
+        resetAppBarChrome()
+    }
+
+    /**
+     * Fully reset the shared app bar to a controller's state. The child-router host (tab switch via
+     * visibility toggle) and intra-tab push/pop bypass the per-controller appbar setup that normally
+     * runs on Conductor lifecycle, so leftover chrome (big title, Recents tab strip, options menu)
+     * bleeds onto the next screen. Driving it from one place keeps the app bar correct.
+     */
+    fun resetAppBarChrome(controller: Controller? = visibleController) {
+        if (!isBindingInitialized) return
+        binding.appBar.setToolbarModeBy(controller)
+        // The shared mainTabs strip belongs to Recents only.
+        when (controller) {
+            is RecentsController -> controller.applyAppBarTabs()
+            else -> showTabBar(show = false, animate = false)
+        }
         binding.appBar.isVisible = !hideAppBar
-        syncActivityViewWithController(visibleController)
-        (visibleController as? BaseLegacyController<*>)?.setTitle()
+        syncActivityViewWithController(controller)
+        (controller as? BaseLegacyController<*>)?.setTitle()
+        tabHost?.updateMenuVisibility()
         invalidateOptionsMenu()
     }
 

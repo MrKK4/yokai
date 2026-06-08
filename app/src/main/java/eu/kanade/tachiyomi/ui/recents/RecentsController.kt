@@ -1003,32 +1003,7 @@ class RecentsController(bundle: Bundle? = null) :
             if (type == ControllerChangeType.POP_ENTER) presenter.onCreate()
             binding.downloadBottomSheet.dlBottomSheet.dismiss()
             if (isControllerVisible) {
-                activityBinding?.mainTabs?.let { tabs ->
-                    tabs.removeAllTabs()
-                    tabs.clearOnTabSelectedListeners()
-                    val selectedTab = presenter.viewType
-                    RecentsViewType.entries.forEach { viewType ->
-                        tabs.addTab(
-                            tabs.newTab().setText(activity?.getString(viewType.stringRes)).also { tab ->
-                                tab.view.compatToolTipText = null
-                            },
-                            viewType == selectedTab,
-                        )
-                    }
-                    tabs.addOnTabSelectedListener(
-                        object : TabLayout.OnTabSelectedListener {
-                            override fun onTabSelected(tab: TabLayout.Tab?) {
-                                setViewType(RecentsViewType.valueOf(tab?.position))
-                            }
-
-                            override fun onTabUnselected(tab: TabLayout.Tab?) {}
-                            override fun onTabReselected(tab: TabLayout.Tab?) {
-                                binding.recycler.smoothScrollToTop()
-                            }
-                        },
-                    )
-                    (activity as? MainActivity)?.showTabBar(true)
-                }
+                applyAppBarTabs()
             }
         } else {
             val lastController = router.backstack.lastOrNull()?.controller
@@ -1038,6 +1013,42 @@ class RecentsController(bundle: Bundle? = null) :
             snack?.dismiss()
         }
         setBottomPadding()
+    }
+
+    /**
+     * Populate + show the shared app-bar view-type tabs. Called from Conductor's enter change and
+     * by MainActivity on a tab switch (which fires no change event). Gated on Recents actually being
+     * the visible controller — in the child-router host, isControllerVisible is true whenever Recents
+     * is the top of its own child router even while another tab is shown, which would bleed the strip.
+     */
+    fun applyAppBarTabs() {
+        if ((activity as? MainActivity)?.visibleController !== this) return
+        activityBinding?.mainTabs?.let { tabs ->
+            tabs.removeAllTabs()
+            tabs.clearOnTabSelectedListeners()
+            val selectedTab = presenter.viewType
+            RecentsViewType.entries.forEach { viewType ->
+                tabs.addTab(
+                    tabs.newTab().setText(activity?.getString(viewType.stringRes)).also { tab ->
+                        tab.view.compatToolTipText = null
+                    },
+                    viewType == selectedTab,
+                )
+            }
+            tabs.addOnTabSelectedListener(
+                object : TabLayout.OnTabSelectedListener {
+                    override fun onTabSelected(tab: TabLayout.Tab?) {
+                        setViewType(RecentsViewType.valueOf(tab?.position))
+                    }
+
+                    override fun onTabUnselected(tab: TabLayout.Tab?) {}
+                    override fun onTabReselected(tab: TabLayout.Tab?) {
+                        binding.recycler.smoothScrollToTop()
+                    }
+                },
+            )
+            (activity as? MainActivity)?.showTabBar(true)
+        }
     }
 
     override fun onChangeEnded(handler: ControllerChangeHandler, type: ControllerChangeType) {
