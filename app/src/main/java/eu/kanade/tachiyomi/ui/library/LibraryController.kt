@@ -192,6 +192,9 @@ open class LibraryController(
 
     var singleCategory: Boolean = false
         private set
+
+    /** Subclasses (e.g. the flat downloads list) can force the category hopper to stay hidden. */
+    protected open val forceHideHopper: Boolean = false
     var hopperAnimation: ValueAnimator? = null
     var catGestureDetector: GestureDetector? = null
 
@@ -923,7 +926,7 @@ open class LibraryController(
     }
 
     fun hideHopper(hide: Boolean) {
-        binding.categoryHopperFrame.isVisible = !singleCategory && !hide
+        binding.categoryHopperFrame.isVisible = !singleCategory && !hide && !forceHideHopper
         binding.jumperCategoryText.isVisible = !hide
     }
 
@@ -1268,7 +1271,7 @@ open class LibraryController(
             setActiveCategory()
         }
 
-        binding.categoryHopperFrame.isVisible = !singleCategory && !preferences.hideHopper().get()
+        binding.categoryHopperFrame.isVisible = !singleCategory && !preferences.hideHopper().get() && !forceHideHopper
         adapter.isLongPressDragEnabled = canDrag()
         binding.categoryRecycler.setCategories(
             presenter.categories,

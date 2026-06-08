@@ -89,15 +89,14 @@ class FilteredLibraryController(bundle: Bundle? = null) : LibraryController(bund
         this.queryText = queryText
     }
 
+    // The downloads list is a single flat bucket — keep the category hopper / "jump to category"
+    // hidden (LibraryController otherwise re-shows it whenever >1 category exists).
+    override val forceHideHopper: Boolean get() = allDownloads
+
     override fun onViewCreated(view: View) {
         super.onViewCreated(view)
         binding.filterBottomSheet.root.sheetBehavior?.hide()
         binding.swipeRefresh.isEnabled = false
-        // The downloads list is a single flat bucket — the category hopper / "jump to category"
-        // is meaningless here, so hide it.
-        if (allDownloads) {
-            binding.categoryHopperFrame.isVisible = false
-        }
         queryText?.let { search(it) }
     }
 
