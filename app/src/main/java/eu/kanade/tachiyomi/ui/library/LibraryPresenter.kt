@@ -77,6 +77,7 @@ import yokai.domain.chapter.models.ChapterUpdate
 import yokai.domain.history.interactor.GetHistory
 import yokai.domain.library.LibraryPreferences
 import yokai.domain.manga.interactor.GetLibraryManga
+import kotlinx.coroutines.flow.map
 import yokai.domain.manga.interactor.GetManga
 import yokai.domain.manga.interactor.UpdateManga
 import yokai.domain.manga.models.MangaUpdate
@@ -105,6 +106,7 @@ class LibraryPresenter(
     private val setMangaCategories: SetMangaCategories by injectLazy()
     private val updateCategories: UpdateCategories by injectLazy()
     private val getLibraryManga: GetLibraryManga by injectLazy()
+    private val getManga: GetManga by injectLazy()
     private val getChapter: GetChapter by injectLazy()
     private val updateChapter: UpdateChapter by injectLazy()
     private val updateManga: UpdateManga by injectLazy()
@@ -897,10 +899,21 @@ class LibraryPresenter(
      * If category id '-1' is not empty, it means the library not grouped by categories
      */
     private fun getLibraryFlow(): Flow<LibraryData> {
+        // The Downloads page (FilteredLibraryController.allDownloads) lists EVERY manga that has
+        // downloads — including non-library ones — so it sources from all manga filtered by download
+        // count, mapped to LibraryManga (category 0 -> "Default"). The normal library is untouched.
+        val mangaFlow = if ((view as? FilteredLibraryController)?.allDownloads == true) {
+            getManga.subscribeAll().map { allManga ->
+                allManga.filter { downloadManager.getDownloadCount(it) > 0 }
+                    .map { LibraryManga(it) }
+            }
+        } else {
+            // FIXME: Remove retry once a real solution is found
+            getLibraryManga.subscribe().retry(1) { e -> e is NullPointerException }
+        }
         val libraryFlow = combine(
             getCategories.subscribe(),
-            // FIXME: Remove retry once a real solution is found
-            getLibraryManga.subscribe().retry(1) { e -> e is NullPointerException },
+            mangaFlow,
             getPreferencesFlow(),
             forceUpdateEvent.receiveAsFlow(),
         ) { dbCategories, libraryMangaList, prefs, _ ->

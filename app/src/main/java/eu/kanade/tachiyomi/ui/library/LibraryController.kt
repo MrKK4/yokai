@@ -2042,7 +2042,7 @@ open class LibraryController(
                 router.pushController(
                     FilteredLibraryController(
                         view?.context?.getString(MR.strings.downloaded).orEmpty(),
-                        filterDownloaded = FilterBottomSheet.STATE_INCLUDE,
+                        allDownloads = true,
                     ).withFadeTransaction(),
                 )
             }

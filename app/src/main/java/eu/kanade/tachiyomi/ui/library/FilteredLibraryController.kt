@@ -5,6 +5,7 @@ import android.view.Menu
 import android.view.MenuInflater
 import android.view.MenuItem
 import android.view.View
+import androidx.core.view.isVisible
 import androidx.recyclerview.widget.RecyclerView
 import com.bluelinelabs.conductor.ControllerChangeHandler
 import com.bluelinelabs.conductor.ControllerChangeType
@@ -42,6 +43,10 @@ class FilteredLibraryController(bundle: Bundle? = null) : LibraryController(bund
     var filterDownloaded: Int = 0
         private set
 
+    /** When true, this view lists ALL manga that have downloads (library or not), not just favorites. */
+    var allDownloads: Boolean = false
+        private set
+
     private var customTitle: String? = null
 
     override fun getTitle(): String? {
@@ -63,6 +68,7 @@ class FilteredLibraryController(bundle: Bundle? = null) : LibraryController(bund
         filterStartYear: Int = 0,
         filterLength: IntRange? = null,
         filterDownloaded: Int = 0,
+        allDownloads: Boolean = false,
     ) : this() {
         customTitle = title
         this.filterStatus = filterStatus
@@ -79,6 +85,7 @@ class FilteredLibraryController(bundle: Bundle? = null) : LibraryController(bund
         this.filterStartYear = filterStartYear
         this.filterLength = filterLength
         this.filterDownloaded = filterDownloaded
+        this.allDownloads = allDownloads
         this.queryText = queryText
     }
 
@@ -86,6 +93,11 @@ class FilteredLibraryController(bundle: Bundle? = null) : LibraryController(bund
         super.onViewCreated(view)
         binding.filterBottomSheet.root.sheetBehavior?.hide()
         binding.swipeRefresh.isEnabled = false
+        // The downloads list is a single flat bucket — the category hopper / "jump to category"
+        // is meaningless here, so hide it.
+        if (allDownloads) {
+            binding.categoryHopperFrame.isVisible = false
+        }
         queryText?.let { search(it) }
     }
 
